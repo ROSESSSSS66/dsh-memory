@@ -1,0 +1,236 @@
+import type { Db, RawEvent, CandidateInput } from '../types.js';
+import type { PluginConfig } from '../config.js';
+import type { EvidenceLedger } from './types.js';
+import { PROMPT_DISTILL, renderTranscript } from './prompts.js';
+import { parseOutput } from './parse.js';
+import { callOfflineLLM } from './llm.js';
+import { upsertCandidate } from '../core/writer.js';
+import { estimateTokens } from '../core/tokens.js';
+
+export interface DistillBatchOptions {
+  sessionId?: string;
+  signal?: AbortSignal;
+  jobDeadline?: number;
+  fetchFn?: typeof fetch;
+  isIdle?: boolean;
+}
+
+export interface DistillResult {
+  success: boolean;
+  sessionId?: string;
+  consumedCount: number;
+  itemsCreated: number;
+  candidateIds?: string[];
+  error?: string;
+}
+
+/**
+ * 寻找需要蒸馏的会话（未处理事件 >= cfg.distillMinEvents，或空闲状态下任何未处理事件）
+ */
+export function findEligibleDistillSession(
+  db: Db,
+  cfg: PluginConfig,
+  isIdle = false
+): { sessionId: string; workspaceId: string; count: number } | null {
+  const minEvents = isIdle ? 1 : cfg.distillMinEvents || 40;
+
+  const row = db.get<{ session_id: string; workspace_id: string; cnt: number }>(
+    `SELECT session_id, workspace_id, COUNT(*) as cnt
+     FROM raw_events
+     WHERE processed < 2
+     GROUP BY session_id, workspace_id
+     HAVING cnt >= ?
+     ORDER BY MIN(time) ASC
+     LIMIT 1`,
+    [minEvents]
+  );
+
+  if (!row) return null;
+  return {
+    sessionId: row.session_id,
+    workspaceId: row.workspace_id,
+    count: row.cnt,
+  };
+}
+
+/**
+ * 从单个会话抽取并蒸馏连续事件批次
+ * 严格保证：连续有界批不丢早期事件、伪造引用丢弃、事务失败不推进processed/watermark、空items可推进
+ */
+export async function distillSession(
+  db: Db,
+  cfg: PluginConfig,
+  options: DistillBatchOptions = {}
+): Promise<DistillResult> {
+  let targetSessionId = options.sessionId;
+  let workspaceId = '';
+
+  if (!targetSessionId) {
+    const eligible = findEligibleDistillSession(db, cfg, options.isIdle);
+    if (!eligible) {
+      return { success: true, consumedCount: 0, itemsCreated: 0 };
+    }
+    targetSessionId = eligible.sessionId;
+    workspaceId = eligible.workspaceId;
+  } else {
+    const wsRow = db.get<{ workspace_id: string }>(
+      'SELECT workspace_id FROM raw_events WHERE session_id = ? LIMIT 1',
+      [targetSessionId]
+    );
+    workspaceId = wsRow?.workspace_id || '';
+  }
+
+  // 1. 获取该会话从最早开始所有未蒸馏事件 (processed < 2)
+  const allUnprocessed = db.all<RawEvent>(
+    `SELECT * FROM raw_events
+     WHERE session_id = ? AND processed < 2
+     ORDER BY seq ASC`,
+    [targetSessionId]
+  );
+
+  if (allUnprocessed.length === 0) {
+    return { success: true, sessionId: targetSessionId, consumedCount: 0, itemsCreated: 0 };
+  }
+
+  // 2. 连续有界选批，严格计算完整输入预算 <= cfg.distillMaxInputTokens (默认 6000)
+  const maxInputTokens = cfg.distillMaxInputTokens || 6000;
+  const batchEvents: RawEvent[] = [];
+  const testLedger: EvidenceLedger = new Map();
+
+  for (const ev of allUnprocessed) {
+    const candidateBatch = [...batchEvents, ev];
+    const candidateLedger: EvidenceLedger = new Map();
+    const candidateTranscript = renderTranscript(candidateBatch, candidateLedger);
+
+    const userPrompt = PROMPT_DISTILL.buildUser({
+      cwd: workspaceId,
+      sessionId: targetSessionId,
+      rangeLabel: `seq ${candidateBatch[0].seq}..${candidateBatch[candidateBatch.length - 1].seq}`,
+      isoTime: new Date(candidateBatch[0].time).toISOString(),
+      transcript: candidateTranscript,
+    });
+
+    const totalEstimated = estimateTokens(PROMPT_DISTILL.system + userPrompt) + 200;
+    if (batchEvents.length > 0 && totalEstimated > maxInputTokens) {
+      // 超出 6000 token 预算，停止本批，剩余事件留待后续批次
+      break;
+    }
+
+    batchEvents.push(ev);
+    testLedger.clear();
+    for (const [k, v] of candidateLedger.entries()) {
+      testLedger.set(k, v);
+    }
+  }
+
+  if (batchEvents.length === 0) {
+    return { success: true, sessionId: targetSessionId, consumedCount: 0, itemsCreated: 0 };
+  }
+
+  const finalTranscript = renderTranscript(batchEvents, testLedger);
+  const userPrompt = PROMPT_DISTILL.buildUser({
+    cwd: workspaceId,
+    sessionId: targetSessionId,
+    rangeLabel: `seq ${batchEvents[0].seq}..${batchEvents[batchEvents.length - 1].seq}`,
+    isoTime: new Date(batchEvents[0].time).toISOString(),
+    transcript: finalTranscript,
+  });
+
+  // 3. 调用离线 LLM
+  const llmRes = await callOfflineLLM(
+    db,
+    {
+      jobKind: 'distill',
+      promptVersion: PROMPT_DISTILL.version,
+      systemPrompt: PROMPT_DISTILL.system,
+      userPrompt,
+      maxOutputTokens: PROMPT_DISTILL.maxOutputTokens,
+      cwd: workspaceId,
+      workspaceId,
+      signal: options.signal,
+      jobDeadline: options.jobDeadline,
+      fetchFn: options.fetchFn,
+    },
+    cfg
+  );
+
+  if (!llmRes.ok) {
+    return {
+      success: false,
+      sessionId: targetSessionId,
+      consumedCount: 0,
+      itemsCreated: 0,
+      error: llmRes.error,
+    };
+  }
+
+  // 4. 解析输出
+  const parseRes = parseOutput(llmRes.content, {
+    taskKind: 'distill',
+    evidenceLedger: testLedger,
+    workspaceId,
+    sessionId: targetSessionId,
+  });
+
+  if (!parseRes.success) {
+    return {
+      success: false,
+      sessionId: targetSessionId,
+      consumedCount: 0,
+      itemsCreated: 0,
+      error: parseRes.error,
+    };
+  }
+
+  // 5. 同一事务提交：写入候选记忆、推进 processed=2、推进 watermark
+  const candidateIds: string[] = [];
+  try {
+    db.transaction(() => {
+      // 写入记忆
+      for (const item of parseRes.items) {
+        const upsertRes = upsertCandidate(db, item);
+        if ('id' in upsertRes) {
+          candidateIds.push(upsertRes.id);
+        }
+      }
+
+      // 推进已消费事件的 processed 状态为 2
+      const minSeq = batchEvents[0].seq;
+      const maxSeq = batchEvents[batchEvents.length - 1].seq;
+      db.run(
+        `UPDATE raw_events
+         SET processed = 2
+         WHERE session_id = ? AND seq >= ? AND seq <= ?`,
+        [targetSessionId, minSeq, maxSeq]
+      );
+
+      // 更新 watermark 至 meta 表
+      const watermarkData = JSON.stringify({
+        lastSeq: maxSeq,
+        updatedAt: Date.now(),
+      });
+      db.run(
+        `INSERT INTO meta (key, value)
+         VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        [`distill:${targetSessionId}`, watermarkData]
+      );
+    });
+  } catch (err: any) {
+    return {
+      success: false,
+      sessionId: targetSessionId,
+      consumedCount: 0,
+      itemsCreated: 0,
+      error: `transaction_failed: ${err?.message}`,
+    };
+  }
+
+  return {
+    success: true,
+    sessionId: targetSessionId,
+    consumedCount: batchEvents.length,
+    itemsCreated: candidateIds.length,
+    candidateIds,
+  };
+}
