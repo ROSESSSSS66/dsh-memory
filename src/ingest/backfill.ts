@@ -127,11 +127,103 @@ export function scanZstdFrames(buffer: Buffer): ScanResult {
   return { frames };
 }
 
+const SUBAGENT_PROMPT_RE =
+  /(?:Your parent agent id is|\bSubagent\b|<system-reminder>\s*You are teammate|你是智能体团队成员|你是团队中的|你现在是《|你是《|你是一名资深|你是三人称微缩场景项目中的|你是服务器只读基线调查员)/i;
+
+function readProjCacheJsonFile(
+  filePath: string
+): { header: any; rawLines: string[] } | null {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const data = JSON.parse(raw);
+    const rec = data?.record;
+    const identity = rec?.identity;
+    if (!identity || identity.formatVersion !== 4 || typeof identity.cwd !== 'string' || !identity.cwd) {
+      return null;
+    }
+
+    const firstText = rec?.rows?.titleInput?.val?.first?.text || '';
+    if (firstText && SUBAGENT_PROMPT_RE.test(firstText)) {
+      return null;
+    }
+
+    const turns = rec?.rows?.turnOutline?.val?.turns;
+    if (!Array.isArray(turns) || turns.length === 0) {
+      return null;
+    }
+
+    const firstPrompt = typeof turns[0]?.prompt === 'string' ? turns[0].prompt : '';
+    if (firstPrompt && SUBAGENT_PROMPT_RE.test(firstPrompt)) {
+      return null;
+    }
+
+    const sessionId =
+      rec.sessionId ||
+      path.basename(filePath, '.json').replace(/^session_/, 'session-');
+    const baseTime = typeof identity.createdAt === 'number' ? identity.createdAt : Date.now();
+
+    const rawLines: string[] = [];
+    for (let i = 0; i < turns.length; i++) {
+      const t = turns[i];
+      if (!t || typeof t !== 'object') continue;
+      const turnNum = typeof t.turn === 'number' ? t.turn : i + 1;
+      const seqBase = typeof t.seq === 'number' ? t.seq : (i + 1) * 10;
+      const promptText = typeof t.prompt === 'string' ? t.prompt.trim() : '';
+      const respText = typeof t.response === 'string' ? t.response.trim() : '';
+
+      if (promptText && !SUBAGENT_PROMPT_RE.test(promptText)) {
+        rawLines.push(
+          JSON.stringify({
+            seq: seqBase,
+            time: baseTime + i * 2000,
+            type: 'user/message',
+            data: {
+              turn: turnNum,
+              source: { kind: 'user' },
+              text: promptText,
+            },
+          })
+        );
+      }
+      if (respText) {
+        rawLines.push(
+          JSON.stringify({
+            seq: seqBase + 1,
+            time: baseTime + i * 2000 + 1000,
+            type: 'assistant/message',
+            data: {
+              turn: turnNum,
+              text: respText,
+            },
+          })
+        );
+      }
+    }
+
+    if (rawLines.length === 0) return null;
+
+    return {
+      header: {
+        version: 4,
+        id: sessionId,
+        cwd: identity.cwd,
+        createdAt: baseTime,
+      },
+      rawLines,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 解压与读取 session 文件 (.jsonl 或 .jsonl.zstd)
+ * 解压与读取 session 文件 (.jsonl / .jsonl.zstd / .json)
  */
 export function readSessionFile(filePath: string): { header: any; rawLines: string[] } | null {
   if (!fs.existsSync(filePath)) return null;
+  if (filePath.endsWith('.json')) {
+    return readProjCacheJsonFile(filePath);
+  }
 
   let text = '';
   const isZstd = filePath.endsWith('.zstd');
@@ -252,10 +344,24 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
   let targetFiles: string[] = [];
   if (options.filePaths && options.filePaths.length > 0) {
     targetFiles = options.filePaths;
+  } else if (options.sessionsDir) {
+    if (fs.existsSync(options.sessionsDir)) {
+      targetFiles = findSessionFiles(options.sessionsDir, true);
+    }
   } else {
-    const root = options.sessionsDir || path.join(os.homedir(), '.dsh', 'sessions');
-    if (fs.existsSync(root)) {
-      targetFiles = findSessionFiles(root);
+    const dshHome = path.join(os.homedir(), '.dsh');
+    const sessionsRoot = path.join(dshHome, 'sessions');
+    if (fs.existsSync(sessionsRoot)) {
+      targetFiles.push(...findSessionFiles(sessionsRoot, false));
+    }
+    const projCacheDirs = [
+      path.join(dshHome, 'storages', 'session_projcache', 'sessions'),
+      path.join(dshHome, 'storages', 'session_projcache_archive_manager_v2', 'sessions'),
+    ];
+    for (const dir of projCacheDirs) {
+      if (fs.existsSync(dir)) {
+        targetFiles.push(...findSessionFiles(dir, true));
+      }
     }
   }
 
@@ -467,8 +573,12 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
           ]
         );
 
-        if (Number(res.changes) > 0) {
+        const isInserted = Number(res.changes) > 0;
+        if (isInserted) {
           stats.newEventsAdded++;
+        }
+
+        if (isInserted || (rawEvent.role === 'user' && rawEvent.origin_kind === 'user')) {
           try {
             const initialMemCount = db.get<{ cnt: number }>('SELECT COUNT(*) as cnt FROM memories')?.cnt || 0;
             runRules(db, rawEvent, cfg, time);
@@ -490,16 +600,20 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
 /**
  * 递归查找目录下的 session 文件
  */
-function findSessionFiles(dir: string): string[] {
+function findSessionFiles(dir: string, includeJson = false): string[] {
   const result: string[] = [];
   try {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const ent of entries) {
       const fullPath = path.join(dir, ent.name);
       if (ent.isDirectory()) {
-        result.push(...findSessionFiles(fullPath));
+        result.push(...findSessionFiles(fullPath, includeJson));
       } else if (ent.isFile()) {
-        if (ent.name.includes('.jsonl') || ent.name.endsWith('.zstd')) {
+        if (
+          ent.name.includes('.jsonl') ||
+          ent.name.endsWith('.zstd') ||
+          (includeJson && ent.name.endsWith('.json'))
+        ) {
           result.push(fullPath);
         }
       }

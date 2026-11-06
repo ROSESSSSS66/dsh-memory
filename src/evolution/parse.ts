@@ -246,7 +246,7 @@ function validateSingleItem(item: any, index: number, options: ParseOptions): st
     }
 
     const trimmedQuote = ev.quote.trim();
-    if (trimmedQuote.length < 10 || trimmedQuote.length > 200) {
+    if (trimmedQuote.length < 4 || trimmedQuote.length > 200) {
       return `evidence[${j}]_quote_length_out_of_range: ${trimmedQuote.length}`;
     }
 

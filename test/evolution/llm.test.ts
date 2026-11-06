@@ -436,4 +436,60 @@ describe('Evolution LLM Client (M3-T1)', () => {
     expect(capturedBody.input).toBeDefined();
     expect(capturedBody.max_output_tokens).toBe(1000);
   });
+
+  it('ignores reasoning blocks in responses output array and extracts only message output_text', async () => {
+    const mockFetch: typeof fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          status: 'completed',
+          output: [
+            {
+              type: 'reasoning',
+              content: [{ type: 'reasoning_text', text: 'Internal chain of thought...' }],
+            },
+            {
+              type: 'message',
+              content: [{ type: 'output_text', text: '{"items":[]}' }],
+            },
+          ],
+          usage: { input_tokens: 50, output_tokens: 80 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const respCfg: PluginConfig = {
+      ...baseCfg,
+      offlineLLM: {
+        useDshLlm: false,
+        baseURL: 'https://www.dorodoro.xyz/v1',
+        model: 'deepseek-v4.1-flash',
+        apiKey: 'sk-doro-key',
+        apiKeyEnv: '',
+        protocol: 'responses',
+      },
+      privacy: {
+        offlineConsent: true,
+        allowedOfflineEndpoints: ['https://www.dorodoro.xyz'],
+      },
+    };
+
+    const res = await callOfflineLLM(
+      db,
+      {
+        jobKind: 'distill',
+        promptVersion: 'distill-v2',
+        systemPrompt: 'Sys',
+        userPrompt: 'Usr',
+        maxOutputTokens: 1000,
+        cwd: '/ws/demo',
+        workspaceId: 'ws1',
+        fetchFn: mockFetch,
+      },
+      respCfg
+    );
+
+    expect(res.ok).toBe(true);
+    expect((res as any).content).toBe('{"items":[]}');
+  });
 });

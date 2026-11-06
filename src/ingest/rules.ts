@@ -5,7 +5,7 @@ import { redactSecrets } from '../core/privacy.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
 export const PREFERENCE_INDICATOR_REGEX =
-  /(?:以后|今后|总是|一律|永远|不要再|别再|每次都|from now on|always|never)/i;
+  /(?:以后|今后|总是|一律|永远|不要再|别再|每次都|统一使用|必须使用|严禁|切勿|绝不|不能水文|不要产生新|不需要任何测试|上限上调到|from now on|always|never|must always|do not ever)/i;
 
 export const CORRECTION_REGEX =
   /(?:不对|错了|不是这样|搞错|不行|没用|还是不行|重来|wrong|incorrect|doesn't work|not what)/i;
@@ -50,6 +50,21 @@ export function resolveFixedSlot(text: string): SlotResolution {
       scope: 'workspace',
       type: 'preference',
     };
+  }
+
+  // 4. 工程构建与打包约束
+  if (/(?:打包成\s*exe|不要产生新的文件)/i.test(s)) {
+    return { slotKey: 'project.pref.packaging', scope: 'workspace', type: 'preference' };
+  }
+
+  // 5. 站点/网关请求上限配置
+  if (/(?:请求上限|单请求上限).*?(?:上调到|设为|改为)/i.test(s)) {
+    return { slotKey: 'project.config.request_limit', scope: 'workspace', type: 'semantic' };
+  }
+
+  // 6. 创作与细纲防注水质量偏好
+  if (/(?:不能水文|绝不水文)/i.test(s)) {
+    return { slotKey: 'project.pref.writing_quality', scope: 'workspace', type: 'preference' };
   }
 
   return { slotKey: null };

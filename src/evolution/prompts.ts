@@ -42,7 +42,8 @@ What does NOT count:
 - Transient states (a file's current contents, a command's raw output).
 - Restating the user's question back at them.
 
-Prefer fewer items over filling a quota. Return at most 5 items. If the batch was routine or lacks sufficient evidence, return an empty items list.`,
+Prefer fewer items over filling a quota. Return at most 5 items. If the batch was routine or lacks sufficient evidence, return an empty items list.
+Schema: {"items":[{"type":"semantic|preference|procedural|episodic|failure|belief|goal","text":"8..800 chars","slot_key":"optional.lowercase.key","confidence":0.85,"scope":"workspace|session","evidence":[{"seq":1,"quote":"exact 10..200 char substring from [U#1]/[A#1]/[T#1]"}]}]}`,
   buildUser: (vars: DistillVars) => `=== SESSION CONTEXT ===
 workspace: ${vars.cwd}
 session: ${vars.sessionId}

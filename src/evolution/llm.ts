@@ -114,21 +114,28 @@ export function extractResponseContent(data: any): string | null {
   if (!data) return null;
 
   // 1. OpenAI chat/completions: choices[0].message.content
-  if (typeof data?.choices?.[0]?.message?.content === 'string') {
+  if (
+    typeof data?.choices?.[0]?.message?.content === 'string' &&
+    data.choices[0].message.content.trim().length > 0
+  ) {
     return data.choices[0].message.content;
   }
 
   // 2. OpenAI responses: output_text or output array
-  if (typeof data?.output_text === 'string') {
+  if (typeof data?.output_text === 'string' && data.output_text.trim().length > 0) {
     return data.output_text;
   }
   if (Array.isArray(data?.output)) {
     let text = '';
     for (const item of data.output) {
-      if (typeof item === 'string') text += item;
-      else if (item?.content) {
+      if (typeof item === 'string') {
+        text += item;
+      } else if (item?.type !== 'reasoning' && item?.content) {
         if (Array.isArray(item.content)) {
-          text += item.content.map((c: any) => c?.text || '').join('');
+          text += item.content
+            .filter((c: any) => c?.type !== 'reasoning_text' && c?.type !== 'thinking')
+            .map((c: any) => c?.text || '')
+            .join('');
         } else if (typeof item.content === 'string') {
           text += item.content;
         }
@@ -242,8 +249,8 @@ export async function callOfflineLLM(
   }
 
   // 构造标准端点 URL 与协议负载
-  const { endpointUrl, protocol } = resolveEndpointAndProtocol(baseURL, cfg.offlineLLM.protocol);
-  const { requestBody, headers: protocolHeaders } = buildProtocolPayload(
+  let { endpointUrl, protocol } = resolveEndpointAndProtocol(baseURL, cfg.offlineLLM.protocol);
+  let { requestBody, headers: protocolHeaders } = buildProtocolPayload(
     protocol,
     model,
     sanitizedSystem,
@@ -345,13 +352,27 @@ export async function callOfflineLLM(
       // 请求成功，解析返回内容
       const data: any = await res.json();
       const rawContent = extractResponseContent(data);
-      if (typeof rawContent !== 'string') {
+      if (typeof rawContent !== 'string' || !rawContent.trim()) {
         settle(db, {
           ledgerId,
           status: 'unknown',
           ok: 0,
           note: 'missing_choice_content',
         });
+        if (currentAttempt < maxAttempts) {
+          const expandedMaxTokens = Math.max(params.maxOutputTokens * 4, 8192);
+          const nextPayload = buildProtocolPayload(
+            protocol,
+            model,
+            sanitizedSystem,
+            sanitizedUser,
+            expandedMaxTokens
+          );
+          requestBody = nextPayload.requestBody;
+          protocolHeaders = nextPayload.headers;
+          lastError = 'missing_choice_content';
+          continue;
+        }
         return { ok: false, error: 'missing_choice_content', ledgerId };
       }
 

@@ -243,8 +243,13 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
       const res = await performAction('distill');
       const r = res?.result;
       if (r?.success) {
-        const msg = `会话蒸馏完成：处理 ${r.eventsProcessed} 条事件，新增 ${r.candidatesInserted} 条记忆！`;
-        setTaskFeedback({ tone: 'ok', text: msg });
+        const consumed = r.consumedCount ?? r.eventsProcessed ?? 0;
+        const created = r.itemsCreated ?? r.candidatesInserted ?? 0;
+        const msg =
+          consumed > 0
+            ? `会话蒸馏完成：处理 ${consumed} 条事件，新增 ${created} 条候选记忆！`
+            : '当前所有历史会话事件均已完成蒸馏处理';
+        setTaskFeedback({ tone: consumed > 0 ? 'ok' : 'warn', text: msg });
         onToast(msg);
       } else {
         const msg = `会话蒸馏提示：${r?.error || '暂无满足蒸馏条件的未处理事件或离线权限未开启'}`;
@@ -267,17 +272,19 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
     try {
       const res = await performAction('backfill', { dryRun });
       setBackfillResult({ dryRun, stats: res.stats });
-      onToast(
-        dryRun
-          ? `回填预演完成：发现 ${res.stats.writableEvents} 条可写事件`
-          : `历史回填完成：新增 ${res.stats.memoriesCreated} 条规则记忆！`
-      );
+      const msg = dryRun
+        ? `回填预演完成：扫描 ${res.stats.processedFiles} 个会话，发现 ${res.stats.writableEvents} 条可写事件`
+        : `历史回填完成：扫描 ${res.stats.processedFiles} 个会话，入库 ${res.stats.newEventsAdded} 条事件，新增 ${res.stats.memoriesCreated} 条规则记忆！可继续点击「立即蒸馏会话」用 LLM 提炼深层记忆`;
+      setTaskFeedback({ tone: 'ok', text: msg });
+      onToast(msg);
       if (!dryRun) {
         await loadEvolution();
         onUpdated();
       }
     } catch (err: any) {
-      onToast(err?.message || '历史会话回填失败');
+      const msg = err?.message || '历史会话回填失败';
+      setTaskFeedback({ tone: 'err', text: msg });
+      onToast(msg);
     } finally {
       setIsBackfilling(false);
     }

@@ -926,7 +926,11 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             const resDistill = await distillSession(db, cfg, { isIdle: true });
             sendJson(res, 200, {
               ok: true,
-              result: resDistill,
+              result: {
+                ...resDistill,
+                eventsProcessed: resDistill.consumedCount,
+                candidatesInserted: resDistill.itemsCreated,
+              },
             });
             return;
           }
