@@ -7,7 +7,6 @@ import { IngestQueue } from '../ingest/queue.js';
 import { registerSessionListener } from './session-listener.js';
 import { PromptSectionManager } from './prompt-section.js';
 import { registerPreStep } from './pre-step.js';
-import { registerTurnStopping } from './turn-stopping.js';
 import { MemoryTools } from './tools.js';
 import { MemoryCommands } from './commands.js';
 import { workspaceId } from '../core/scope.js';
@@ -402,7 +401,14 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     }
 
     // 6.2 注册 turn-stopping 延迟调度监听器
-    const unlistenTurnStopping = registerTurnStopping(ctx, scheduler);
+    const unlistenTurnStopping =
+      typeof ctx.on === 'function'
+        ? ctx.on('agent/turn-stopping', () => {
+            try {
+              scheduler.scheduleTurnStopping();
+            } catch {}
+          })
+        : () => {};
 
     // 6.3 注册 Web 端点（供 DSH 前端侧栏面板访问）
     const unlistenWeb = registerWebRoutes(ctx, currentDb, cfg);

@@ -101,7 +101,7 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
 
   for (let i = 0; i < 27; i++) {
     const topic = factualTopics[i % factualTopics.length];
-    const query = topic.queries[i % topic.queries.length];
+    const query = topic.queries[Math.floor(i / factualTopics.length) % topic.queries.length];
     const isCritical = i < 5; // 前 5 条为 critical
 
     // 随机挑选 20 条干扰事实

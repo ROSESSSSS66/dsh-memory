@@ -150,6 +150,53 @@ export function tokenSet(s: string): Set<string> {
   return new Set(segment(s));
 }
 
+/**
+ * 轻量级英文词形还原 (Morphological Stemmer)
+ * 将复数/常见词尾还原为词根（如 commits -> commit, dependencies -> dependency, configs -> config）
+ */
+export function stemToken(token: string): string {
+  const t = token.toLowerCase().trim();
+  if (t.length < 4 || !/^[a-z]+$/.test(t)) return t;
+  if (t.endsWith('ies') && t.length >= 5) {
+    return `${t.slice(0, -3)}y`;
+  }
+  if (t.endsWith('es') && t.length >= 5 && /(?:s|x|z|ch|sh)es$/.test(t)) {
+    return t.slice(0, -2);
+  }
+  if (t.endsWith('s') && !/(?:ss|us|is|os)$/.test(t)) {
+    return t.slice(0, -1);
+  }
+  return t;
+}
+
+/**
+ * 词元形态与复合词感知匹配 (Morphology & Compound Subword Match)
+ * 支持精确命中、英文单复数词干对齐（如 commit <-> commits）及复合开发标识符前后缀对齐（如 commit <-> commitlint）
+ */
+export function isTokenMatch(queryToken: string, docTokens: Set<string>): boolean {
+  const qt = queryToken.toLowerCase().trim();
+  if (!qt) return false;
+  if (docTokens.has(qt)) return true;
+
+  if (qt.length >= 3 && /^[a-z0-9]+$/.test(qt)) {
+    const qStem = stemToken(qt);
+    if (docTokens.has(qStem)) return true;
+
+    for (const dt of docTokens) {
+      if (!/^[a-z0-9]+$/.test(dt)) continue;
+      if (stemToken(dt) === qStem) return true;
+      if (qt.length >= 4 && dt.length >= qt.length + 2 && (dt.startsWith(qt) || dt.endsWith(qt))) {
+        return true;
+      }
+      if (dt.length >= 4 && qt.length >= dt.length + 2 && (qt.startsWith(dt) || qt.endsWith(dt))) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 export function jaccard(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 && b.size === 0) return 0;
   let intersection = 0;
@@ -192,9 +239,9 @@ export function extractEntities(s: string, maxEntities: number = DEFAULTS.maxEnt
   const codeRegex = /`([^`\n]{2,60})`/g;
   while ((m = codeRegex.exec(s)) !== null) rawMatches.push(m[1]);
 
-  // 4. 错误码/常量：/\b[A-Z][A-Z0-9]*_[A-Z0-9_]{2,}\b/g 以及 /\b(?:E|ERR|TS)\d{3,5}\b/g
+  // 4. 错误码/常量：/\b[A-Z][A-Z0-9]*_[A-Z0-9_]{2,}\b/g 以及 /\b(?:(?:E|ERR|TS)\d{3,5}|E[A-Z]{5,15})\b/g
   const constRegex1 = /\b[A-Z][A-Z0-9]*_[A-Z0-9_]{2,}\b/g;
-  const constRegex2 = /\b(?:E|ERR|TS)\d{3,5}\b/g;
+  const constRegex2 = /\b(?:(?:E|ERR|TS)\d{3,5}|E[A-Z]{5,15})\b/g;
   while ((m = constRegex1.exec(s)) !== null) rawMatches.push(m[0]);
   while ((m = constRegex2.exec(s)) !== null) rawMatches.push(m[0]);
 

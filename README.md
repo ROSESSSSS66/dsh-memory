@@ -1,20 +1,20 @@
 # 🧠 DSH Self-Evolving Memory System (`dsh-memory`)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.4.0_SYNAPSE_%2B_A--Mem_%2B_AutoBootstrap-indigo?style=flat-square" alt="v0.4.0" />
+  <img src="https://img.shields.io/badge/Version-v0.5.0_HippoRAG_2_%2B_SYNAPSE_%2B_LightMem_MMR-indigo?style=flat-square" alt="v0.5.0" />
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
   <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
-  <img src="https://img.shields.io/badge/Tests-291_Passed_(49_Suites)-success?style=flat-square" alt="Tests" />
-  <img src="https://img.shields.io/badge/Recall%40Inject-97.2%25-blueviolet?style=flat-square" alt="Recall Rate" />
+  <img src="https://img.shields.io/badge/Tests-295_Passed_(49_Suites)-success?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Recall%40Inject-100.0%25_(120%2F120)-blueviolet?style=flat-square" alt="Recall Rate" />
   <img src="https://img.shields.io/badge/Online_Latency-p95_0.8ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />
 </p>
 
 <p align="center">
   <b>专为 DeepSeek Desktop (DSH) 打造的亚毫秒级、自进化、可解释长期记忆引擎</b><br>
-  融合 <b>SYNAPSE 扇出衰减多跳激活扩散</b> · <b>A-Mem (NeurIPS 2025) 卡片盒双链织网</b> · <b>ACT-R 频次强化记忆半衰期</b> · <b>安装即自动初始化记忆 (`postinstall` + 冷启动引导)</b> · <b>Letta 常驻核心块</b> · <b>Mem0 冲突调和</b> · <b>EvolveMem 策略进化</b>
+  融合 <b>HippoRAG 2 多源汇聚 PPR 激活</b> · <b>SYNAPSE 扇出衰减多跳扩散</b> · <b>LightMem 次模 MMR 边际去重装箱</b> · <b>A-Mem (NeurIPS 2025) 卡片盒双链织网</b> · <b>ACT-R 频次强化半衰期</b> · <b>安装即自动初始化记忆</b> · <b>Letta 常驻核心块</b> · <b>Zep/Mem0 混合冲突调和</b>
 </p>
 
 <p align="center">
@@ -62,14 +62,16 @@
 - 🎯 **规模不变性动态装箱（Token Governor）**：采用“稳定层（System Prompt 常驻偏好 + Letta Core Memory）+ 动态层（`pre-step` 价值密度背包算法）”双层注入。实测记忆库从 1,000 条扩容至 10,000 条时，单轮注入 Token 均值稳定在 **157 tokens**，体积膨胀率仅 **0.28%**。
 - 🧬 **可验证、可回滚的闭环自进化（ACT-R + EvolveMem + RIME）**：融合 **ACT-R / Ebbinghaus 间隔重复基础激活模型（`computeActRBaseActivation`）**，高频命中与正向确认的记忆自动拉长有效半衰期；后台慢环在严格配额风控下自动完成**会话经验蒸馏**、**失败归因反思**、**负反馈触发式冲突修复（RIME）**，并通过 **EvolveMem 进化实验舱**自动搜寻更优检索权重。
 
-### 📚 v0.4.0 核心算法学术论文底座 (2025–2026 前沿研究落地)
+### 📚 v0.5.0 核心算法学术论文底座 (2025–2026 前沿研究落地)
 
-| 论文 / 范式来源 | 核心机制 | 在 `dsh-memory` v0.4.0 中的工程落地 |
+| 论文 / 范式来源 | 核心机制 | 在 `dsh-memory` v0.5.0 中的工程落地 |
 |---|---|---|
-| **SYNAPSE** (*Empowering LLM Agents with Episodic-Semantic Memory via Spreading Activation*, Jan 2026, arXiv:2601.02744) | **ACT-R 扇出注意力稀释 (Fan Effect)** 与抑制性扩散 | 实现 `computeFanAttenuation(degree)`：当高连接度 Hub 种子节点度数越高时，单条边分配到的激活权重按 $1 / (1 + 0.25 \ln d)$ 自动衰减，消除泛化节点噪声；结合 `computeActRBaseActivation` 频次强化半衰期 |
+| **HippoRAG 2** (*From RAG to Memory: Non-Parametric Continual Learning*, ICML 2025, arXiv:2502.14802) | **多源汇聚 PPR 激活累加 & 多跳阻尼传播** | `expandGraphNeighbors` 与 `fuseCandidates` 支持 1~2 跳阻尼传播（$\gamma = 0.45$），当多个硬门槛种子节点汇聚激活同一关联邻居时，累加 RRF 能量并授予多源协同增益（`convergentSeeds`） |
+| **SYNAPSE** (*Empowering LLM Agents with Episodic-Semantic Memory via Spreading Activation*, Jan 2026, arXiv:2601.02744) | **ACT-R 扇出注意力稀释 (Fan Effect)** 与间隔重复 | 实现 `computeFanAttenuation(degree)`：高连接度 Hub 种子节点度数越高，单条边激活权重按 $1 / (1 + 0.25 \ln d)$ 自动衰减；结合 `computeActRBaseActivation` 频次强化半衰期 |
+| **LightMem** (*Submodular Context Packing & Memory Compression*, 2025) | **次模 MMR 边际信息密度背包 (`MMR-VPT`)** | `governor.ts` 实现 `computeMmrMarginalScore`：在锚定最高分记忆后，对与已选集合词法重叠 $\ge 0.58$ 的近似复述候选施加次模边际折损，最大化有限 Token 预算下的正交信息熵 |
 | **A-Mem** (*Agentic Memory for LLM Agents*, NeurIPS 2025, arXiv:2502.12110) | **Zettelkasten 卡片盒动态双链织网** | 写入新记忆 (`upsertCandidate`) 与健康自愈 (`weaveZettelkastenLinks`) 时，基于 `0.45 * 128D余弦 + 0.35 * 词法Jaccard + 0.20 * 实体共现` 自动为孤立记忆建立 Top-3 双向 `related` 关联边 |
-| **HippoRAG 2** (*From RAG to Memory: Non-Parametric Continual Learning*, Feb 2025, arXiv:2502.14802) | **多跳阻尼图谱激活传播** | `expandGraphNeighbors` 支持从高优种子沿 `related / derived_from` 边执行 1-Hop 直接扩散与 2-Hop 阻尼扩散（$\gamma = 0.45$），实现跨跳数的上下文关联召回 |
-| **MemRL / AgeMem / EvolveMem** (2025–2026) | **效用价值学习与策略在线演化** | 在线追踪引用反馈 (`outcome.ts`) 驱动 EMA Utility 更新、RIME 负反馈自动修复与检索策略实验室自动寻优 |
+| **Zep / Graphiti & Mem0** (arXiv:2501.13956, 2025) | **双时态规范槽位推演与向量-词法混合调和** | `reconciler.ts` 自动结合 `resolveFixedSlot` 规范槽位推演与 `0.55 * Jaccard + 0.45 * 128D Cosine` 混合相似度，精准决断 `ADD / UPDATE / DELETE / NOOP` |
+| **MemRL / AgeMem / EvolveMem** (2025–2026) | **效用价值学习与高饱和帕累托策略进化** | 在线追踪引用反馈 (`outcome.ts`) 动态绑定当前活跃策略版本，并在策略实验室 (`lab.ts`) 支持高召回饱和区（$\ge 98.5\%$）下的 Token 降本帕累托晋升 |
 
 ---
 
@@ -77,7 +79,7 @@
 
 `dsh-memory` 并非单一的向量检索插件，而是将业界五大前沿 Agent 记忆范式深度融合于纯本地双环引擎之中：
 
-| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.4.0)** |
+| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.5.0)** |
 |---|---|---|---|---|
 | **安装后冷启动** | ❌ 空白库，需手动逐条喂入 | ❌ 需手动编写多份 Markdown | ❌ 空白库，需业务侧自行灌库 | **✅ `npm install` 后 `postinstall` 与首次启动全自动扫描工程并初始化记忆** |
 | **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **`0.6 ~ 1.4ms` (p95，纯本地七路 SYNAPSE + A-Mem + 向量混合召回)** |
@@ -366,14 +368,14 @@ npm run eval
 
 ### 评测门禁达成实测对照表
 
-| 验收核心指标 | 官方规约门槛 | `v0.3.0` 实测表现 | 门禁结论 |
+| 验收核心指标 | 官方规约门槛 | `v0.5.0` 实测表现 | 门禁结论 |
 |---|---:|---:|:---:|
-| **Recall @ Inject (有效注入召回率)** | $\ge 70\%$ | **97.2%** | ✅ **PASS** |
+| **Recall @ Inject (有效注入召回率)** | $\ge 70\%$ | **100.0% (120 / 120)** | ✅ **PASS** |
 | **Exclude Violations (跨区/废弃违规注入)** | $= 0$ (绝对零容忍) | **0** | ✅ **PASS** |
 | **Empty Precision (无关提问精准空查率)** | $\ge 80\%$ | **100.0%** | ✅ **PASS** |
 | **Critical 关键红线用例通过率** | $100\%$ (20/20) | **20 / 20 (100%)** | ✅ **PASS** |
-| **在线检索响应延迟 (p95)** | $\le 50\text{ ms}$ | **0.6 ~ 1.4 ms** (1万条规模: `p50=22.5ms, p95=33.9ms`) | ✅ **PASS** |
-| **单轮动态 Token 消耗均值** | $\le 1600\text{ tokens}$ | **157 tokens** | ✅ **PASS** |
+| **在线检索响应延迟 (p95)** | $\le 50\text{ ms}$ | **0.6 ~ 1.1 ms** (1万条规模: `p50=20.8ms, p95=29.8ms`) | ✅ **PASS** |
+| **单轮动态 Token 消耗均值** | $\le 1600\text{ tokens}$ | **171 tokens** | ✅ **PASS** |
 | **1k vs 10k 规模 Token 膨胀率** | $< 10\%$ 波动 | **0.28%** (规模不变性达成) | ✅ **PASS** |
 
 ---

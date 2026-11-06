@@ -288,15 +288,15 @@ export function recallVector(
           scope.params
         );
 
-    // 若尚未回填 BLOB 嵌入且当前作用域记忆规模适中 (<= 80 条)，自动启用内存 LRU 实时向量计算
-    if (rows.length === 0 && (!cache || cache.size === 0)) {
+    // 若尚未回填全部 BLOB 嵌入且当前已嵌入数较少 (< 80 条)，自动合并近期未回填的记忆至内存 LRU 实时向量计算
+    if (rows.length < 80 && (!cache || cache.size === 0)) {
       const cntRow = db.get<{ c: number }>(
         `SELECT COUNT(*) as c FROM memories m WHERE m.status IN ('active', 'frozen') AND m.type != 'meta' AND (${scope.sql})`,
         scope.params
       );
       const totalInScope = Number(cntRow?.c ?? 0);
-      if (totalInScope > 0 && totalInScope <= 80) {
-        rows = db.all<{
+      if (totalInScope > rows.length && totalInScope <= 120) {
+        const unembeddedRows = db.all<{
           id: string;
           summary?: string;
           content?: string;
@@ -308,10 +308,15 @@ export function recallVector(
            FROM memories m
            WHERE m.status IN ('active', 'frozen')
              AND m.type != 'meta'
+             AND m.embedding IS NULL
              AND (${scope.sql})
-           LIMIT 80`,
+           ORDER BY m.updated_at DESC
+           LIMIT 40`,
           scope.params
         );
+        if (unembeddedRows.length > 0) {
+          rows = [...rows, ...unembeddedRows];
+        }
       }
     }
 

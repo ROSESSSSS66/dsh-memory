@@ -171,4 +171,37 @@ describe('Mem0-Inspired Memory Reconciler (reconciler.ts)', () => {
     expect(res.decision.action).toBe('ADD');
     expect(res.action).toBe('inserted');
   });
+
+  it('v0.5.0 Zep/Graphiti canonical slot inference reconciles database evolution without explicit slot_key', () => {
+    const first: CandidateInput = {
+      type: 'semantic',
+      content: '项目数据库使用 MySQL 8.0',
+      scope: 'workspace',
+      workspaceId: ws1,
+      sessionId: sess1,
+      source_kind: 'user',
+      confidence: 0.9,
+      origin_kinds: ['user'],
+      sources: [{ session_id: sess1, seq: 1, kind: 'user' }],
+      actor: 'user',
+    };
+    const r1 = reconcileAndUpsert(db, first, now);
+    expect(r1.action).toBe('inserted');
+
+    const second: CandidateInput = {
+      type: 'semantic',
+      content: '项目数据库已迁移到 PostgreSQL 16',
+      scope: 'workspace',
+      workspaceId: ws1,
+      sessionId: sess1,
+      source_kind: 'user',
+      confidence: 0.95,
+      origin_kinds: ['user'],
+      sources: [{ session_id: sess1, seq: 2, kind: 'user' }],
+      actor: 'user',
+    };
+    const r2 = reconcileAndUpsert(db, second, now + 5000);
+    expect(r2.decision.action).toBe('UPDATE');
+    expect(r2.action).toBe('superseded');
+  });
 });

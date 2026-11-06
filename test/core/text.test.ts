@@ -7,6 +7,8 @@ import {
   jaccard,
   contentHash,
   extractEntities,
+  stemToken,
+  isTokenMatch,
 } from '../../src/core/text.js';
 
 describe('M1-T2: text.ts required & additional tests', () => {
@@ -111,5 +113,16 @@ describe('M1-T2: text.ts required & additional tests', () => {
     expect(entities).toHaveLength(1);
     expect(entities[0]).toContain('/');
     expect(entities[0]).not.toContain('\\');
+  });
+
+  it('v0.5.0: stemToken and isTokenMatch handle morphological variants and POSIX error entities', () => {
+    expect(stemToken('commits')).toBe('commit');
+    expect(stemToken('dependencies')).toBe('dependency');
+    const docTokens = tokenSet('Git 提交强制使用 commitlint 校验 Conventional Commits 规范');
+    expect(isTokenMatch('commit', docTokens)).toBe(true);
+    const posixEntities = extractEntities('接口报错 ECONNREFUSED 与 EADDRINUSE 和 ETIMEDOUT');
+    expect(posixEntities).toContain('econnrefused');
+    expect(posixEntities).toContain('eaddrinuse');
+    expect(posixEntities).toContain('etimedout');
   });
 });

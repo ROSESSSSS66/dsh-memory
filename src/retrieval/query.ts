@@ -24,7 +24,10 @@ export const QUERY_PROMPT_WORDS = new Set([
   '今天', '昨天', '前天', '最近', '怎么', '如何', '什么', '为什么', '哪个', '哪些',
   'the', 'how', 'today', 'yesterday', 'why', 'what', 'which', 'is', 'are', 'a', 'an',
   'in', 'on', 'of', 'for', 'to', '请', '帮我', '一下', '这个', '那个', '怎么做',
+  '请问', '多少', '哪一', '一个', '有什', '是什', '是哪', '查看', '我们', '应该',
 ]);
+
+const CJK_PARTICLE_BOUNDARY_REGEX = /^[的是了吗呢吧啊么哪怎何]|[\s]*[的是了吗呢吧啊么哪怎何]$/;
 
 /**
  * 解析查询中的时间区间
@@ -125,11 +128,18 @@ export function buildQueryPlan(input: {
     }
   }
 
-  // 2. contentTokens: 去除检索提示词与停用词，用于绝对相关性硬门槛
-  const contentTokens = uniqueTokens.filter((t) => {
+  // 2. contentTokens: 去除检索提示词、停用词与中文虚词跨界二元组，用于绝对相关性硬门槛
+  const baseContentTokens = uniqueTokens.filter((t) => {
     const lower = t.toLowerCase();
     return !QUERY_PROMPT_WORDS.has(lower) && !STOPWORDS.has(lower);
   });
+  const refinedContentTokens = baseContentTokens.filter((t) => {
+    if (t.length === 2 && /[\u4e00-\u9fa5]{2}/.test(t) && CJK_PARTICLE_BOUNDARY_REGEX.test(t)) {
+      return false;
+    }
+    return true;
+  });
+  const contentTokens = refinedContentTokens.length > 0 ? refinedContentTokens : baseContentTokens;
 
   // 3. 实体抽取
   const entities = extractEntities(text, cfg.maxEntitiesPerText);

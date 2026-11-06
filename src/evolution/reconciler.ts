@@ -2,6 +2,8 @@ import type { Db, CandidateInput, MemoryRecord, ReconcileDecision, UpsertResult 
 import { tokenSet, jaccard, contentHash, extractEntities } from '../core/text.js';
 import { scopeFilterSQL } from '../core/scope.js';
 import { upsertCandidate, saveVersionSnapshot, addRelation, invalidateMemory } from '../core/writer.js';
+import { resolveFixedSlot } from '../ingest/rules.js';
+import { computeLocalEmbedding, cosineSimilarity } from '../core/vector.js';
 
 const NEGATION_PATTERNS = [
   /不再使用/i,
@@ -25,6 +27,10 @@ const EVOLUTION_PATTERNS = [
   /迁移(?:到|至)/i,
   /更新(?:到|为|至)/i,
   /替换(?:为|成了)/i,
+  /切换(?:为|到|至)/i,
+  /调整(?:为|到|至)/i,
+  /改(?:用|为|成)/i,
+  /换(?:为|用|成)/i,
   /upgraded? (?:to|into)/i,
   /migrated? (?:to|into)/i,
   /switched? (?:to|from)/i,
@@ -55,13 +61,19 @@ export function reconcileCandidate(
     sessId = candidate.sessionId || null;
   }
 
-  // 1. 若候选包含明确 slot_key，优先根据 slot_key 调和
-  if (candidate.slot_key) {
+  // 1. 若候选包含明确 slot_key 或可通过规范槽位推演命中，优先根据 slot_key 调和 (Zep / Graphiti Bi-Temporal Slot Resolution)
+  const inferredSlot = candidate.slot_key ? null : resolveFixedSlot(rawContent);
+  const effectiveSlotKey = candidate.slot_key || inferredSlot?.slotKey || null;
+  if (effectiveSlotKey && !candidate.slot_key) {
+    candidate.slot_key = effectiveSlotKey;
+  }
+
+  if (effectiveSlotKey) {
     const existingSlot = db.get<MemoryRecord>(
       `SELECT * FROM memories
        WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ?
          AND slot_key = ? AND status IN ('active', 'frozen')`,
-      [scope, wsId || '', sessId || '', candidate.slot_key]
+      [scope, wsId || '', sessId || '', effectiveSlotKey]
     );
 
     if (existingSlot) {
@@ -115,22 +127,32 @@ export function reconcileCandidate(
 
   const candTokens = tokenSet(rawContent);
   const candEntities = extractEntities(rawContent).map((e) => e.toLowerCase());
+  const candVec = computeLocalEmbedding(rawContent);
 
   let bestMatch: MemoryRecord | null = null;
   let maxJaccard = 0;
+  let maxHybridSim = 0;
 
   for (const mem of candidateMemories) {
-    const memTokens = tokenSet(mem.content + ' ' + (mem.summary || ''));
-    const sim = jaccard(candTokens, memTokens);
-    if (sim > maxJaccard) {
-      maxJaccard = sim;
-      bestMatch = mem;
+    const memText = mem.content + ' ' + (mem.summary || '');
+    const memTokens = tokenSet(memText);
+    const jacSim = jaccard(candTokens, memTokens);
+    const vecSim = cosineSimilarity(candVec, computeLocalEmbedding(memText));
+    const hybridSim = 0.55 * jacSim + 0.45 * vecSim;
+    if (hybridSim > maxHybridSim || jacSim > maxJaccard) {
+      if (hybridSim >= maxHybridSim) {
+        bestMatch = mem;
+        maxHybridSim = hybridSim;
+      }
+      if (jacSim > maxJaccard) {
+        maxJaccard = jacSim;
+      }
     }
   }
 
   if (bestMatch) {
-    // A: 极高相似度 (Jaccard >= 0.85)
-    if (maxJaccard >= 0.85) {
+    // A: 极高相似度 (Jaccard >= 0.85 或 Hybrid >= 0.88)
+    if (maxJaccard >= 0.85 || maxHybridSim >= 0.88) {
       const isNegation = NEGATION_PATTERNS.some((p) => p.test(rawContent));
       if (isNegation) {
         return {
@@ -144,15 +166,15 @@ export function reconcileCandidate(
         action: 'NOOP',
         targetId: bestMatch.id,
         reason: 'subsumed_by_existing_memory',
-        confidence: maxJaccard,
+        confidence: Math.max(maxJaccard, maxHybridSim),
       };
     }
 
-    // B: 中高相似度 (Jaccard >= 0.45) 或共用核心实体
+    // B: 中高相似度 (Jaccard >= 0.42 或 Hybrid >= 0.48) 或共用核心实体
     const memContentLower = bestMatch.content.toLowerCase();
     const hasSharedEntity = candEntities.length > 0 && candEntities.some((ent) => memContentLower.includes(ent));
 
-    if (maxJaccard >= 0.45 || hasSharedEntity) {
+    if (maxJaccard >= 0.42 || maxHybridSim >= 0.48 || hasSharedEntity) {
       const isEvolution = EVOLUTION_PATTERNS.some((p) => p.test(rawContent));
       if (isEvolution) {
         return {
