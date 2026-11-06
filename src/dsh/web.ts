@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { URL } from 'node:url';
 import type { Db, MemoryRecord, MemoryType } from '../types.js';
 import { type PluginConfig, saveConfigToDb } from '../config.js';
-import { get, list, stats, sources, history, getGraphData } from '../core/store.js';
+import { get, list, stats, sources, history, getGraphData, getSubgraph } from '../core/store.js';
 import {
   approveCandidate,
   upsertCandidate,
@@ -16,11 +16,14 @@ import {
   restoreMemory,
   editContent,
   rollback,
+  addRelation,
 } from '../core/writer.js';
 import { redactSecrets } from '../core/privacy.js';
 import { serializeMemoryToMarkdown } from '../core/markdown.js';
 import { estimateTokens, budgetTokens } from '../core/tokens.js';
-import { auditMemoryHealth } from '../core/health.js';
+import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
+import { backfillMissingEmbeddings } from '../core/vector.js';
+import { findConsolidationClusters, consolidateCluster } from '../evolution/consolidator.js';
 import { buildQueryPlan } from '../retrieval/query.js';
 import { recall } from '../retrieval/recall.js';
 import { runAllChannels } from '../retrieval/channels.js';
@@ -404,7 +407,10 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 form: it.form,
                 score: Number(it.score.toFixed(4)),
                 tokens: it.tokens,
-                matchedChannels: channelHitMap.get(it.memory.id) || ['lexical'],
+                matchedChannels:
+                  recRes.matchedChannels?.[it.memory.id] ||
+                  channelHitMap.get(it.memory.id) ||
+                  ['lexical'],
               })),
             };
           }
@@ -455,7 +461,13 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         // 1.5. Graph Topology (汲取自 qwert702/dsh-memory 与 omdsh-dev/dsh-mnemon Obsidian 拓扑图)
         if (subPath === '/graph') {
           const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
+          const centerId = reqUrl.searchParams.get('centerId') || undefined;
           const limit = parseInt(reqUrl.searchParams.get('limit') || '80', 10);
+          if (centerId) {
+            const sub = getSubgraph(db, centerId, { workspaceId: wsId, hops: 2, maxNodes: limit });
+            sendJson(res, 200, { ok: true, graph: sub || { nodes: [], links: [], stats: { totalNodes: 0, memoryNodes: 0, entityNodes: 0, totalLinks: 0 } } });
+            return;
+          }
           const gData = getGraphData(db, { workspaceId: wsId, limit });
           sendJson(res, 200, { ok: true, graph: gData });
           return;
@@ -772,6 +784,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 else if (subAction === 'unfreeze') unfreeze(db, targetId, 'user', now);
                 else if (subAction === 'forget') forget(db, targetId, 'user', now);
                 else if (subAction === 'restore') restoreMemory(db, targetId, 'user', now);
+                else if (subAction === 'approve') approveCandidate(db, targetId, 'user', now);
+                else if (subAction === 'confirm') confirmMemory(db, targetId, 'user', now);
                 successCount++;
               } catch {}
             }
@@ -842,6 +856,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             const expired = expireCandidates(db);
             const autoPinned = autoPinMemories(db);
             const ftsRes = checkAndRepairFts(db);
+            const embeddingsBackfilled = backfillMissingEmbeddings(db, { limit: 500 });
             cleanOldTelemetry(db);
             const sentinel = checkSentinelAndRollback(db);
             sendJson(res, 200, {
@@ -853,9 +868,57 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 expiredProposals: expired.expiredProposals,
                 autoPinned,
                 ftsRebuilt: ftsRes.rebuilt,
+                embeddingsBackfilled,
                 sentinelRollback: sentinel.rolledBack,
               },
             });
+            return;
+          }
+
+          if (action === 'heal') {
+            const heal = autoHealMemoryHealth(db, { workspaceId: body.workspaceId });
+            sendJson(res, 200, { ok: true, heal });
+            return;
+          }
+
+          if (action === 'consolidate') {
+            const wsTarget = body.workspaceId || process.cwd();
+            const clusters = findConsolidationClusters(db, wsTarget, cfg);
+            const results = [];
+            for (const c of clusters) {
+              const r = await consolidateCluster(db, cfg, c);
+              results.push(r);
+            }
+            sendJson(res, 200, {
+              ok: true,
+              clustersFound: clusters.length,
+              consolidated: results.filter((r) => r.success && r.candidateId).length,
+              results,
+            });
+            return;
+          }
+
+          if (action === 'add-relation') {
+            const fromRaw = typeof body.fromId === 'string' ? body.fromId.trim() : '';
+            const toRaw = typeof body.toId === 'string' ? body.toId.trim() : '';
+            const relType = body.rel as 'related' | 'supersedes' | 'contradicts' | 'derived_from';
+            const validRels = ['related', 'supersedes', 'contradicts', 'derived_from'];
+            if (!fromRaw || !toRaw || !validRels.includes(relType)) {
+              sendJson(res, 400, { ok: false, error: '请提供有效的起始 ID、目标 ID 与关联类型' });
+              return;
+            }
+            const fromMem = get(db, fromRaw);
+            const toMem = get(db, toRaw);
+            if (!fromMem || !toMem) {
+              sendJson(res, 404, { ok: false, error: '未找到对应的记忆条目（支持完整 ID 或前 8 位短 ID）' });
+              return;
+            }
+            if (fromMem.id === toMem.id) {
+              sendJson(res, 400, { ok: false, error: '不能与自身建立拓扑关联' });
+              return;
+            }
+            addRelation(db, fromMem.id, toMem.id, relType, Date.now());
+            sendJson(res, 200, { ok: true, fromId: fromMem.id, toId: toMem.id, rel: relType });
             return;
           }
 
@@ -974,7 +1037,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           sendJson(res, 200, {
             ok: true,
-            version: '0.2.0',
+            version: '0.3.0',
             exportedAt: Date.now(),
             total: items.length,
             memories: items,

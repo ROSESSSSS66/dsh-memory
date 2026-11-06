@@ -1,7 +1,18 @@
-const STYLE_ID = 'dsh-memory-ui-styles-v6-glassmorphism';
+const STYLE_ID = 'dsh-memory-ui-styles-v7-glassmorphism';
 
 export function ensureMemoryStyle(): void {
   if (typeof document === 'undefined') return;
+  const legacy = document.querySelectorAll?.('style[id^="dsh-memory-ui-style"]');
+  if (legacy) {
+    legacy.forEach((el) => {
+      if (el.id !== STYLE_ID) el.parentNode?.removeChild(el);
+    });
+  }
+  const existing = document.getElementById(STYLE_ID);
+  if (existing) {
+    if (existing.textContent !== MEMORY_CSS) existing.textContent = MEMORY_CSS;
+    return;
+  }
   if (document.getElementById(STYLE_ID)) return;
 
   const style = document.createElement('style');
@@ -1364,7 +1375,16 @@ export const MEMORY_CSS = `
   position: fixed;
   bottom: 24px;
   right: 24px;
-  z-index: 10000;
+  top: auto !important;
+  left: auto !important;
+  bottom: 24px !important;
+  right: 24px !important;
+  width: fit-content !important;
+  max-width: min(520px, calc(100vw - 48px)) !important;
+  height: auto !important;
+  min-height: 0 !important;
+  transform: none !important;
+  z-index: 100000 !important;
   display: inline-flex;
   align-items: center;
   gap: 8px;

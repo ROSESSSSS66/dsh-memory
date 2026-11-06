@@ -398,6 +398,8 @@ export interface MemoryHealthReportUI {
   };
   ftsConsistent: boolean;
   ftsCount: number;
+  missingEmbeddingsCount?: number;
+  embeddingsReadyCount?: number;
   duplicatePairs: Array<{
     sourceId: string;
     targetId: string;
@@ -405,7 +407,7 @@ export interface MemoryHealthReportUI {
     targetSummary: string;
     similarity: number;
     slotKey: string | null;
-    reason: 'same_slot_key' | 'high_lexical_overlap';
+    reason: 'same_slot_key' | 'high_lexical_overlap' | 'high_semantic_overlap';
   }>;
   contradictions: Array<{
     fromId: string;
@@ -422,6 +424,17 @@ export interface MemoryHealthReportUI {
   }>;
   recommendations: string[];
   checkedAt: number;
+}
+
+export interface AutoHealResultUI {
+  ftsRebuilt: boolean;
+  embeddingsBackfilled: number;
+  duplicatesMerged: number;
+  contradictionsResolved: number;
+  beforeScore: number;
+  afterScore: number;
+  afterGrade: 'A+' | 'A' | 'B' | 'C' | 'D';
+  health: MemoryHealthReportUI;
 }
 
 export interface ReconcileResponseUI {

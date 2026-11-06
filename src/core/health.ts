@@ -1,5 +1,12 @@
-import type { Db } from '../types.js';
+import type { Db, MemoryRecord } from '../types.js';
 import { tokenSet, jaccard } from './text.js';
+import {
+  getOrComputeEmbedding,
+  cosineSimilarity,
+  backfillMissingEmbeddings,
+} from './vector.js';
+import { mergeMemories, saveVersionSnapshot } from './writer.js';
+import { checkAndRepairFts } from '../evolution/maintenance.js';
 
 export interface DuplicatePairItem {
   sourceId: string;
@@ -8,7 +15,7 @@ export interface DuplicatePairItem {
   targetSummary: string;
   similarity: number;
   slotKey: string | null;
-  reason: 'same_slot_key' | 'high_lexical_overlap';
+  reason: 'same_slot_key' | 'high_lexical_overlap' | 'high_semantic_overlap';
 }
 
 export interface ContradictionItem {
@@ -40,11 +47,24 @@ export interface MemoryHealthReport {
   };
   ftsConsistent: boolean;
   ftsCount: number;
+  missingEmbeddingsCount?: number;
+  embeddingsReadyCount?: number;
   duplicatePairs: DuplicatePairItem[];
   contradictions: ContradictionItem[];
   staleMemories: StaleMemoryItem[];
   recommendations: string[];
   checkedAt: number;
+}
+
+export interface AutoHealResult {
+  beforeScore: number;
+  afterScore: number;
+  afterGrade: MemoryHealthReport['grade'];
+  ftsRebuilt: boolean;
+  embeddingsBackfilled: number;
+  duplicatesMerged: number;
+  contradictionsResolved: number;
+  report: MemoryHealthReport;
 }
 
 /**
@@ -121,15 +141,17 @@ export function auditMemoryHealth(
         summary: string;
         content: string;
         slot_key: string | null;
+        hash: string;
+        embedding: Uint8Array | Buffer | null;
         utility: number;
         confidence: number;
         updated_at: number;
       }>(
-        `SELECT id, scope, workspace_id, type, summary, content, slot_key, utility, confidence, updated_at
+        `SELECT id, scope, workspace_id, type, summary, content, slot_key, hash, embedding, utility, confidence, updated_at
          FROM memories
          WHERE status IN ('active', 'frozen')
            AND (workspace_id = ? OR scope = 'global')
-         ORDER BY utility DESC, updated_at DESC
+         ORDER BY utility DESC, confidence DESC, updated_at DESC
          LIMIT 250`,
         [wsFilter]
       )
@@ -141,26 +163,39 @@ export function auditMemoryHealth(
         summary: string;
         content: string;
         slot_key: string | null;
+        hash: string;
+        embedding: Uint8Array | Buffer | null;
         utility: number;
         confidence: number;
         updated_at: number;
       }>(
-        `SELECT id, scope, workspace_id, type, summary, content, slot_key, utility, confidence, updated_at
+        `SELECT id, scope, workspace_id, type, summary, content, slot_key, hash, embedding, utility, confidence, updated_at
          FROM memories
          WHERE status IN ('active', 'frozen')
-         ORDER BY utility DESC, updated_at DESC
+         ORDER BY utility DESC, confidence DESC, updated_at DESC
          LIMIT 250`
       );
 
+  let missingEmbeddingsCount = 0;
+  let embeddingsReadyCount = 0;
   const tokenCache = new Map<string, Set<string>>();
+  const vecCache = new Map<string, Float32Array | null>();
+
   for (const r of activeRows) {
+    if (r.embedding && r.embedding.byteLength > 0) {
+      embeddingsReadyCount++;
+    } else {
+      missingEmbeddingsCount++;
+    }
     tokenCache.set(r.id, tokenSet(`${r.summary} ${r.content}`));
+    vecCache.set(r.id, getOrComputeEmbedding(r));
   }
 
   const duplicatePairs: DuplicatePairItem[] = [];
   for (let i = 0; i < activeRows.length && duplicatePairs.length < maxDuplicates; i++) {
     const a = activeRows[i];
     const setA = tokenCache.get(a.id)!;
+    const vecA = vecCache.get(a.id);
     for (let j = i + 1; j < activeRows.length && duplicatePairs.length < maxDuplicates; j++) {
       const b = activeRows[j];
       // 仅比较相同作用域的记忆
@@ -176,16 +211,29 @@ export function auditMemoryHealth(
       const setB = tokenCache.get(b.id)!;
       const sim = jaccard(setA, setB);
 
-      if (sameSlot || sim >= 0.65) {
+      const vecB = vecCache.get(b.id);
+      const vecSim = vecA && vecB && a.type === b.type ? cosineSimilarity(vecA, vecB) : 0;
+      const isSemanticDup = !sameSlot && sim < 0.65 && sim >= 0.45 && vecSim >= 0.84;
+
+      if (sameSlot || sim >= 0.65 || isSemanticDup) {
         // targetId 保留效用/置信度更高的 a，sourceId 为待被合并的 b
+        const combinedSim = sameSlot
+          ? Math.max(sim, 0.85)
+          : isSemanticDup
+          ? vecSim
+          : sim;
         duplicatePairs.push({
           sourceId: b.id,
           targetId: a.id,
           sourceSummary: b.summary,
           targetSummary: a.summary,
-          similarity: Number(Math.max(sim, sameSlot ? 0.85 : sim).toFixed(2)),
+          similarity: Number(combinedSim.toFixed(2)),
           slotKey: sameSlot ? a.slot_key : a.slot_key || b.slot_key,
-          reason: sameSlot ? 'same_slot_key' : 'high_lexical_overlap',
+          reason: sameSlot
+            ? 'same_slot_key'
+            : isSemanticDup
+            ? 'high_semantic_overlap'
+            : 'high_lexical_overlap',
         });
       }
     }
@@ -312,10 +360,108 @@ export function auditMemoryHealth(
     counts,
     ftsConsistent,
     ftsCount,
+    missingEmbeddingsCount,
+    embeddingsReadyCount,
     duplicatePairs,
     contradictions,
     staleMemories,
     recommendations,
     checkedAt: now,
+  };
+}
+
+/**
+ * 记忆库一键智能自愈引擎 (Auto-Healing Memory Doctor, v0.3.0)
+ * 1. 自动校验并重建不一致的 FTS5 索引
+ * 2. 自动为缺失向量的活跃/冻结记忆回填 128D 本地特征哈希向量
+ * 3. 自动合并高置信度同槽位/高重合冗余记忆对，迁移证据与实体并建立 supersedes 因果链
+ * 4. 自动消解明显的历史矛盾链 (保留高优/更新项，将旧冲突项标记为 superseded)
+ */
+export function autoHealMemoryHealth(
+  db: Db,
+  options: { workspaceId?: string; now?: number } = {}
+): AutoHealResult {
+  const now = options.now ?? Date.now();
+  const beforeReport = auditMemoryHealth(db, { workspaceId: options.workspaceId, now });
+
+  // 1. 修复 FTS5 倒排索引
+  const ftsRes = checkAndRepairFts(db);
+
+  // 2. 回填缺失的 128D 本地特征向量
+  const embeddingsBackfilled = backfillMissingEmbeddings(db, {
+    workspaceId: options.workspaceId,
+    limit: 500,
+  });
+
+  // 3. 自动合并高重合度冗余对
+  let duplicatesMerged = 0;
+  const consumedIds = new Set<string>();
+  for (const pair of beforeReport.duplicatePairs) {
+    if (consumedIds.has(pair.sourceId) || consumedIds.has(pair.targetId)) continue;
+    const srcRow = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [pair.sourceId]);
+    const tgtRow = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [pair.targetId]);
+    if (!srcRow || !tgtRow) continue;
+    if (srcRow.status === 'frozen') continue;
+
+    if (pair.reason === 'same_slot_key' || pair.similarity >= 0.65) {
+      const mRes = mergeMemories(
+        db,
+        pair.sourceId,
+        pair.targetId,
+        `auto_heal_${pair.reason}`,
+        'system',
+        now
+      );
+      if (mRes.success) {
+        duplicatesMerged++;
+        consumedIds.add(pair.sourceId);
+      }
+    }
+  }
+
+  // 4. 自动消解非冻结的活跃矛盾关系 (保留高优或更新项，将落后冲突项置为 superseded)
+  let contradictionsResolved = 0;
+  for (const c of beforeReport.contradictions) {
+    const mFrom = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [c.fromId]);
+    const mTo = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [c.toId]);
+    if (!mFrom || !mTo) continue;
+    if (mFrom.status !== 'active' && mFrom.status !== 'frozen') continue;
+    if (mTo.status !== 'active' && mTo.status !== 'frozen') continue;
+    if (mFrom.status === 'frozen' && mTo.status === 'frozen') continue;
+
+    // 决定保留者 (winner) 与被取代者 (loser)
+    const scoreA = mFrom.utility * 0.5 + mFrom.confidence * 0.5 + (mFrom.pinned ? 0.5 : 0) + (mFrom.status === 'frozen' ? 1.0 : 0);
+    const scoreB = mTo.utility * 0.5 + mTo.confidence * 0.5 + (mTo.pinned ? 0.5 : 0) + (mTo.status === 'frozen' ? 1.0 : 0);
+    const winner = scoreA > scoreB || (scoreA === scoreB && mFrom.updated_at >= mTo.updated_at) ? mFrom : mTo;
+    const loser = winner.id === mFrom.id ? mTo : mFrom;
+
+    if (loser.status === 'frozen' || loser.pinned === 1) continue;
+
+    db.transaction(() => {
+      saveVersionSnapshot(db, loser, 'auto_heal_contradiction', 'system', now);
+      db.run(
+        `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+        [now, now, loser.id]
+      );
+      db.run(
+        `INSERT OR REPLACE INTO memory_relations (from_id, to_id, rel, metadata, created_at)
+         VALUES (?, ?, 'supersedes', ?, ?)`,
+        [winner.id, loser.id, JSON.stringify({ reason: 'auto_heal_contradiction' }), now]
+      );
+    });
+    contradictionsResolved++;
+  }
+
+  const afterReport = auditMemoryHealth(db, { workspaceId: options.workspaceId, now });
+
+  return {
+    beforeScore: beforeReport.score,
+    afterScore: afterReport.score,
+    afterGrade: afterReport.grade,
+    ftsRebuilt: ftsRes.rebuilt,
+    embeddingsBackfilled,
+    duplicatesMerged,
+    contradictionsResolved,
+    report: afterReport,
   };
 }
