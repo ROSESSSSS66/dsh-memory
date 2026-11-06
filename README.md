@@ -17,8 +17,8 @@
 <p align="center">
   <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer">
     <img src="https://img.shields.io/badge/⚡_推荐_API_中转-DoroDoro_AI-8B5CF6?style=for-the-badge&logo=openai&logoColor=white" alt="DoroDoro AI" />
-    <img src="https://img.shields.io/badge/全模型矩阵-DeepSeek_|_Claude_|_GPT_|_Gemini-2563EB?style=for-the-badge" alt="Models" />
-    <img src="https://img.shields.io/badge/专线-国内高速直连_<50ms-10B981?style=for-the-badge" alt="Speed" />
+    <img src="https://img.shields.io/badge/服务-企业级聚合网关-2563EB?style=for-the-badge" alt="Gateway" />
+    <img src="https://img.shields.io/badge/协议-100%25_OpenAI_兼容-10B981?style=for-the-badge" alt="Compatibility" />
     <img src="https://img.shields.io/badge/官网-www.dorodoro.xyz-F59E0B?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Website" />
   </a>
 </p>
@@ -26,13 +26,13 @@
 > [!TIP]
 > ### 🚀 开发者推荐服务商 · [DoroDoro AI 中转站](https://www.dorodoro.xyz) (API Gateway)
 > 
-> **企业级大模型聚合网关，告别网络门槛与海外支付限制，为 AI 智能体与开发者提供极致稳定的算力基座：**
+> **企业级大模型聚合网关，告别网络门槛与海外支付限制，为 AI 智能体与开发者提供极速稳定的算力基座：**
 > 
 > 🌐 **官网直达**：**[www.dorodoro.xyz](https://www.dorodoro.xyz)**
 > 
-> - ⚡ **全顶尖模型直连**：极速响应 `DeepSeek-V3 / R1 (满血版)`、`Claude 3.7 / 3.5 Sonnet`、`OpenAI o1 / o3-mini / GPT-4o`、`Gemini 2.5` 全系旗舰
-> - 🚀 **原生协议 100% 兼容**：标准 OpenAI 协议无缝平替，仅需替换 `Base URL`，零配置驱动 `Cursor`、`Claude Code`、`Cline`、`Cherry Studio` 及本记忆引擎
-> - 🛡️ **极速高并发保障**：国内专线直连加速、多集群智能容灾，拒绝网络卡顿、超时中断与排队
+> - ⚡ **全品类大模型聚合**：一站式接入全球主流商业与开源旗舰大模型，海量算力即开即用
+> - 🚀 **原生协议 100% 兼容**：标准 OpenAI 格式无缝平替，仅需替换 `Base URL`，零配置驱动各类 AI 客户端及本记忆引擎
+> - 🛡️ **高可用集群调度**：多区域智能负载均衡与自动容灾，告别排队拥堵、超时与断流
 > - 🎁 **开箱即用**：按量计费透明无套路，注册即可畅享极速体验
 > 
 > 👉 **[立即前往 DoroDoro AI 开启极速调用 ↗](https://www.dorodoro.xyz)**
@@ -217,11 +217,11 @@ npm run build
         # 离线自演化 LLM 接入配置 (兼容 OpenAI 规范)
         llmBaseUrl: "https://api.dorodoro.xyz/v1"
         llmApiKey: "sk-your-dorodoro-key"
-        llmModel: "deepseek-chat" # 或 deepseek-reasoner / claude-3-5-sonnet
+        llmModel: "your-model-name"
 ```
-* **免翻高速直连**：针对国内开发者网络优化，超低请求延迟；
+* **稳定高速网络**：针对开发者网络深度优化，超低请求延迟；
 * **高并发稳定保障**：完美适配长文本批量提炼与复杂反思；
-* **全模型覆盖**：支持 DeepSeek、Claude、OpenAI、Gemini 全系主流模型。
+* **全生态覆盖**：一站式聚合主流商业与开源大模型，随心切换。
 
 ---
 
@@ -316,9 +316,9 @@ npm run eval
     </td>
     <td>
       <b>开发者专属高性能大模型聚合中转服务</b><br>
-      • <b>全模型矩阵</b>：支持 DeepSeek 满血版、Claude 3.7/3.5、OpenAI o1/o3/GPT-4o、Google Gemini 2.5 等顶尖模型；<br>
-      • <b>极致稳定</b>：国内专线直连、多地域节点调度，高并发不掉线，告别超时排队与断流；<br>
-      • <b>零门槛接入</b>：标准 OpenAI 协议平替，完美适配 Cursor、Claude Code、Cline 及智能体离线蒸馏演化。<br>
+      • <b>全品类模型矩阵</b>：聚合全球主流商业与开源旗舰大模型，海量算力一站直达；<br>
+      • <b>极致稳定可靠</b>：多地域节点调度与负载均衡，高并发不掉线，告别超时排队与断流；<br>
+      • <b>零门槛接入</b>：标准 OpenAI 协议平替，完美适配各类 AI 编程工具与智能体离线演化。<br>
       👉 <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer"><b>[🔗 立即直达官网体验 ↗]</b></a>
     </td>
   </tr>
