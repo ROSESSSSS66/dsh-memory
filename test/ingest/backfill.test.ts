@@ -258,5 +258,78 @@ describe('History Backfill (backfill.ts)', () => {
       expect(stats.rawEvents).toBe(0);
       expect(db.all('SELECT * FROM raw_events').length).toBe(0);
     });
+
+    it('支持解析 DSH session_projcache / archive_manager_v2 JSON 归档会话并过滤 Subagent', () => {
+      const userJsonFile = path.join(tmpDir, 'session_user_1.json');
+      fs.writeFileSync(
+        userJsonFile,
+        JSON.stringify({
+          version: 2,
+          record: {
+            sessionId: 'sess-projcache-1',
+            identity: {
+              formatVersion: 4,
+              createdAt: 2000,
+              cwd: testCwd,
+            },
+            rows: {
+              turnOutline: {
+                val: {
+                  turns: [
+                    {
+                      turn: 1,
+                      seq: 10,
+                      prompt: '站点单个请求上限上调到30mb',
+                      response: '已将网关单请求体上限上调至 30MB。',
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+        'utf8'
+      );
+
+      const subagentJsonFile = path.join(tmpDir, 'session_subagent_1.json');
+      fs.writeFileSync(
+        subagentJsonFile,
+        JSON.stringify({
+          version: 2,
+          record: {
+            sessionId: 'sess-subagent-1',
+            identity: {
+              formatVersion: 4,
+              createdAt: 3000,
+              cwd: testCwd,
+            },
+            rows: {
+              turnOutline: {
+                val: {
+                  turns: [
+                    {
+                      turn: 1,
+                      seq: 10,
+                      prompt: 'Your parent agent id is "session-parent". Complete task.',
+                      response: 'Done.',
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+        'utf8'
+      );
+
+      const stats = runBackfill(db, {
+        filePaths: [userJsonFile, subagentJsonFile],
+      });
+
+      expect(stats.processedFiles).toBe(1);
+      expect(stats.skippedFiles).toBe(1);
+      expect(stats.newEventsAdded).toBe(2);
+      expect(stats.memoriesCreated).toBe(1);
+    });
   });
 });

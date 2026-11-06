@@ -40,7 +40,7 @@ export function findEligibleDistillSession(
      WHERE processed < 2
      GROUP BY session_id, workspace_id
      HAVING cnt >= ?
-     ORDER BY MIN(time) ASC
+     ORDER BY CASE WHEN COUNT(*) >= 5 THEN 0 ELSE 1 END, MIN(time) ASC
      LIMIT 1`,
     [minEvents]
   );
