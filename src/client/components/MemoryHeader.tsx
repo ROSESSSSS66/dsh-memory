@@ -59,7 +59,7 @@ export const MemoryHeader: React.FC<MemoryHeaderProps> = ({
       variant={variant}
       brandIcon={<BrainIcon size={20} />}
       title="长期记忆中心"
-      versionBadge={<span className="dshm-badge-version">v0.2.0 · EvolveMem</span>}
+      versionBadge={<span className="dshm-badge-version">v0.3.0 · EvolveMem</span>}
       subtitle={
         <>
           <span className="dshm-dot-online" />
