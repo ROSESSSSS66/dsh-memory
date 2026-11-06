@@ -1,7 +1,23 @@
 {
   "name": "dsh-memory",
   "version": "0.2.0",
-  "description": "DSH Self-Evolving Memory System",
+  "description": "DSH Self-Evolving Memory System — Sub-millisecond 6-channel hybrid recall, Letta Core Memory, Mem0 conflict reconciler, EvolveMem strategy lab, and Glassmorphism workbench for DeepSeek Desktop (DSH)",
+  "keywords": [
+    "dsh",
+    "deepseek",
+    "agent-memory",
+    "long-term-memory",
+    "self-evolving",
+    "letta",
+    "mem0",
+    "sqlite-fts5",
+    "hybrid-retrieval"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ROSESSSSS66/dsh-memory.git"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
