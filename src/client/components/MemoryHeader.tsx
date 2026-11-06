@@ -1,172 +1,169 @@
 import * as React from 'react';
-import type { LLMConfigUI } from '../types.js';
+import type { LLMConfigUI, WorkspaceViewMode } from '../types.js';
+import {
+  GlassNavbar,
+  GlassButton,
+  useGlassVariant,
+  GlassThemeContext,
+} from './GlassUI.js';
 import {
   BrainIcon,
   PlusIcon,
   RefreshIcon,
-  SparklesIcon,
   SettingsIcon,
   ListIcon,
   GraphIcon,
   DownloadIcon,
+  LayersIcon,
+  CpuIcon,
+  TargetIcon,
+  SparklesIcon,
 } from './Icons.js';
 
 interface MemoryHeaderProps {
   onRefresh: () => void;
   onNewMemory: () => void;
-  onMaintain: () => void;
   onOpenConfig: () => void;
   onOpenBackup: () => void;
-  viewMode: 'list' | 'graph';
-  onViewModeChange: (mode: 'list' | 'graph') => void;
+  viewMode: WorkspaceViewMode;
+  onViewModeChange: (mode: WorkspaceViewMode) => void;
   llmConfig: LLMConfigUI | null;
   isRefreshing: boolean;
-  isMaintaining: boolean;
+  totalMemories?: number;
+  coreMemoryCount?: number;
+  pendingRepairsCount?: number;
 }
 
 export const MemoryHeader: React.FC<MemoryHeaderProps> = ({
   onRefresh,
   onNewMemory,
-  onMaintain,
   onOpenConfig,
   onOpenBackup,
   viewMode,
   onViewModeChange,
   llmConfig,
   isRefreshing,
-  isMaintaining,
+  totalMemories = 0,
+  coreMemoryCount = 0,
+  pendingRepairsCount = 0,
 }) => {
   const isLLMConfigured = !!llmConfig?.offlineLLM.baseURL;
   const isConsentEnabled = !!llmConfig?.privacy.offlineConsent;
   const activeModel = llmConfig?.offlineLLM.model || '未指定模型';
 
+  const variant = useGlassVariant();
+  const { setVariant } = React.useContext(GlassThemeContext);
+
   return (
-    <header className="dshm-header">
-      <div className="dshm-header-left">
-        <div className="dshm-brand-icon">
-          <BrainIcon size={22} />
-        </div>
-        <div className="dshm-header-titles">
-          <div className="dshm-title-row">
-            <h1 className="dshm-title">长期记忆</h1>
-            <span className="dshm-badge-version">v0.1.0 · 自进化</span>
-
-            {/* Interactive LLM Status Pill */}
-            {isLLMConfigured ? (
-              <button
-                type="button"
-                className={`dshm-llm-pill ${
-                  isConsentEnabled ? 'dshm-llm-pill-active' : 'dshm-llm-pill-warning'
-                }`}
-                onClick={onOpenConfig}
-                title={
-                  isConsentEnabled
-                    ? `离线自主进化已启用: ${activeModel}`
-                    : `已配置 ${activeModel}，但未开启外发许可，离线蒸馏暂停。点击配置。`
-                }
-              >
-                <span
-                  className={`dshm-pill-dot ${
-                    isConsentEnabled ? 'dshm-pill-dot-green' : 'dshm-pill-dot-yellow'
-                  }`}
-                />
-                <span className="dshm-pill-text">
-                  {activeModel} {isConsentEnabled ? '· 学习中' : '· 进化暂停'}
-                </span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="dshm-llm-pill dshm-llm-pill-neutral"
-                onClick={onOpenConfig}
-                title="尚未配置离线大模型，点击开启后台自主蒸馏"
-              >
-                <span className="dshm-pill-dot dshm-pill-dot-gray" />
-                <span className="dshm-pill-text">配置大模型</span>
-              </button>
-            )}
-          </div>
-          <p className="dshm-subtitle">
-            <span className="dshm-dot-online" />
-            在线快环 0ms 纯本地检索 · 离线慢环自主蒸馏与哨兵风控
-          </p>
-        </div>
-      </div>
-
-      <div className="dshm-header-actions">
-        {/* View Mode Switcher (List vs Graph) */}
-        <div className="dshm-segmented-control dshm-segmented-view">
-          <button
-            type="button"
-            className={`dshm-segment-btn ${viewMode === 'list' ? 'is-active' : ''}`}
-            onClick={() => onViewModeChange('list')}
-            title="卡片列表视图"
+    <GlassNavbar
+      variant={variant}
+      brandIcon={<BrainIcon size={20} />}
+      title="长期记忆中心"
+      versionBadge={<span className="dshm-badge-version">v0.1.0 · EvolveMem</span>}
+      subtitle={
+        <>
+          <span className="dshm-dot-online" />
+          <span>快环 SQLite FTS5 多路融合召回 · 慢环自主蒸馏、RIME 修复与策略进化</span>
+        </>
+      }
+      actions={
+        <>
+          <GlassButton
+            variant={variant}
+            onClick={() => setVariant(variant === 'light' ? 'dark' : 'light')}
+            title="切换 Light Glass (白雾毛玻璃) / Dark Glass (黑曜毛玻璃) 变体"
           >
-            <ListIcon size={13} />
-            <span>卡片</span>
-          </button>
-          <button
-            type="button"
-            className={`dshm-segment-btn ${viewMode === 'graph' ? 'is-active' : ''}`}
-            onClick={() => onViewModeChange('graph')}
-            title="知识拓扑图谱视图 (Obsidian 风格)"
+            <SparklesIcon size={13} />
+            <span>{variant === 'light' ? 'Light Glass' : 'Dark Glass'}</span>
+          </GlassButton>
+
+          <GlassButton
+            variant={variant}
+            onClick={onOpenBackup}
+            title="导出 JSON / Markdown 知识库或导入恢复"
           >
-            <GraphIcon size={13} />
-            <span>图谱</span>
-          </button>
-        </div>
+            <DownloadIcon size={13} />
+            <span>备份迁移</span>
+          </GlassButton>
 
-        {/* Backup / Export button */}
-        <button
-          type="button"
-          className="dshm-btn dshm-btn-secondary"
-          onClick={onOpenBackup}
-          title="导出备份或导入记忆"
-        >
-          <DownloadIcon size={13} />
-          <span>备份/导出</span>
-        </button>
+          <GlassButton
+            variant={variant}
+            onClick={onOpenConfig}
+            title={
+              isLLMConfigured
+                ? isConsentEnabled
+                  ? `离线进化已启用 (${activeModel})，点击配置`
+                  : `已配置 ${activeModel}（进化已暂停），点击配置`
+                : '配置离线大模型连接、协议与每日风控配额'
+            }
+          >
+            <span
+              className={`dshm-pill-dot ${
+                isLLMConfigured
+                  ? isConsentEnabled
+                    ? 'dshm-pill-dot-green'
+                    : 'dshm-pill-dot-yellow'
+                  : 'dshm-pill-dot-gray'
+              }`}
+            />
+            <SettingsIcon size={14} />
+            <span>模型配置</span>
+          </GlassButton>
 
-        <button
-          type="button"
-          className="dshm-btn dshm-btn-secondary"
-          onClick={onOpenConfig}
-          title="配置离线大模型连接与配额参数"
-        >
-          <SettingsIcon size={14} />
-          <span>模型配置</span>
-        </button>
+          <GlassButton
+            variant={variant}
+            size="icon"
+            className={isRefreshing ? 'dshm-spin' : ''}
+            onClick={onRefresh}
+            disabled={isRefreshing}
+            title="刷新全局记忆与遥测状态"
+          >
+            <RefreshIcon size={14} />
+          </GlassButton>
 
-        <button
-          type="button"
-          className="dshm-btn dshm-btn-secondary"
-          onClick={onMaintain}
-          disabled={isMaintaining}
-          title="执行离线清理、候选过期与冷记忆归档"
-        >
-          <SparklesIcon size={14} />
-          <span>{isMaintaining ? '维护中…' : '执行维护'}</span>
-        </button>
-
-        <button
-          type="button"
-          className={`dshm-btn dshm-btn-secondary dshm-btn-icon-only ${isRefreshing ? 'dshm-spin' : ''}`}
-          onClick={onRefresh}
-          disabled={isRefreshing}
-          title="刷新数据"
-        >
-          <RefreshIcon size={14} />
-        </button>
-
-        <button
-          type="button"
-          className="dshm-btn dshm-btn-primary"
-          onClick={onNewMemory}
-        >
-          <PlusIcon size={14} />
-          <span>记录记忆</span>
-        </button>
-      </div>
-    </header>
+          <GlassButton
+            variant={variant}
+            intent="primary"
+            onClick={onNewMemory}
+          >
+            <PlusIcon size={14} />
+            <span>记录记忆</span>
+          </GlassButton>
+        </>
+      }
+      items={[
+        {
+          key: 'memories',
+          label: '记忆库浏览',
+          icon: <ListIcon size={14} />,
+          badge: totalMemories,
+        },
+        {
+          key: 'core',
+          label: '核心记忆块 (Scratchpad)',
+          icon: <LayersIcon size={14} />,
+          badge: coreMemoryCount > 0 ? coreMemoryCount : undefined,
+        },
+        {
+          key: 'sandbox',
+          label: '召回沙盒 & 透视',
+          icon: <TargetIcon size={14} />,
+        },
+        {
+          key: 'graph',
+          label: '知识拓扑图谱',
+          icon: <GraphIcon size={14} />,
+        },
+        {
+          key: 'evolution',
+          label: '进化实验室 & 评测',
+          icon: <CpuIcon size={14} />,
+          badge: pendingRepairsCount > 0 ? `${pendingRepairsCount} 待审` : undefined,
+          badgeWarm: pendingRepairsCount > 0,
+        },
+      ]}
+      activeKey={viewMode}
+      onSelect={(k) => onViewModeChange(k as WorkspaceViewMode)}
+    />
   );
 };

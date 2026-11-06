@@ -1,7 +1,7 @@
 import * as React from 'react';
-import type { MemoryDetailResponse } from '../types.js';
+import { getMemoryTypeMeta, type MemoryDetailResponse } from '../types.js';
+import { GlassModal, GlassButton, GlassInput } from './GlassUI.js';
 import {
-  CloseIcon,
   RefreshIcon,
   EditIcon,
   CheckIcon,
@@ -9,6 +9,7 @@ import {
   CopyIcon,
   PinIcon,
   SnowflakeIcon,
+  GitMergeIcon,
 } from './Icons.js';
 import { fetchMemoryDetail, performAction } from '../api.js';
 
@@ -32,8 +33,17 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
   // Editing state
   const [isEditing, setIsEditing] = React.useState(false);
   const [editContentText, setEditContentText] = React.useState('');
-  const [editReason, setEditReason] = React.useState('手动更新正文');
+  const [editSummaryText, setEditSummaryText] = React.useState('');
+  const [editType, setEditType] = React.useState('semantic');
+  const [editScope, setEditScope] = React.useState('global');
+  const [editSlotKey, setEditSlotKey] = React.useState('');
+  const [editImportance, setEditImportance] = React.useState(5);
+  const [editReason, setEditReason] = React.useState('手动修订内容与属性');
   const [isSaving, setIsSaving] = React.useState(false);
+
+  // Merge state
+  const [isMerging, setIsMerging] = React.useState(false);
+  const [mergeTargetId, setMergeTargetId] = React.useState('');
 
   const loadDetail = React.useCallback(async (id: string) => {
     setLoading(true);
@@ -41,7 +51,14 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
     try {
       const res = await fetchMemoryDetail(id);
       setDetail(res);
-      setEditContentText(res.memory?.content || '');
+      if (res.memory) {
+        setEditContentText(res.memory.content || '');
+        setEditSummaryText(res.memory.summary || '');
+        setEditType(res.memory.type || 'semantic');
+        setEditScope(res.memory.scope || 'global');
+        setEditSlotKey(res.memory.slot_key || '');
+        setEditImportance(res.memory.importance ?? 5);
+      }
     } catch (err: any) {
       setError(err?.message || '获取详情失败');
     } finally {
@@ -54,6 +71,7 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
       setDetail(null);
       setError('');
       setIsEditing(false);
+      setIsMerging(false);
       return;
     }
     loadDetail(memoryId);
@@ -62,6 +80,7 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
   if (!memoryId) return null;
 
   const mem = detail?.memory;
+  const typeMeta = getMemoryTypeMeta(mem?.type);
 
   const handleSaveEdit = async () => {
     if (!mem) return;
@@ -75,14 +94,40 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
       await performAction('edit', {
         id: mem.id,
         content: editContentText.trim(),
+        summary: editSummaryText.trim() || undefined,
+        type: editType,
+        scope: editScope,
+        slot_key: editSlotKey.trim(),
+        importance: Number(editImportance) || 5,
         reason: editReason || '手动编辑更新',
       });
-      onToast?.('记忆已成功修改，并生成版本演化快照！');
+      onToast?.('记忆已成功修订，并生成版本演化快照！');
       setIsEditing(false);
       await loadDetail(mem.id);
       onMemoryUpdated?.();
     } catch (err: any) {
       setError(err?.message || '修改保存失败');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleMerge = async () => {
+    if (!mem || !mergeTargetId.trim()) return;
+    setIsSaving(true);
+    setError('');
+    try {
+      await performAction('merge', {
+        sourceId: mem.id,
+        targetId: mergeTargetId.trim(),
+        reason: 'UI 手动合并记忆',
+      });
+      onToast?.(`已将当前记忆合并至 ${mergeTargetId.trim()}！`);
+      setIsMerging(false);
+      await loadDetail(mem.id);
+      onMemoryUpdated?.();
+    } catch (err: any) {
+      setError(err?.message || '合并记忆失败');
     } finally {
       setIsSaving(false);
     }
@@ -116,6 +161,31 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
     }
   };
 
+  const handleTogglePin = async () => {
+    if (!mem) return;
+    try {
+      await performAction(mem.pinned ? 'unpin' : 'pin', { id: mem.id });
+      onToast?.(mem.pinned ? '已取消置顶' : '已置顶固化至 System Prompt');
+      await loadDetail(mem.id);
+      onMemoryUpdated?.();
+    } catch (err: any) {
+      setError(err?.message || '操作失败');
+    }
+  };
+
+  const handleToggleFreeze = async () => {
+    if (!mem) return;
+    const isFrozen = mem.status === 'frozen';
+    try {
+      await performAction(isFrozen ? 'unfreeze' : 'freeze', { id: mem.id });
+      onToast?.(isFrozen ? '已解除冻结保护' : '已开启冻结保护');
+      await loadDetail(mem.id);
+      onMemoryUpdated?.();
+    } catch (err: any) {
+      setError(err?.message || '操作失败');
+    }
+  };
+
   const handleRestore = async () => {
     if (!mem) return;
     try {
@@ -139,361 +209,369 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
   };
 
   return (
-    <div className="dshm-modal-backdrop" onClick={onClose}>
-      <div className="dshm-modal" style={{ maxWidth: 720 }} onClick={(e) => e.stopPropagation()}>
-        <div className="dshm-modal-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <h2 className="dshm-modal-title">记忆详情与演化审计</h2>
-            {mem && (
-              <span className="dshm-badge-version">v{mem.version}</span>
-            )}
-          </div>
-          <button
-            type="button"
-            className="dshm-action-btn"
-            onClick={onClose}
-            title="关闭"
-          >
-            <CloseIcon size={14} />
-          </button>
-        </div>
-
-        <div className="dshm-modal-body">
-          {loading && (
-            <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--dsw-alias-label-secondary)' }}>
-              <div className="dshm-spin" style={{ display: 'inline-block', marginBottom: 8 }}>
-                <RefreshIcon size={20} />
-              </div>
-              <div>正在读取存储引擎与因果版本链…</div>
-            </div>
-          )}
-
-          {error && (
-            <div
-              style={{
-                padding: '10px 14px',
-                borderRadius: 6,
-                background: 'rgba(239, 68, 68, 0.15)',
-                color: '#f87171',
-                fontSize: 13,
-                marginBottom: 12,
-              }}
-            >
-              {error}
-            </div>
-          )}
-
-          {mem && !loading && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              {/* Basic Meta Grid */}
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
-                  gap: 10,
-                  padding: 12,
-                  borderRadius: 8,
-                  background: 'var(--dsw-alias-bg-layer-1)',
-                  fontSize: 12,
-                }}
-              >
-                <div>
-                  <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>ID: </span>
-                  <span style={{ fontFamily: 'monospace', color: 'var(--dsw-alias-label-primary)' }}>{mem.id}</span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>类型: </span>
-                  <span style={{ color: 'var(--dsw-alias-label-primary)', fontWeight: 500 }}>{mem.type}</span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>作用域: </span>
-                  <span style={{ color: 'var(--dsw-alias-label-primary)' }}>
-                    {mem.scope === 'global' ? '全局' : mem.workspace_id || '工作区'}
-                  </span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>状态: </span>
-                  <span style={{ color: mem.status === 'active' ? '#34c759' : mem.status === 'frozen' ? '#60a5fa' : '#f59e0b' }}>
-                    {mem.status}
-                  </span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>版本与修订: </span>
-                  <span style={{ color: '#c084fc', fontWeight: 600 }}>v{mem.version} (rev {mem.content_rev})</span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>实用度 / 置信度: </span>
-                  <span style={{ color: 'var(--dsw-alias-label-primary)' }}>
-                    {mem.utility.toFixed(2)} / {mem.confidence.toFixed(2)}
-                  </span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>调用统计: </span>
-                  <span style={{ color: 'var(--dsw-alias-label-primary)' }}>
-                    总 {mem.use_count} · 成功 {mem.success_count} · 失败 {mem.fail_count}
-                  </span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>最近更新: </span>
-                  <span style={{ color: 'var(--dsw-alias-label-secondary)' }}>
-                    {new Date(mem.updated_at).toLocaleString()}
-                  </span>
-                </div>
-              </div>
-
-              {/* Memory Content Section */}
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <h4 style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
-                    记忆正文
-                  </h4>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button
-                      type="button"
-                      className="dshm-btn dshm-btn-ghost"
-                      style={{ padding: '3px 8px', fontSize: 12 }}
-                      onClick={handleCopy}
-                      title="复制正文"
-                    >
-                      <CopyIcon size={12} />
-                      <span>复制</span>
-                    </button>
-                    {!isEditing && mem.status !== 'frozen' && (
-                      <button
-                        type="button"
-                        className="dshm-btn dshm-btn-secondary"
-                        style={{ padding: '3px 10px', fontSize: 12 }}
-                        onClick={() => {
-                          setIsEditing(true);
-                          setEditContentText(mem.content);
-                        }}
-                      >
-                        <EditIcon size={12} />
-                        <span>编辑正文</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {isEditing ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <textarea
-                      className="dshm-form-textarea"
-                      rows={5}
-                      value={editContentText}
-                      onChange={(e) => setEditContentText(e.target.value)}
-                      placeholder="修改记忆内容…"
-                    />
-                    <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                      <input
-                        type="text"
-                        className="dshm-form-input"
-                        placeholder="修改原因 (记录入版本审计链)"
-                        value={editReason}
-                        onChange={(e) => setEditReason(e.target.value)}
-                        style={{ flex: 1, fontSize: 12 }}
-                      />
-                      <button
-                        type="button"
-                        className="dshm-btn dshm-btn-secondary"
-                        onClick={() => setIsEditing(false)}
-                        disabled={isSaving}
-                      >
-                        取消
-                      </button>
-                      <button
-                        type="button"
-                        className="dshm-btn dshm-btn-primary"
-                        onClick={handleSaveEdit}
-                        disabled={isSaving}
-                      >
-                        <CheckIcon size={13} />
-                        <span>{isSaving ? '保存中…' : '保存修订'}</span>
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div
-                    style={{
-                      padding: 14,
-                      borderRadius: 8,
-                      background: 'var(--dsw-alias-bg-layer-1)',
-                      fontSize: 14,
-                      lineHeight: 1.6,
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      borderLeft: '3px solid #3b82f6',
-                    }}
-                  >
-                    {mem.content}
-                  </div>
-                )}
-              </div>
-
-              {/* Relations / Connected Graph Nodes */}
-              {detail.relations && detail.relations.length > 0 && (
-                <div>
-                  <h4 style={{ margin: '0 0 6px 0', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
-                    因果与拓扑关联 ({detail.relations.length} 条)
-                  </h4>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    {detail.relations.map((rel, i) => (
-                      <span
-                        key={i}
-                        className="dshm-tag"
-                        style={{
-                          padding: '4px 10px',
-                          cursor: 'pointer',
-                          background: 'rgba(59, 130, 246, 0.1)',
-                          border: '0.5px solid rgba(59, 130, 246, 0.3)',
-                          color: '#60a5fa',
-                        }}
-                        onClick={() => loadDetail(rel.to_id)}
-                        title="点击查看目标记忆详情"
-                      >
-                        <span style={{ opacity: 0.7 }}>[{rel.rel}]</span> {rel.to_id}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Version History with Rollback */}
-              {detail.history && detail.history.length > 0 && (
-                <div>
-                  <h4 style={{ margin: '0 0 6px 0', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
-                    版本演化快照 ({detail.history.length} 次修订)
-                  </h4>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 220, overflowY: 'auto' }}>
-                    {detail.history.map((ver) => (
-                      <div
-                        key={ver.version}
-                        style={{
-                          padding: '10px 12px',
-                          borderRadius: 6,
-                          background: 'var(--dsw-alias-bg-layer-1)',
-                          fontSize: 12,
-                          borderLeft: '3px solid #6366f1',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 4,
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <div>
-                            <strong style={{ color: '#818cf8' }}>v{ver.version}</strong>
-                            <span style={{ color: 'var(--dsw-alias-label-secondary)', marginLeft: 8 }}>
-                              by {ver.actor}
-                            </span>
-                            <span style={{ color: 'var(--dsw-alias-label-tertiary)', marginLeft: 8 }}>
-                              ({new Date(ver.created_at).toLocaleString()})
-                            </span>
-                          </div>
-                          {ver.version !== mem.version && mem.status !== 'frozen' && (
-                            <button
-                              type="button"
-                              className="dshm-btn dshm-btn-ghost"
-                              style={{ padding: '2px 8px', fontSize: 11, color: '#f59e0b' }}
-                              onClick={() => handleRollback(ver.version)}
-                              title="将记忆正文恢复为此快照"
-                            >
-                              <UndoIcon size={11} />
-                              <span>回滚至此版本</span>
-                            </button>
-                          )}
-                        </div>
-                        <div style={{ color: 'var(--dsw-alias-label-secondary)' }}>
-                          原因：{ver.reason}
-                        </div>
-                        <div
-                          style={{
-                            fontFamily: 'monospace',
-                            color: 'var(--dsw-alias-label-primary)',
-                            whiteSpace: 'pre-wrap',
-                            background: 'rgba(0,0,0,0.2)',
-                            padding: '6px 8px',
-                            borderRadius: 4,
-                          }}
-                        >
-                          {ver.snapshot?.content}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Citations / Sources */}
-              {detail.sources && detail.sources.length > 0 && (
-                <div>
-                  <h4 style={{ margin: '0 0 6px 0', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
-                    关联会话来源 ({detail.sources.length} 个锚点)
-                  </h4>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 160, overflowY: 'auto' }}>
-                    {detail.sources.map((src, i) => (
-                      <div
-                        key={i}
-                        style={{
-                          padding: '8px 12px',
-                          borderRadius: 6,
-                          background: 'var(--dsw-alias-bg-layer-1)',
-                          fontSize: 12,
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                          <span style={{ fontFamily: 'monospace', color: '#818cf8' }}>
-                            {src.session_id} #seq {src.seq}
-                          </span>
-                          <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>{src.kind}</span>
-                        </div>
-                        {src.excerpt && (
-                          <div style={{ marginTop: 4, color: 'var(--dsw-alias-label-secondary)', fontStyle: 'italic' }}>
-                            &ldquo;{src.excerpt}&rdquo;
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+    <GlassModal
+      isOpen={!!memoryId}
+      onClose={onClose}
+      size="xl"
+      footerClassName="dshm-modal-footer-split"
+      headerLeft={
+        <div className="dshm-detail-header-left">
+          <h2 className="dshm-modal-title">记忆详情与因果审计</h2>
+          {mem && (
+            <>
+              <span className={`dshm-tag ${typeMeta.tagClass}`}>{typeMeta.label}</span>
+              <span className="dshm-badge-version">
+                v{mem.version} · rev {mem.content_rev}
+              </span>
+            </>
           )}
         </div>
-
-        <div className="dshm-modal-footer" style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {mem?.status === 'archived' && (
-              <button
-                type="button"
-                className="dshm-btn dshm-btn-primary"
-                onClick={handleRestore}
-              >
+      }
+      footer={
+        <>
+          <div className="dshm-detail-footer-left">
+            {mem?.status === 'archived' || mem?.status === 'superseded' ? (
+              <GlassButton intent="primary" onClick={handleRestore}>
                 <UndoIcon size={13} />
                 <span>恢复为活跃记忆</span>
-              </button>
-            )}
-            {mem && mem.status !== 'archived' && (
-              <button
-                type="button"
-                className="dshm-btn dshm-btn-secondary"
-                onClick={handleConfirm}
-                title="强化有效性与置信度"
-              >
-                <CheckIcon size={13} />
-                <span>用户确认</span>
-              </button>
+              </GlassButton>
+            ) : (
+              mem && (
+                <>
+                  <GlassButton
+                    intent={mem.pinned ? 'warning' : 'default'}
+                    onClick={handleTogglePin}
+                  >
+                    <PinIcon size={13} />
+                    <span>{mem.pinned ? '取消置顶' : '置顶固化'}</span>
+                  </GlassButton>
+
+                  <GlassButton
+                    className={mem.status === 'frozen' ? 'is-active-cyan' : ''}
+                    onClick={handleToggleFreeze}
+                  >
+                    <SnowflakeIcon size={13} />
+                    <span>{mem.status === 'frozen' ? '解除冻结' : '冻结保护'}</span>
+                  </GlassButton>
+
+                  <GlassButton
+                    onClick={handleConfirm}
+                    title="强化有效性与置信度 (+0.1 utility)"
+                  >
+                    <CheckIcon size={13} />
+                    <span>强化确认</span>
+                  </GlassButton>
+
+                  <GlassButton
+                    onClick={() => setIsMerging(!isMerging)}
+                    title="将此记忆合并到另一条记忆"
+                  >
+                    <GitMergeIcon size={13} />
+                    <span>合并记忆</span>
+                  </GlassButton>
+                </>
+              )
             )}
           </div>
 
-          <button
-            type="button"
-            className="dshm-btn dshm-btn-secondary"
-            onClick={onClose}
-          >
-            关闭
-          </button>
+          <GlassButton onClick={onClose}>关闭</GlassButton>
+        </>
+      }
+    >
+      {loading && (
+        <div className="dshm-loading-state">
+          <div className="dshm-spin">
+            <RefreshIcon size={20} />
+          </div>
+          <span>正在读取存储引擎与因果版本链…</span>
         </div>
-      </div>
-    </div>
+      )}
+
+      {error && <div className="dshm-alert-error">{error}</div>}
+
+      {mem && !loading && (
+        <div className="dshm-detail-stack">
+          {/* Basic Meta Bento Grid */}
+          <div className="dshm-detail-meta-grid">
+            <div className="dshm-meta-cell">
+              <span className="dshm-meta-key">记忆 ID</span>
+              <code className="dshm-meta-val is-mono">{mem.id}</code>
+            </div>
+            <div className="dshm-meta-cell">
+              <span className="dshm-meta-key">当前状态</span>
+              <span className={`dshm-meta-val is-status-${mem.status}`}>
+                {mem.status} {mem.pinned ? '(📌 已置顶)' : ''}
+              </span>
+            </div>
+            <div className="dshm-meta-cell">
+              <span className="dshm-meta-key">生效作用域</span>
+              <span className="dshm-meta-val">
+                {mem.scope === 'global'
+                  ? '🌐 全局 (Global)'
+                  : mem.scope === 'user'
+                  ? '👤 用户级 (User)'
+                  : `📁 工作区 (${mem.workspace_id || 'Workspace'})`}
+              </span>
+            </div>
+            <div className="dshm-meta-cell">
+              <span className="dshm-meta-key">槽位键 (slot_key)</span>
+              <code className="dshm-meta-val is-mono">{mem.slot_key || '未绑定'}</code>
+            </div>
+            <div className="dshm-meta-cell">
+              <span className="dshm-meta-key">置信度 / 实用度</span>
+              <span className="dshm-meta-val">
+                {Math.round(mem.confidence * 100)}% / {Math.round(mem.utility * 100)}%
+              </span>
+            </div>
+            <div className="dshm-meta-cell">
+              <span className="dshm-meta-key">重要度评分</span>
+              <span className="dshm-meta-val">P{mem.importance ?? 5} / 10</span>
+            </div>
+            <div className="dshm-meta-cell">
+              <span className="dshm-meta-key">召回反馈统计</span>
+              <span className="dshm-meta-val">
+                命中 {mem.use_count} · 正向 {mem.success_count} · 纠正 {mem.fail_count}
+              </span>
+            </div>
+            <div className="dshm-meta-cell">
+              <span className="dshm-meta-key">最后更新</span>
+              <span className="dshm-meta-val">
+                {new Date(mem.updated_at).toLocaleString()}
+              </span>
+            </div>
+          </div>
+
+          {/* Memory Content & Attribute Editor */}
+          <div className="dshm-detail-section">
+            <div className="dshm-detail-section-header">
+              <h4>记忆正文与属性</h4>
+              <div className="dshm-detail-actions">
+                <GlassButton size="sm" onClick={handleCopy}>
+                  <CopyIcon size={12} />
+                  <span>复制正文</span>
+                </GlassButton>
+                {!isEditing && mem.status !== 'frozen' && (
+                  <GlassButton size="sm" onClick={() => setIsEditing(true)}>
+                    <EditIcon size={12} />
+                    <span>编辑记忆</span>
+                  </GlassButton>
+                )}
+              </div>
+            </div>
+
+            {isEditing ? (
+              <div className="dshm-edit-panel">
+                <div className="dshm-form-row">
+                  <div className="dshm-form-group dshm-col-third">
+                    <label className="dshm-form-label">记忆类型</label>
+                    <select
+                      className="dshm-form-select"
+                      value={editType}
+                      onChange={(e) => setEditType(e.target.value)}
+                    >
+                      <option value="preference">偏好习惯 (preference)</option>
+                      <option value="semantic">事实知识 (semantic)</option>
+                      <option value="procedural">流程规范 (procedural)</option>
+                      <option value="episodic">情景事件 (episodic)</option>
+                      <option value="failure">避坑反思 (failure)</option>
+                      <option value="belief">核心信念 (belief)</option>
+                      <option value="goal">目标规划 (goal)</option>
+                    </select>
+                  </div>
+
+                  <div className="dshm-form-group dshm-col-third">
+                    <label className="dshm-form-label">作用域</label>
+                    <select
+                      className="dshm-form-select"
+                      value={editScope}
+                      onChange={(e) => setEditScope(e.target.value)}
+                    >
+                      <option value="global">🌐 全局 (global)</option>
+                      <option value="workspace">📁 工作区 (workspace)</option>
+                      <option value="user">👤 用户级 (user)</option>
+                    </select>
+                  </div>
+
+                  <div className="dshm-form-group dshm-col-third">
+                    <label className="dshm-form-label">重要度 (1-10)</label>
+                    <GlassInput
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={editImportance}
+                      onChange={(e) => setEditImportance(parseInt(e.target.value, 10) || 5)}
+                    />
+                  </div>
+                </div>
+
+                <div className="dshm-form-row">
+                  <div className="dshm-form-group dshm-col-half">
+                    <label className="dshm-form-label">槽位键 (slot_key)</label>
+                    <GlassInput
+                      type="text"
+                      placeholder="例如 pkg-manager 或 build-cmd"
+                      value={editSlotKey}
+                      onChange={(e) => setEditSlotKey(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="dshm-form-group dshm-col-half">
+                    <label className="dshm-form-label">精简摘要 (Summary)</label>
+                    <GlassInput
+                      type="text"
+                      placeholder="预算紧凑时降级注入的单行摘要"
+                      value={editSummaryText}
+                      onChange={(e) => setEditSummaryText(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="dshm-form-group">
+                  <label className="dshm-form-label">记忆正文</label>
+                  <textarea
+                    className="dshm-form-textarea"
+                    rows={5}
+                    value={editContentText}
+                    onChange={(e) => setEditContentText(e.target.value)}
+                    placeholder="修改记忆内容…"
+                  />
+                </div>
+
+                <div className="dshm-edit-footer">
+                  <GlassInput
+                    type="text"
+                    placeholder="修订原因 (记录入版本审计链)"
+                    value={editReason}
+                    onChange={(e) => setEditReason(e.target.value)}
+                  />
+                  <GlassButton
+                    onClick={() => setIsEditing(false)}
+                    disabled={isSaving}
+                  >
+                    取消
+                  </GlassButton>
+                  <GlassButton
+                    intent="primary"
+                    onClick={handleSaveEdit}
+                    disabled={isSaving}
+                  >
+                    <CheckIcon size={13} />
+                    <span>{isSaving ? '保存中…' : '保存修订'}</span>
+                  </GlassButton>
+                </div>
+              </div>
+            ) : (
+              <div className="dshm-detail-content-box">{mem.content}</div>
+            )}
+          </div>
+
+          {/* Merge Memory Panel */}
+          {isMerging && (
+            <div className="dshm-edit-panel">
+              <div className="dshm-form-label">
+                将当前记忆 ({mem.id}) 合并至目标记忆 ID（当前记忆将标记为 superseded）：
+              </div>
+              <div className="dshm-edit-footer">
+                <GlassInput
+                  type="text"
+                  placeholder="输入目标记忆完整 ID 或短码 (如 m_xxxx)"
+                  value={mergeTargetId}
+                  onChange={(e) => setMergeTargetId(e.target.value)}
+                />
+                <GlassButton onClick={() => setIsMerging(false)}>取消</GlassButton>
+                <GlassButton
+                  intent="primary"
+                  disabled={!mergeTargetId.trim() || isSaving}
+                  onClick={handleMerge}
+                >
+                  <GitMergeIcon size={13} />
+                  <span>确认合并</span>
+                </GlassButton>
+              </div>
+            </div>
+          )}
+
+          {/* Relations / Connected Graph Nodes */}
+          {detail.relations && detail.relations.length > 0 && (
+            <div className="dshm-detail-section">
+              <h4>因果与拓扑关联 ({detail.relations.length} 条)</h4>
+              <div className="dshm-relation-pills">
+                {detail.relations.map((rel, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    className="dshm-relation-chip"
+                    onClick={() => loadDetail(rel.to_id)}
+                    title="点击跳转查看目标记忆详情"
+                  >
+                    <span className="dshm-relation-type">{rel.rel}</span>
+                    <code>{rel.to_id}</code>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Version History with Rollback */}
+          {detail.history && detail.history.length > 0 && (
+            <div className="dshm-detail-section">
+              <h4>版本演化快照 ({detail.history.length} 次修订)</h4>
+              <div className="dshm-version-list">
+                {detail.history.map((ver) => (
+                  <div key={ver.version} className="dshm-version-card">
+                    <div className="dshm-version-header">
+                      <div className="dshm-version-meta">
+                        <strong>v{ver.version}</strong>
+                        <span>by {ver.actor}</span>
+                        <span className="dshm-text-muted">
+                          {new Date(ver.created_at).toLocaleString()}
+                        </span>
+                      </div>
+                      {ver.version !== mem.version && mem.status !== 'frozen' && (
+                        <GlassButton
+                          size="sm"
+                          intent="warning"
+                          onClick={() => handleRollback(ver.version)}
+                          title="将记忆正文恢复为此历史快照"
+                        >
+                          <UndoIcon size={11} />
+                          <span>回滚至此版</span>
+                        </GlassButton>
+                      )}
+                    </div>
+                    <div className="dshm-version-reason">原因：{ver.reason}</div>
+                    <pre className="dshm-version-snapshot">{ver.snapshot?.content}</pre>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Citations / Sources */}
+          {detail.sources && detail.sources.length > 0 && (
+            <div className="dshm-detail-section">
+              <h4>关联会话来源证据 ({detail.sources.length} 个锚点)</h4>
+              <div className="dshm-source-list">
+                {detail.sources.map((src, i) => (
+                  <div key={i} className="dshm-source-card">
+                    <div className="dshm-source-header">
+                      <code>
+                        {src.session_id} #seq {src.seq}
+                      </code>
+                      <span className="dshm-tag dshm-tag-scope">{src.kind}</span>
+                    </div>
+                    {src.excerpt && (
+                      <blockquote className="dshm-source-excerpt">
+                        “{src.excerpt}”
+                      </blockquote>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </GlassModal>
   );
 };

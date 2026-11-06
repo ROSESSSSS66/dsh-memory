@@ -19,6 +19,17 @@ import {
 } from '../core/writer.js';
 import { redactSecrets } from '../core/privacy.js';
 import { serializeMemoryToMarkdown } from '../core/markdown.js';
+import { estimateTokens, budgetTokens } from '../core/tokens.js';
+import { buildQueryPlan } from '../retrieval/query.js';
+import { recall } from '../retrieval/recall.js';
+import { runAllChannels } from '../retrieval/channels.js';
+import { renderStableLayer } from './prompt-section.js';
+import {
+  getAllCoreMemories,
+  setCoreMemory,
+  appendCoreMemory,
+  DEFAULT_CORE_BLOCKS,
+} from '../core/core-memory.js';
 import { getLedgerUsage } from '../evolution/ledger.js';
 import {
   archiveColdMemories,
@@ -28,6 +39,21 @@ import {
   cleanOldTelemetry,
 } from '../evolution/maintenance.js';
 import { resolveEndpointAndProtocol, buildProtocolPayload } from '../evolution/llm.js';
+import {
+  getActiveStrategy,
+  listStrategies,
+  rollbackStrategy,
+  initDefaultStrategy,
+} from '../evolution/strategy.js';
+import { runStrategyEvolution } from '../evolution/lab.js';
+import {
+  listRepairProposals,
+  approveRepairProposal,
+  rejectRepairProposal,
+} from '../evolution/repair.js';
+import { runBackfill } from '../ingest/backfill.js';
+import { generateDataset } from '../eval/gen-dataset.js';
+import { runEvalSuite } from '../eval/runner.js';
 
 export const API_PREFIX = '/api/dsh-memory';
 
@@ -162,10 +188,19 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const correctionRate =
             injRows.length > 0 ? Number(((corrections / injRows.length) * 100).toFixed(1)) : 0;
 
+          const pendingRepairs = listRepairProposals(db, 'candidate');
+          const activeStrat = getActiveStrategy(db, cfg);
+          const coreBlocks = getAllCoreMemories(db, { workspaceId: wsId });
+
           sendJson(res, 200, {
             ok: true,
             stats: st,
             dynamicBudgetTokens: cfg.dynamicBudgetTokens || 1600,
+            stableBudgetTokens: cfg.stableBudgetTokens || 600,
+            hardBudgetTokens: cfg.hardBudgetTokens || 3200,
+            pendingRepairsCount: pendingRepairs.length,
+            activeStrategyVersion: activeStrat.version,
+            coreMemoryCount: coreBlocks.length,
             ledger: {
               callsToday: ledger.callsCount,
               tokensToday: ledger.tokensConsumed,
@@ -177,6 +212,239 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               avgTokens,
               correctionRate,
             },
+          });
+          return;
+        }
+
+        // 1.2. Core Memory Scratchpad (GET & POST)
+        if (subPath === '/core-memory') {
+          const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
+          if (req.method === 'GET') {
+            const entries = getAllCoreMemories(db, { workspaceId: wsId });
+            const entryMap = new Map(entries.map((e) => [e.block, e]));
+            const blocks = DEFAULT_CORE_BLOCKS.map((b) => {
+              const existing = entryMap.get(b);
+              if (existing) {
+                entryMap.delete(b);
+                return {
+                  ...existing,
+                  tokens: estimateTokens(existing.content),
+                };
+              }
+              return {
+                block: b,
+                content: '',
+                updated_at: 0,
+                version: 0,
+                id: '',
+                tokens: 0,
+              };
+            });
+            for (const extra of entryMap.values()) {
+              blocks.push({
+                ...extra,
+                tokens: estimateTokens(extra.content),
+              });
+            }
+            const totalTokens = blocks.reduce((acc, b) => acc + b.tokens, 0);
+            sendJson(res, 200, {
+              ok: true,
+              blocks,
+              totalTokens,
+              stableBudgetTokens: cfg.stableBudgetTokens || 600,
+            });
+            return;
+          }
+
+          if (req.method === 'POST') {
+            const body = await readBodyJson(req);
+            const block = (body.block || '').trim().toLowerCase();
+            const content = (body.content || '').trim();
+            const mode = body.mode === 'append' ? 'append' : 'set';
+            if (!block) {
+              sendJson(res, 400, { ok: false, error: '请指定 Core Memory 块名称' });
+              return;
+            }
+            if (!content) {
+              sendJson(res, 400, { ok: false, error: 'Core Memory 内容不能为空' });
+              return;
+            }
+            try {
+              if (mode === 'append') {
+                appendCoreMemory(db, block, content, { workspaceId: body.workspaceId || wsId, actor: 'user' });
+              } else {
+                setCoreMemory(db, block, content, { workspaceId: body.workspaceId || wsId, actor: 'user' });
+              }
+              const entries = getAllCoreMemories(db, { workspaceId: body.workspaceId || wsId });
+              sendJson(res, 200, { ok: true, block, blocks: entries });
+            } catch (err: any) {
+              sendJson(res, 400, { ok: false, error: err?.message || '更新 Core Memory 失败' });
+            }
+            return;
+          }
+        }
+
+        // 1.3. Evolution, Strategy Lab & Repair Proposals (GET)
+        if (subPath === '/evolution') {
+          let strategies = listStrategies(db);
+          if (strategies.length === 0) {
+            initDefaultStrategy(db, cfg);
+            strategies = listStrategies(db);
+          }
+          const activeStrategy = getActiveStrategy(db, cfg);
+          const rawProposals = listRepairProposals(db);
+          const repairProposals = rawProposals.map((p) => {
+            const targetMem = get(db, p.memoryId);
+            const candidates = p.candidateIds
+              .map((cid) => get(db, cid))
+              .filter((m): m is MemoryRecord => !!m);
+            return {
+              ...p,
+              targetSummary: targetMem?.summary || targetMem?.content?.slice(0, 80) || '',
+              targetContent: targetMem?.content || '',
+              targetStatus: targetMem?.status || 'unknown',
+              candidates: candidates.map((c) => ({
+                id: c.id,
+                type: c.type,
+                content: c.content,
+                summary: c.summary,
+                slot_key: c.slot_key,
+              })),
+            };
+          });
+
+          const recentJobs = db.all<{
+            id: number;
+            kind: string;
+            key: string;
+            status: string;
+            attempts: number;
+            last_error: string | null;
+            created_at: number;
+            updated_at: number | null;
+          }>(
+            'SELECT id, kind, key, status, attempts, error AS last_error, created_at, finished_at AS updated_at FROM jobs ORDER BY id DESC LIMIT 20'
+          );
+
+          const ledger = getLedgerUsage(db, 'enforce');
+
+          sendJson(res, 200, {
+            ok: true,
+            activeStrategy,
+            strategies,
+            repairProposals,
+            recentJobs,
+            ledger,
+          });
+          return;
+        }
+
+        // 1.4. Recall Sandbox & Context Window Inspector (Letta ADE + Langfuse + Mem0 Audit)
+        if (subPath === '/sandbox') {
+          let queryText = (reqUrl.searchParams.get('q') || '').trim();
+          let wsId = reqUrl.searchParams.get('workspaceId') || '';
+          if (req.method === 'POST') {
+            const body = await readBodyJson(req);
+            if (typeof body.query === 'string') queryText = body.query.trim();
+            if (typeof body.workspaceId === 'string') wsId = body.workspaceId.trim();
+          }
+
+          const activeStrat = getActiveStrategy(db, cfg);
+          const stableLayer = renderStableLayer(
+            db,
+            { workspaceId: wsId },
+            cfg,
+            activeStrat.version
+          );
+
+          let recallSimulation: any = null;
+          if (queryText) {
+            const plan = buildQueryPlan({ userText: queryText, cfg });
+            const chanRes = runAllChannels(
+              db,
+              plan,
+              { workspaceId: wsId, sessionId: '', cfg },
+              { onlineBudgetMs: cfg.onlineBudgetMs || 150, t0: Date.now() }
+            );
+            const channelHitMap = new Map<string, string[]>();
+            for (const [chName, list] of Object.entries(chanRes)) {
+              for (const c of list) {
+                const arr = channelHitMap.get(c.id) || [];
+                if (!arr.includes(chName)) arr.push(chName);
+                channelHitMap.set(c.id, arr);
+              }
+            }
+
+            const recRes = recall(db, plan, {
+              workspaceId: wsId,
+              alreadyInjected: stableLayer.visibleRefs,
+              strategy: activeStrat.config,
+              strategyVersion: activeStrat.version,
+              cfg,
+            });
+
+            recallSimulation = {
+              query: queryText,
+              latencyMs: recRes.latencyMs,
+              dynamicTokens: budgetTokens(recRes.block),
+              block: recRes.block,
+              plan: {
+                tokens: plan.tokens,
+                contentTokens: plan.contentTokens,
+                entities: plan.entities,
+                intents: plan.intents,
+                temporalBrowse: plan.temporalBrowse,
+                preferenceBrowse: plan.preferenceBrowse,
+              },
+              items: recRes.items.map((it) => ({
+                memory: it.memory,
+                form: it.form,
+                score: Number(it.score.toFixed(4)),
+                tokens: it.tokens,
+                matchedChannels: channelHitMap.get(it.memory.id) || ['fts'],
+              })),
+            };
+          }
+
+          const recentInjections = db.all<{
+            id: number;
+            session_id: string;
+            turn: number;
+            memory_id: string;
+            layer: string;
+            rank: number;
+            tokens: number;
+            form: string;
+            strategy_v: number;
+            outcome: number | null;
+            created_at: number;
+            memory_type: string | null;
+            memory_content: string | null;
+            memory_summary: string | null;
+            slot_key: string | null;
+          }>(
+            `SELECT i.rowid AS id, i.session_id, i.turn, i.memory_id, i.layer, i.rank, i.tokens, i.form,
+                    i.strategy_v, i.outcome, i.created_at,
+                    m.type AS memory_type, m.content AS memory_content, m.summary AS memory_summary, m.slot_key
+             FROM injections i
+             LEFT JOIN memories m ON m.id = i.memory_id
+             ORDER BY i.created_at DESC, i.rowid DESC
+             LIMIT 30`
+          );
+
+          sendJson(res, 200, {
+            ok: true,
+            stableLayer: {
+              text: stableLayer.text,
+              stableTokens: stableLayer.stableTokens,
+              stableBudgetTokens: cfg.stableBudgetTokens || 600,
+              visibleCount: stableLayer.visibleRefs.size,
+            },
+            dynamicBudgetTokens: cfg.dynamicBudgetTokens || 1600,
+            hardBudgetTokens: cfg.hardBudgetTokens || 3200,
+            strategyVersion: activeStrat.version,
+            recallSimulation,
+            recentInjections,
           });
           return;
         }
@@ -204,17 +472,25 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const params: unknown[] = [];
 
           if (q) {
-            sql += ' AND (content LIKE ? OR summary LIKE ? OR slot_key LIKE ?)';
+            sql += ' AND (content LIKE ? OR summary LIKE ? OR slot_key LIKE ? OR id LIKE ?)';
             const qPattern = `%${q}%`;
-            params.push(qPattern, qPattern, qPattern);
+            params.push(qPattern, qPattern, qPattern, qPattern);
           }
           if (type && type !== 'all') {
-            sql += ' AND type = ?';
-            params.push(normalizeMemoryType(type));
+            if (type === 'experience') {
+              sql += " AND type IN ('episodic', 'failure', 'belief', 'goal', 'meta')";
+            } else {
+              sql += ' AND type = ?';
+              params.push(normalizeMemoryType(type));
+            }
           }
           if (status && status !== 'all') {
-            sql += ' AND status = ?';
-            params.push(status);
+            if (status === 'pinned') {
+              sql += " AND pinned = 1 AND status IN ('active', 'frozen')";
+            } else {
+              sql += ' AND status = ?';
+              params.push(status);
+            }
           }
           if (scope && scope !== 'all') {
             sql += ' AND scope = ?';
@@ -353,13 +629,38 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
 
           if (action === 'edit') {
-            const { content, summary, reason } = body;
+            const { content, summary, type, scope, slot_key, importance } = body;
             if (!content || typeof content !== 'string' || content.trim().length < 4) {
               sendJson(res, 400, { ok: false, error: '记忆内容至少需要 4 个字符' });
               return;
             }
             try {
-              const resEdit = editContent(db, id, content.trim(), summary, 'user', Date.now());
+              const now = Date.now();
+              const resEdit = editContent(db, id, content.trim(), summary, 'user', now);
+              if (resEdit.ok) {
+                const updates: string[] = [];
+                const uParams: unknown[] = [];
+                if (type && typeof type === 'string') {
+                  updates.push('type = ?');
+                  uParams.push(normalizeMemoryType(type));
+                }
+                if (scope && (scope === 'global' || scope === 'workspace' || scope === 'user' || scope === 'session')) {
+                  updates.push('scope = ?');
+                  uParams.push(scope);
+                }
+                if (slot_key !== undefined) {
+                  updates.push('slot_key = ?');
+                  uParams.push(slot_key ? String(slot_key).trim() : null);
+                }
+                if (typeof importance === 'number' && importance >= 1 && importance <= 10) {
+                  updates.push('importance = ?');
+                  uParams.push(Math.round(importance));
+                }
+                if (updates.length > 0) {
+                  uParams.push(id);
+                  db.run(`UPDATE memories SET ${updates.join(', ')} WHERE id = ?`, uParams);
+                }
+              }
               sendJson(res, 200, { id, ...resEdit });
             } catch (err: any) {
               sendJson(res, 400, { ok: false, error: err?.message || '编辑失败' });
@@ -406,12 +707,22 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
 
           if (action === 'create') {
-            const { content, type = 'preference', scope = 'global', workspaceId: customWsId, pinned = false } = body;
+            const {
+              content,
+              summary,
+              slot_key,
+              importance,
+              type = 'preference',
+              scope = 'global',
+              workspaceId: customWsId,
+              pinned = false,
+            } = body;
             if (!content || typeof content !== 'string' || content.trim().length < 4) {
               sendJson(res, 400, { ok: false, error: 'Content must be at least 4 characters' });
               return;
             }
             const clean = redactSecrets(content.trim());
+            const cleanSummary = summary && typeof summary === 'string' ? redactSecrets(summary.trim()).text : undefined;
             const now = Date.now();
             const resUpsert = upsertCandidate(
               db,
@@ -420,6 +731,9 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 scope: (scope || 'global') as any,
                 workspaceId: scope === 'workspace' ? customWsId : undefined,
                 content: clean.text,
+                summary: cleanSummary,
+                slot_key: slot_key && typeof slot_key === 'string' ? slot_key.trim() : undefined,
+                importance: typeof importance === 'number' ? Math.max(1, Math.min(10, Math.round(importance))) : 5,
                 confidence: 0.95,
                 source_kind: 'user',
                 origin_kinds: ['user'],
@@ -457,6 +771,71 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             checkAndRepairFts(db);
             cleanOldTelemetry(db);
             sendJson(res, 200, { ok: true, message: 'Maintenance completed successfully' });
+            return;
+          }
+
+          if (action === 'approve-repair') {
+            const pId = Number(body.proposalId);
+            if (!pId || isNaN(pId)) {
+              sendJson(res, 400, { ok: false, error: '无效的修复提案 ID' });
+              return;
+            }
+            const resApprove = approveRepairProposal(db, pId, 'user', Date.now());
+            if (!resApprove.ok) {
+              sendJson(res, 400, { ok: false, error: resApprove.reason || '批准修复提案失败' });
+              return;
+            }
+            sendJson(res, 200, { ok: true, proposalId: pId });
+            return;
+          }
+
+          if (action === 'reject-repair') {
+            const pId = Number(body.proposalId);
+            if (!pId || isNaN(pId)) {
+              sendJson(res, 400, { ok: false, error: '无效的修复提案 ID' });
+              return;
+            }
+            const resReject = rejectRepairProposal(db, pId);
+            if (!resReject.ok) {
+              sendJson(res, 400, { ok: false, error: resReject.reason || '拒绝修复提案失败' });
+              return;
+            }
+            sendJson(res, 200, { ok: true, proposalId: pId });
+            return;
+          }
+
+          if (action === 'evolve-strategy') {
+            const resEvolve = runStrategyEvolution(db, {}, cfg);
+            sendJson(res, 200, { ok: true, result: resEvolve });
+            return;
+          }
+
+          if (action === 'rollback-strategy') {
+            const targetVer = body.targetVersion !== undefined ? Number(body.targetVersion) : undefined;
+            const resRollback = rollbackStrategy(db, targetVer);
+            if (!resRollback.ok) {
+              sendJson(res, 400, { ok: false, error: resRollback.reason || '策略回滚失败' });
+              return;
+            }
+            sendJson(res, 200, { ok: true, rolledBackTo: resRollback.rolledBackTo });
+            return;
+          }
+
+          if (action === 'backfill') {
+            const dryRun = !!body.dryRun;
+            const statsRes = runBackfill(db, { dryRun });
+            sendJson(res, 200, { ok: true, dryRun, stats: statsRes });
+            return;
+          }
+
+          if (action === 'eval') {
+            const suite = typeof body.suite === 'string' && body.suite !== 'all' ? body.suite : undefined;
+            const allCases = generateDataset();
+            const cases = suite
+              ? allCases.filter((c) => c.suite.toLowerCase() === suite.toLowerCase())
+              : allCases;
+            const report = runEvalSuite(cases);
+            sendJson(res, 200, { ok: true, report });
             return;
           }
 

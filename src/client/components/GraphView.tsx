@@ -1,11 +1,16 @@
 import * as React from 'react';
-import type { GraphDataUI, GraphNodeUI, GraphLinkUI } from '../types.js';
+import {
+  getMemoryTypeMeta,
+  type GraphDataUI,
+  type GraphNodeUI,
+} from '../types.js';
 import { fetchGraphData } from '../api.js';
-import { RefreshIcon, SearchIcon, CloseIcon, EyeIcon } from './Icons.js';
+import { RefreshIcon, SearchIcon, CloseIcon, EyeIcon, CopyIcon } from './Icons.js';
 
 interface GraphViewProps {
   workspaceId?: string;
   onInspect: (id: string) => void;
+  onToast?: (msg: string) => void;
 }
 
 interface LayoutNode extends GraphNodeUI {
@@ -15,18 +20,45 @@ interface LayoutNode extends GraphNodeUI {
   vy: number;
   radius: number;
   color: string;
+  effectiveType: string;
+  typeLabel: string;
+  shortChar: string;
 }
 
-const TYPE_COLORS: Record<string, string> = {
-  preference: '#34c759', // Apple green
-  procedure: '#af52de',  // Apple purple
-  fact: '#0071e3',       // Apple blue
-  semantic: '#0ea5e9',   // Light blue
-  entity: '#f59e0b',     // Amber
-  default: '#64748b',    // Slate
+const ENTITY_COLOR = '#f59e0b';
+
+const REL_LABELS: Record<string, string> = {
+  supersedes: '迭代替换',
+  derived_from: '衍生提炼',
+  contradicts: '矛盾冲突',
+  related: '语义关联',
+  mentions: '提及实体',
 };
 
-export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) => {
+function resolveNodeMeta(n: GraphNodeUI) {
+  if (n.type === 'entity') {
+    return {
+      effectiveType: 'entity',
+      typeLabel: '实体标签',
+      shortChar: '@',
+      color: ENTITY_COLOR,
+    };
+  }
+  const rawType = n.memoryType || n.type;
+  const meta = getMemoryTypeMeta(rawType);
+  return {
+    effectiveType: meta.key,
+    typeLabel: meta.label,
+    shortChar: meta.shortLabel,
+    color: meta.color,
+  };
+}
+
+export const GraphView: React.FC<GraphViewProps> = ({
+  workspaceId,
+  onInspect,
+  onToast,
+}) => {
   const [data, setData] = React.useState<GraphDataUI | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState('');
@@ -35,16 +67,19 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
   const [hoveredNodeId, setHoveredNodeId] = React.useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null);
 
-  // Pan & Zoom
+  // Canvas Pan & Zoom
   const [zoom, setZoom] = React.useState(1);
   const [pan, setPan] = React.useState({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = React.useState(false);
-  const dragStartRef = React.useRef({ x: 0, y: 0 });
-  const svgRef = React.useRef<SVGSVGElement | null>(null);
+  const [isPanning, setIsPanning] = React.useState(false);
+  const panStartRef = React.useRef({ x: 0, y: 0 });
 
+  // Single Node Dragging
+  const [draggingNodeId, setDraggingNodeId] = React.useState<string | null>(null);
+  const nodeDragMovedRef = React.useRef(false);
+
+  const svgRef = React.useRef<SVGSVGElement | null>(null);
   const [layoutNodes, setLayoutNodes] = React.useState<LayoutNode[]>([]);
 
-  // Load Graph Data
   const loadGraph = React.useCallback(async () => {
     setLoading(true);
     setError('');
@@ -69,7 +104,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
       return;
     }
 
-    const width = 940;
+    const width = 960;
     const height = 580;
     const centerX = width / 2;
     const centerY = height / 2;
@@ -77,39 +112,40 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
     const rawNodes = data.nodes;
     const rawLinks = data.links;
 
-    // Initialize positions in a circle
     const count = rawNodes.length;
     const nodes: LayoutNode[] = rawNodes.map((n, i) => {
-      const angle = (i / count) * 2 * Math.PI;
-      const rInit = 140 + Math.random() * 80;
-      const isEntity = n.type === 'entity';
-      const radius = isEntity ? 12 : n.pinned ? 18 : 14;
-      const color = isEntity ? TYPE_COLORS.entity : TYPE_COLORS[n.type] || TYPE_COLORS.default;
+      const angle = (i / Math.max(1, count)) * 2 * Math.PI;
+      const ringRadius = n.pinned ? 80 + (i % 3) * 30 : 150 + (i % 5) * 32;
+      const meta = resolveNodeMeta(n);
+      const isEntity = meta.effectiveType === 'entity';
+      const connBonus = Math.min(6, (n.connections || 0) * 1.2);
+      const radius = isEntity ? 13 : (n.pinned ? 18 : 14) + connBonus * 0.5;
 
       return {
         ...n,
-        x: centerX + Math.cos(angle) * rInit,
-        y: centerY + Math.sin(angle) * rInit,
+        x: centerX + Math.cos(angle) * ringRadius,
+        y: centerY + Math.sin(angle) * ringRadius,
         vx: 0,
         vy: 0,
         radius,
-        color,
+        color: meta.color,
+        effectiveType: meta.effectiveType,
+        typeLabel: meta.typeLabel,
+        shortChar: meta.shortChar,
       };
     });
 
     const nodeMap = new Map<string, LayoutNode>();
     for (const n of nodes) nodeMap.set(n.id, n);
 
-    // Iterative physics relaxation
-    const iterations = 80;
-    const kRepel = 3200;
-    const kAttract = 0.04;
+    const iterations = 90;
+    const kRepel = 3600;
+    const kAttract = 0.045;
     const kGravity = 0.025;
 
     for (let iter = 0; iter < iterations; iter++) {
       const alpha = 1 - iter / iterations;
 
-      // 1. Repulsion between all node pairs
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
           const n1 = nodes[i];
@@ -123,7 +159,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
             distSq = 2;
           }
           const dist = Math.sqrt(distSq);
-          if (dist > 350) continue; // Cutoff for speed
+          if (dist > 360) continue;
           const force = (kRepel / distSq) * alpha;
           const fx = (dx / dist) * force;
           const fy = (dy / dist) * force;
@@ -135,7 +171,6 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
         }
       }
 
-      // 2. Attraction along links
       for (const link of rawLinks) {
         const source = nodeMap.get(link.source);
         const target = nodeMap.get(link.target);
@@ -143,7 +178,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
         const dx = target.x - source.x;
         const dy = target.y - source.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const desiredDist = 90;
+        const desiredDist = 96;
         const force = (dist - desiredDist) * kAttract * alpha;
         const fx = (dx / dist) * force;
         const fy = (dy / dist) * force;
@@ -154,49 +189,70 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
         target.vy -= fy;
       }
 
-      // 3. Center gravity & update positions
       for (const n of nodes) {
         n.vx += (centerX - n.x) * kGravity * alpha;
         n.vy += (centerY - n.y) * kGravity * alpha;
 
-        // Apply velocities with damping
         n.x += Math.max(-20, Math.min(20, n.vx * 0.4));
         n.y += Math.max(-20, Math.min(20, n.vy * 0.4));
         n.vx *= 0.5;
         n.vy *= 0.5;
 
-        // Boundaries
-        n.x = Math.max(40, Math.min(width - 40, n.x));
-        n.y = Math.max(40, Math.min(height - 40, n.y));
+        n.x = Math.max(48, Math.min(width - 48, n.x));
+        n.y = Math.max(48, Math.min(height - 48, n.y));
       }
     }
 
     setLayoutNodes(nodes);
   }, [data]);
 
-  // Handle Pan & Zoom
-  const handleMouseDown = (e: React.MouseEvent) => {
+  // Pan & Node Drag Handlers
+  const handleViewportMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
-    setIsDragging(true);
-    dragStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+    setIsPanning(true);
+    panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
   };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDragging) return;
-    setPan({
-      x: e.clientX - dragStartRef.current.x,
-      y: e.clientY - dragStartRef.current.y,
-    });
+  const handleViewportMouseMove = (e: React.MouseEvent) => {
+    if (draggingNodeId && svgRef.current) {
+      nodeDragMovedRef.current = true;
+      const rect = svgRef.current.getBoundingClientRect();
+      const scaleX = 960 / Math.max(1, rect.width);
+      const scaleY = 580 / Math.max(1, rect.height);
+      const svgX = ((e.clientX - rect.left) * scaleX - pan.x) / zoom;
+      const svgY = ((e.clientY - rect.top) * scaleY - pan.y) / zoom;
+
+      setLayoutNodes((prev) =>
+        prev.map((n) =>
+          n.id === draggingNodeId
+            ? {
+                ...n,
+                x: Math.max(30, Math.min(930, svgX)),
+                y: Math.max(30, Math.min(550, svgY)),
+              }
+            : n
+        )
+      );
+      return;
+    }
+
+    if (isPanning) {
+      setPan({
+        x: e.clientX - panStartRef.current.x,
+        y: e.clientY - panStartRef.current.y,
+      });
+    }
   };
 
-  const handleMouseUp = () => {
-    setIsDragging(false);
+  const handleViewportMouseUp = () => {
+    setIsPanning(false);
+    setDraggingNodeId(null);
   };
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
-    const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
-    setZoom((z) => Math.max(0.4, Math.min(2.5, z * zoomFactor)));
+    const zoomFactor = e.deltaY < 0 ? 1.12 : 0.9;
+    setZoom((z) => Math.max(0.35, Math.min(2.8, z * zoomFactor)));
   };
 
   const resetView = () => {
@@ -205,15 +261,23 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
     setSelectedNodeId(null);
   };
 
-  // Filtered nodes and connected links
+  // Filtered nodes
   const filteredNodes = React.useMemo(() => {
     return layoutNodes.filter((n) => {
       if (filterType !== 'all') {
-        if (filterType === 'entity' && n.type !== 'entity') return false;
-        if (filterType !== 'entity' && n.type !== filterType) return false;
+        if (filterType === 'experience') {
+          if (!['episodic', 'failure', 'belief', 'goal'].includes(n.effectiveType)) {
+            return false;
+          }
+        } else if (n.effectiveType !== filterType) {
+          return false;
+        }
       }
       if (search) {
-        return n.label.toLowerCase().includes(search.toLowerCase());
+        return (
+          n.label.toLowerCase().includes(search.toLowerCase()) ||
+          n.id.toLowerCase().includes(search.toLowerCase())
+        );
       }
       return true;
     });
@@ -224,28 +288,88 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
     [filteredNodes]
   );
 
-  const activeHoveredNode = React.useMemo(() => {
+  const activeNode = React.useMemo(() => {
     const targetId = hoveredNodeId || selectedNodeId;
     return layoutNodes.find((n) => n.id === targetId) || null;
   }, [layoutNodes, hoveredNodeId, selectedNodeId]);
 
-  // Neighbors of active node
+  const selectedNode = React.useMemo(
+    () => layoutNodes.find((n) => n.id === selectedNodeId) || null,
+    [layoutNodes, selectedNodeId]
+  );
+
+  // Connected neighbors of activeNode
   const activeNeighbors = React.useMemo(() => {
-    if (!activeHoveredNode || !data) return new Set<string>();
-    const set = new Set<string>();
-    set.add(activeHoveredNode.id);
+    if (!activeNode || !data) return new Set<string>();
+    const set = new Set<string>([activeNode.id]);
     for (const l of data.links) {
-      if (l.source === activeHoveredNode.id) set.add(l.target);
-      if (l.target === activeHoveredNode.id) set.add(l.source);
+      if (l.source === activeNode.id) set.add(l.target);
+      if (l.target === activeNode.id) set.add(l.source);
     }
     return set;
-  }, [activeHoveredNode, data]);
+  }, [activeNode, data]);
 
   const nodeMap = React.useMemo(() => {
     const map = new Map<string, LayoutNode>();
     for (const n of layoutNodes) map.set(n.id, n);
     return map;
   }, [layoutNodes]);
+
+  // Type counts for legend and pills
+  const typeCounts = React.useMemo(() => {
+    const counts = {
+      all: layoutNodes.length,
+      preference: 0,
+      semantic: 0,
+      procedural: 0,
+      experience: 0,
+      entity: 0,
+    };
+    for (const n of layoutNodes) {
+      if (n.effectiveType === 'preference') counts.preference++;
+      else if (n.effectiveType === 'semantic') counts.semantic++;
+      else if (n.effectiveType === 'procedural') counts.procedural++;
+      else if (n.effectiveType === 'entity') counts.entity++;
+      else counts.experience++;
+    }
+    return counts;
+  }, [layoutNodes]);
+
+  const handleCopyMermaid = () => {
+    if (!data || data.nodes.length === 0) return;
+    const lines = ['flowchart TD'];
+    for (const n of layoutNodes.slice(0, 30)) {
+      const safeId = n.id.replace(/[^a-zA-Z0-9_]/g, '_');
+      const cleanLabel = n.label.replace(/["()[\]{}<>]/g, ' ').trim();
+      lines.push(`  ${safeId}["${cleanLabel}"]`);
+    }
+    for (const l of data.links.slice(0, 45)) {
+      const s = l.source.replace(/[^a-zA-Z0-9_]/g, '_');
+      const t = l.target.replace(/[^a-zA-Z0-9_]/g, '_');
+      lines.push(`  ${s} -->|${l.rel}| ${t}`);
+    }
+    const md = '```mermaid\n' + lines.join('\n') + '\n```';
+    navigator.clipboard
+      .writeText(md)
+      .then(() => onToast?.('已复制 Mermaid 拓扑图代码至剪贴板！'));
+  };
+
+  // Connected links for selected node inspector
+  const selectedNodeLinks = React.useMemo(() => {
+    if (!selectedNode || !data) return [];
+    return data.links
+      .filter((l) => l.source === selectedNode.id || l.target === selectedNode.id)
+      .map((l) => {
+        const otherId = l.source === selectedNode.id ? l.target : l.source;
+        const otherNode = nodeMap.get(otherId);
+        return {
+          rel: l.rel,
+          direction: l.source === selectedNode.id ? 'out' : 'in',
+          otherId,
+          otherNode,
+        };
+      });
+  }, [selectedNode, data, nodeMap]);
 
   return (
     <div className="dshm-graph-container">
@@ -258,137 +382,174 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
             className={`dshm-graph-pill ${filterType === 'all' ? 'is-active' : ''}`}
             onClick={() => setFilterType('all')}
           >
-            全部节点
+            <span>全部节点</span>
+            <span className="dshm-tab-badge">{typeCounts.all}</span>
           </button>
           <button
             type="button"
             className={`dshm-graph-pill ${filterType === 'preference' ? 'is-active' : ''}`}
             onClick={() => setFilterType('preference')}
           >
-            <span className="dshm-pill-dot" style={{ background: TYPE_COLORS.preference }} />
-            偏好
+            <span className="dshm-pill-dot" style={{ background: '#a855f7' }} />
+            <span>偏好 ({typeCounts.preference})</span>
           </button>
           <button
             type="button"
-            className={`dshm-graph-pill ${filterType === 'fact' ? 'is-active' : ''}`}
-            onClick={() => setFilterType('fact')}
+            className={`dshm-graph-pill ${filterType === 'semantic' ? 'is-active' : ''}`}
+            onClick={() => setFilterType('semantic')}
           >
-            <span className="dshm-pill-dot" style={{ background: TYPE_COLORS.fact }} />
-            事实
+            <span className="dshm-pill-dot" style={{ background: '#10b981' }} />
+            <span>事实 ({typeCounts.semantic})</span>
           </button>
           <button
             type="button"
-            className={`dshm-graph-pill ${filterType === 'procedure' ? 'is-active' : ''}`}
-            onClick={() => setFilterType('procedure')}
+            className={`dshm-graph-pill ${filterType === 'procedural' ? 'is-active' : ''}`}
+            onClick={() => setFilterType('procedural')}
           >
-            <span className="dshm-pill-dot" style={{ background: TYPE_COLORS.procedure }} />
-            流程
+            <span className="dshm-pill-dot" style={{ background: '#38bdf8' }} />
+            <span>流程 ({typeCounts.procedural})</span>
           </button>
+          {typeCounts.experience > 0 && (
+            <button
+              type="button"
+              className={`dshm-graph-pill ${filterType === 'experience' ? 'is-active' : ''}`}
+              onClick={() => setFilterType('experience')}
+            >
+              <span className="dshm-pill-dot" style={{ background: '#f43f5e' }} />
+              <span>情景/反思 ({typeCounts.experience})</span>
+            </button>
+          )}
           <button
             type="button"
             className={`dshm-graph-pill ${filterType === 'entity' ? 'is-active' : ''}`}
             onClick={() => setFilterType('entity')}
           >
-            <span className="dshm-pill-dot" style={{ background: TYPE_COLORS.entity }} />
-            实体标签
+            <span className="dshm-pill-dot" style={{ background: ENTITY_COLOR }} />
+            <span>实体标签 ({typeCounts.entity})</span>
           </button>
         </div>
 
-        {/* Search inside Graph */}
-        <div className="dshm-graph-search">
-          <SearchIcon size={12} />
-          <input
-            type="text"
-            placeholder="在图谱中搜索节点…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          {search && (
-            <button type="button" onClick={() => setSearch('')}>
-              <CloseIcon size={11} />
+        <div className="dshm-graph-right-controls">
+          {/* Search inside Graph */}
+          <div className="dshm-graph-search">
+            <SearchIcon size={12} />
+            <input
+              type="text"
+              placeholder="过滤图谱节点…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {search && (
+              <button type="button" onClick={() => setSearch('')}>
+                <CloseIcon size={11} />
+              </button>
+            )}
+          </div>
+
+          {/* Zoom & Export Controls */}
+          <div className="dshm-graph-actions">
+            <button
+              type="button"
+              className="dshm-graph-btn"
+              onClick={() => setZoom((z) => Math.min(2.8, z * 1.2))}
+              title="放大视图"
+            >
+              +
             </button>
-          )}
-        </div>
-
-        {/* Zoom & Reset Controls */}
-        <div className="dshm-graph-actions">
-          <button
-            type="button"
-            className="dshm-graph-btn"
-            onClick={() => setZoom((z) => Math.min(2.5, z * 1.2))}
-            title="放大"
-          >
-            +
-          </button>
-          <button
-            type="button"
-            className="dshm-graph-btn"
-            onClick={() => setZoom((z) => Math.max(0.4, z / 1.2))}
-            title="缩小"
-          >
-            -
-          </button>
-          <button
-            type="button"
-            className="dshm-graph-btn"
-            onClick={resetView}
-            title="居中重置"
-          >
-            重置
-          </button>
-          <button
-            type="button"
-            className="dshm-graph-btn"
-            onClick={loadGraph}
-            title="刷新图谱"
-          >
-            <RefreshIcon size={12} />
-          </button>
+            <button
+              type="button"
+              className="dshm-graph-btn"
+              onClick={() => setZoom((z) => Math.max(0.35, z / 1.2))}
+              title="缩小视图"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="dshm-graph-btn is-wide"
+              onClick={resetView}
+              title="重置缩放与居中"
+            >
+              居中
+            </button>
+            <button
+              type="button"
+              className="dshm-graph-btn is-wide"
+              onClick={handleCopyMermaid}
+              title="复制 Mermaid 拓扑流程图代码"
+            >
+              <CopyIcon size={11} />
+              <span>Mermaid</span>
+            </button>
+            <button
+              type="button"
+              className="dshm-graph-btn"
+              onClick={loadGraph}
+              title="重新计算引力布局"
+            >
+              <RefreshIcon size={12} />
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Main Graph Viewport */}
       <div
         className="dshm-graph-viewport"
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onMouseDown={handleViewportMouseDown}
+        onMouseMove={handleViewportMouseMove}
+        onMouseUp={handleViewportMouseUp}
+        onMouseLeave={handleViewportMouseUp}
         onWheel={handleWheel}
-        style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
+        onClick={() => {
+          if (!nodeDragMovedRef.current) {
+            setSelectedNodeId(null);
+          }
+        }}
+        style={{
+          cursor: draggingNodeId ? 'grabbing' : isPanning ? 'grabbing' : 'grab',
+        }}
       >
         {loading && (
           <div className="dshm-graph-status">
             <div className="dshm-spin" style={{ display: 'inline-block', marginBottom: 8 }}>
               <RefreshIcon size={24} />
             </div>
-            <div>正在计算图谱拓扑与引力模拟…</div>
+            <div>正在构建知识拓扑与多体引力场…</div>
           </div>
         )}
 
-        {error && (
-          <div className="dshm-graph-status" style={{ color: '#f87171' }}>
-            {error}
+        {error && <div className="dshm-graph-status is-error">{error}</div>}
+
+        {!loading && !error && data && data.nodes.length === 0 && (
+          <div className="dshm-graph-status">
+            暂无知识图谱节点，记录记忆或提炼实体后将自动生成关联网络。
           </div>
         )}
 
-        {!loading && !error && data && (
+        {!loading && !error && data && data.nodes.length > 0 && (
           <svg
             ref={svgRef}
             className="dshm-graph-svg"
-            viewBox="0 0 940 580"
+            viewBox="0 0 960 580"
             width="100%"
             height="100%"
           >
             <defs>
-              {/* Radial gradient for glowing memory nodes */}
-              <radialGradient id="grad-glow" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.8" />
-                <stop offset="100%" stopColor="#1e3a8a" stopOpacity="0.1" />
-              </radialGradient>
               <filter id="node-shadow" x="-30%" y="-30%" width="160%" height="160%">
-                <feDropShadow dx="0" dy="2" stdDeviation="3" floodColor="#000000" floodOpacity="0.4" />
+                <feDropShadow dx="0" dy="2" stdDeviation="3" floodColor="#000000" floodOpacity="0.35" />
               </filter>
+              <marker
+                id="arrow-rel"
+                viewBox="0 0 10 10"
+                refX="22"
+                refY="5"
+                markerWidth="5"
+                markerHeight="5"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--dshm-brand, #4d6bfe)" fillOpacity="0.85" />
+              </marker>
             </defs>
 
             <g transform={`translate(${pan.x}, ${pan.y}) scale(${zoom})`}>
@@ -400,9 +561,11 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
                   if (!s || !t) return null;
 
                   const isLinkedToActive =
-                    activeHoveredNode &&
-                    (link.source === activeHoveredNode.id || link.target === activeHoveredNode.id);
-                  const isDimmed = activeHoveredNode && !isLinkedToActive;
+                    activeNode &&
+                    (link.source === activeNode.id || link.target === activeNode.id);
+                  const isDimmed = activeNode && !isLinkedToActive;
+                  const midX = (s.x + t.x) / 2;
+                  const midY = (s.y + t.y) / 2;
 
                   return (
                     <g key={idx}>
@@ -411,11 +574,30 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
                         y1={s.y}
                         x2={t.x}
                         y2={t.y}
-                        stroke={isLinkedToActive ? '#38bdf8' : 'var(--dsw-alias-border, #334155)'}
-                        strokeWidth={isLinkedToActive ? 2 : 1}
-                        strokeOpacity={isDimmed ? 0.08 : isLinkedToActive ? 0.9 : 0.25}
+                        stroke={
+                          isLinkedToActive
+                            ? link.rel === 'contradicts'
+                              ? 'var(--dshm-danger, #ef4444)'
+                              : 'var(--dshm-brand, #4d6bfe)'
+                            : 'var(--dshm-border-strong, rgba(148, 163, 184, 0.35))'
+                        }
+                        strokeWidth={isLinkedToActive ? 2 : 1.1}
+                        strokeOpacity={isDimmed ? 0.1 : isLinkedToActive ? 0.92 : 0.45}
                         strokeDasharray={link.rel === 'mentions' ? '3 3' : undefined}
                       />
+                      {isLinkedToActive && link.rel !== 'mentions' && (
+                        <text
+                          x={midX}
+                          y={midY - 4}
+                          textAnchor="middle"
+                          fill="var(--dshm-brand-text, #748dff)"
+                          fontSize={8.5}
+                          fontWeight={500}
+                          style={{ pointerEvents: 'none' }}
+                        >
+                          {REL_LABELS[link.rel] || link.rel}
+                        </text>
+                      )}
                     </g>
                   );
                 })}
@@ -426,8 +608,10 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
                 {layoutNodes.map((n) => {
                   const isVisible = filteredNodeIds.has(n.id);
                   const isActive = activeNeighbors.has(n.id);
-                  const isDimmed = activeHoveredNode && !isActive;
-                  const isEntity = n.type === 'entity';
+                  const isSelected = selectedNodeId === n.id;
+                  const isDimmed = activeNode && !isActive;
+                  const isEntity = n.effectiveType === 'entity';
+                  const cleanText = n.label.replace(/^\[[A-Z]+\]\s*/, '');
 
                   return (
                     <g
@@ -435,93 +619,103 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
                       className={`dshm-node-group ${isDimmed ? 'is-dimmed' : ''}`}
                       transform={`translate(${n.x}, ${n.y})`}
                       style={{
-                        opacity: !isVisible ? 0.15 : isDimmed ? 0.2 : 1,
+                        opacity: !isVisible ? 0.12 : isDimmed ? 0.2 : 1,
                         cursor: 'pointer',
-                        transition: 'opacity 0.2s ease',
+                        transition: draggingNodeId === n.id ? 'none' : 'opacity 0.2s ease',
                       }}
                       onMouseEnter={() => setHoveredNodeId(n.id)}
                       onMouseLeave={() => setHoveredNodeId(null)}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        nodeDragMovedRef.current = false;
+                        setDraggingNodeId(n.id);
+                      }}
                       onClick={(e) => {
                         e.stopPropagation();
                         setSelectedNodeId(n.id);
+                      }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
                         if (!isEntity) {
                           onInspect(n.id);
                         }
                       }}
                     >
-                      {/* Aura / Halo on hovered/pinned */}
-                      {(n.pinned || activeHoveredNode?.id === n.id) && (
+                      {/* Aura / Halo on pinned / selected / hovered */}
+                      {(n.pinned || isSelected || activeNode?.id === n.id) && (
                         <circle
                           r={n.radius + 6}
                           fill="none"
                           stroke={n.color}
-                          strokeWidth={1.5}
-                          strokeOpacity={0.6}
-                          strokeDasharray="4 2"
+                          strokeWidth={isSelected ? 2 : 1.4}
+                          strokeOpacity={isSelected ? 0.85 : 0.55}
+                          strokeDasharray={isSelected ? undefined : '4 2'}
                         />
                       )}
 
-                      {/* Main Node Shape */}
+                      {/* Main Node Shape (Supermemory Hexagon for Entities vs Circle for Memories) */}
                       {isEntity ? (
-                        <rect
-                          x={-28}
-                          y={-10}
-                          width={56}
-                          height={20}
-                          rx={10}
-                          fill="#1e293b"
+                        <polygon
+                          points="0,-16 14,-8 14,8 0,16 -14,8 -14,-8"
+                          fill="var(--dshm-bg-layer-2, #202127)"
                           stroke={n.color}
-                          strokeWidth={1.5}
+                          strokeWidth={isSelected ? 2.4 : 1.6}
                           filter="url(#node-shadow)"
                         />
                       ) : (
                         <circle
                           r={n.radius}
-                          fill="#18181b"
+                          fill="var(--dshm-bg-layer-2, #202127)"
                           stroke={n.color}
-                          strokeWidth={n.pinned ? 2.5 : 1.8}
+                          strokeWidth={isSelected ? 2.8 : n.pinned ? 2.4 : 1.8}
                           filter="url(#node-shadow)"
                         />
                       )}
 
                       {/* Node Label Text */}
                       {isEntity ? (
-                        <text
-                          y={3}
-                          textAnchor="middle"
-                          fill="#e2e8f0"
-                          fontSize={9.5}
-                          fontWeight={500}
-                          style={{ pointerEvents: 'none' }}
-                        >
-                          {n.label.slice(0, 8)}
-                        </text>
-                      ) : (
                         <>
                           <text
                             y={3.5}
                             textAnchor="middle"
-                            fill={n.color}
+                            fill="var(--dshm-warning, #f59e0b)"
+                            fontSize={9.5}
+                            fontWeight={700}
+                            style={{ pointerEvents: 'none' }}
+                          >
+                            #
+                          </text>
+                          <text
+                            y={27}
+                            textAnchor="middle"
+                            fill="var(--dshm-text-primary, #eceef2)"
                             fontSize={10}
                             fontWeight={600}
                             style={{ pointerEvents: 'none' }}
                           >
-                            {n.type === 'preference'
-                              ? '偏'
-                              : n.type === 'procedure'
-                              ? '程'
-                              : n.type === 'fact'
-                              ? '实'
-                              : '识'}
+                            {cleanText.length > 12 ? cleanText.slice(0, 11) + '…' : cleanText}
+                          </text>
+                        </>
+                      ) : (
+                        <>
+                          <text
+                            y={3.8}
+                            textAnchor="middle"
+                            fill={n.color}
+                            fontSize={10.5}
+                            fontWeight={700}
+                            style={{ pointerEvents: 'none' }}
+                          >
+                            {n.shortChar}
                           </text>
                           <text
-                            y={n.radius + 12}
+                            y={n.radius + 13}
                             textAnchor="middle"
-                            fill="var(--dsw-alias-label-secondary, #94a3b8)"
+                            fill="var(--dshm-text-secondary, #9499a3)"
                             fontSize={10}
                             style={{ pointerEvents: 'none' }}
                           >
-                            {n.label.length > 12 ? n.label.slice(0, 11) + '…' : n.label}
+                            {cleanText.length > 14 ? cleanText.slice(0, 13) + '…' : cleanText}
                           </text>
                         </>
                       )}
@@ -533,40 +727,98 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
           </svg>
         )}
 
-        {/* Floating Node Details Card */}
-        {activeHoveredNode && (
-          <div className="dshm-graph-tooltip">
-            <div className="dshm-tooltip-header">
-              <span
-                className="dshm-tag"
-                style={{
-                  background: `${activeHoveredNode.color}22`,
-                  color: activeHoveredNode.color,
-                  border: `0.5px solid ${activeHoveredNode.color}44`,
-                }}
-              >
-                {activeHoveredNode.type === 'entity'
-                  ? '实体'
-                  : activeHoveredNode.type === 'preference'
-                  ? '偏好'
-                  : activeHoveredNode.type === 'procedure'
-                  ? '流程'
-                  : '事实'}
-              </span>
-              <span className="dshm-tooltip-conn">
-                关联度: {activeHoveredNode.connections || 0}
-              </span>
-            </div>
-            <div className="dshm-tooltip-body">{activeHoveredNode.label}</div>
-            {activeHoveredNode.type !== 'entity' && (
-              <div
-                className="dshm-tooltip-footer"
-                onClick={() => onInspect(activeHoveredNode.id)}
-              >
-                <EyeIcon size={12} />
-                <span>点击查看详情与因果审计</span>
-              </div>
-            )}
+        {/* Interactive Node Inspector Drawer */}
+        {(selectedNode || activeNode) && (
+          <div
+            className="dshm-graph-tooltip"
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            {(() => {
+              const target = selectedNode || activeNode!;
+              const cleanText = target.label.replace(/^\[[A-Z]+\]\s*/, '');
+              return (
+                <>
+                  <div className="dshm-tooltip-header">
+                    <span
+                      className="dshm-tag"
+                      style={{
+                        background: `${target.color}22`,
+                        color: target.color,
+                        border: `0.5px solid ${target.color}55`,
+                      }}
+                    >
+                      {target.typeLabel}
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span className="dshm-tooltip-conn">
+                        关联 {target.connections || 0}
+                      </span>
+                      {selectedNode && (
+                        <button
+                          type="button"
+                          className="dshm-search-clear"
+                          onClick={() => setSelectedNodeId(null)}
+                          title="关闭节点面板"
+                        >
+                          <CloseIcon size={11} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="dshm-tooltip-body">{cleanText}</div>
+
+                  {target.confidence !== undefined && (
+                    <div className="dshm-tooltip-metrics">
+                      <span>置信度 {Math.round(target.confidence * 100)}%</span>
+                      <span>·</span>
+                      <span>实用度 {Math.round((target.utility ?? 0.5) * 100)}%</span>
+                      {target.pinned ? <span>· 📌 已置顶</span> : null}
+                    </div>
+                  )}
+
+                  {selectedNode && selectedNodeLinks.length > 0 && (
+                    <div className="dshm-tooltip-neighbors">
+                      <div className="dshm-tooltip-neighbors-title">
+                        邻接拓扑节点 ({selectedNodeLinks.length})
+                      </div>
+                      <div className="dshm-tooltip-neighbors-list">
+                        {selectedNodeLinks.slice(0, 5).map((item, idx) => (
+                          <button
+                            key={idx}
+                            type="button"
+                            className="dshm-neighbor-chip"
+                            onClick={() => setSelectedNodeId(item.otherId)}
+                          >
+                            <span className="dshm-neighbor-rel">
+                              {REL_LABELS[item.rel] || item.rel}
+                            </span>
+                            <span className="dshm-neighbor-label">
+                              {item.otherNode?.label
+                                .replace(/^\[[A-Z]+\]\s*/, '')
+                                .slice(0, 16) || item.otherId}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {target.effectiveType !== 'entity' && (
+                    <button
+                      type="button"
+                      className="dshm-btn dshm-btn-primary"
+                      style={{ width: '100%', marginTop: 4 }}
+                      onClick={() => onInspect(target.id)}
+                    >
+                      <EyeIcon size={13} />
+                      <span>打开详情与因果版本审计</span>
+                    </button>
+                  )}
+                </>
+              );
+            })()}
           </div>
         )}
 
@@ -574,23 +826,26 @@ export const GraphView: React.FC<GraphViewProps> = ({ workspaceId, onInspect }) 
         {data && (
           <div className="dshm-graph-legend">
             <div className="dshm-legend-item">
-              <span className="dshm-legend-dot" style={{ background: TYPE_COLORS.preference }} />
-              <span>偏好 ({data.nodes.filter((n) => n.type === 'preference').length})</span>
+              <span className="dshm-legend-dot" style={{ background: '#a855f7' }} />
+              <span>偏好 ({typeCounts.preference})</span>
             </div>
             <div className="dshm-legend-item">
-              <span className="dshm-legend-dot" style={{ background: TYPE_COLORS.fact }} />
-              <span>事实 ({data.nodes.filter((n) => n.type === 'fact' || n.type === 'semantic').length})</span>
+              <span className="dshm-legend-dot" style={{ background: '#10b981' }} />
+              <span>事实 ({typeCounts.semantic})</span>
             </div>
             <div className="dshm-legend-item">
-              <span className="dshm-legend-dot" style={{ background: TYPE_COLORS.procedure }} />
-              <span>流程 ({data.nodes.filter((n) => n.type === 'procedure').length})</span>
+              <span className="dshm-legend-dot" style={{ background: '#38bdf8' }} />
+              <span>流程 ({typeCounts.procedural})</span>
             </div>
             <div className="dshm-legend-item">
-              <span className="dshm-legend-dot" style={{ background: TYPE_COLORS.entity }} />
-              <span>实体标签 ({data.stats.entityNodes})</span>
+              <span className="dshm-legend-dot" style={{ background: ENTITY_COLOR }} />
+              <span>实体 ({typeCounts.entity})</span>
             </div>
             <span className="dshm-legend-divider">|</span>
-            <span>共 {data.stats.totalNodes} 个节点 · {data.stats.totalLinks} 条关联</span>
+            <span>
+              支持拖拽单个节点调优布局 · 双击节点直达详情 · 共 {data.stats.totalNodes} 节点 /{' '}
+              {data.stats.totalLinks} 边
+            </span>
           </div>
         )}
       </div>

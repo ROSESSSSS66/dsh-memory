@@ -1,5 +1,11 @@
 import * as React from 'react';
-import type { OverviewResponse, MemoryRecordUI, LLMConfigUI } from './types.js';
+import type {
+  OverviewResponse,
+  MemoryRecordUI,
+  LLMConfigUI,
+  WorkspaceViewMode,
+  ListDensityMode,
+} from './types.js';
 import { ensureMemoryStyle } from './styles.js';
 import { fetchOverview, fetchMemories, performAction, fetchLLMConfig } from './api.js';
 import { MemoryHeader } from './components/MemoryHeader.js';
@@ -11,8 +17,17 @@ import { MemoryDetailModal } from './components/MemoryDetailModal.js';
 import { LLMConfigModal } from './components/LLMConfigModal.js';
 import { BackupModal } from './components/BackupModal.js';
 import { GraphView } from './components/GraphView.js';
+import { CoreMemoryView } from './components/CoreMemoryView.js';
+import { EvolutionView } from './components/EvolutionView.js';
+import { RecallSandboxView } from './components/RecallSandboxView.js';
 import { BatchBar } from './components/BatchBar.js';
 import { RefreshIcon } from './components/Icons.js';
+import {
+  type GlassVariant,
+  GlassThemeContext,
+  GlassCard,
+  GlassButton,
+} from './components/GlassUI.js';
 
 export const MemoryApp: React.FC = () => {
   // Ensure styles are mounted
@@ -20,15 +35,17 @@ export const MemoryApp: React.FC = () => {
     ensureMemoryStyle();
   }, []);
 
+  const [glassVariant, setGlassVariant] = React.useState<GlassVariant>('light');
   const [overview, setOverview] = React.useState<OverviewResponse | null>(null);
   const [memories, setMemories] = React.useState<MemoryRecordUI[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
-  const [maintaining, setMaintaining] = React.useState(false);
   const [toast, setToast] = React.useState<string | null>(null);
 
-  // View Mode: 'list' | 'graph'
-  const [viewMode, setViewMode] = React.useState<'list' | 'graph'>('list');
+  // Primary Workspace View Mode: 'memories' | 'core' | 'sandbox' | 'graph' | 'evolution'
+  const [viewMode, setViewMode] = React.useState<WorkspaceViewMode>('memories');
+  // List Density Mode: 'card' | 'compact'
+  const [density, setDensity] = React.useState<ListDensityMode>('card');
 
   // Filters & Sorting
   const [searchQuery, setSearchQuery] = React.useState('');
@@ -54,34 +71,37 @@ export const MemoryApp: React.FC = () => {
     }, 3200);
   };
 
-  const loadData = React.useCallback(async (isRefresh = false) => {
-    if (isRefresh) setRefreshing(true);
-    else setLoading(true);
+  const loadData = React.useCallback(
+    async (isRefresh = false) => {
+      if (isRefresh) setRefreshing(true);
+      else setLoading(true);
 
-    try {
-      const [ovRes, listRes, cfgRes] = await Promise.all([
-        fetchOverview(),
-        fetchMemories({
-          q: searchQuery,
-          type: selectedType,
-          status: selectedStatus,
-          scope: selectedScope,
-          limit: 120,
-        }),
-        fetchLLMConfig().catch(() => null),
-      ]);
-      setOverview(ovRes);
-      setMemories(listRes.items);
-      if (cfgRes?.config) {
-        setLlmConfig(cfgRes.config);
+      try {
+        const [ovRes, listRes, cfgRes] = await Promise.all([
+          fetchOverview(),
+          fetchMemories({
+            q: searchQuery,
+            type: selectedType,
+            status: selectedStatus,
+            scope: selectedScope,
+            limit: 150,
+          }),
+          fetchLLMConfig().catch(() => null),
+        ]);
+        setOverview(ovRes);
+        setMemories(listRes.items);
+        if (cfgRes?.config) {
+          setLlmConfig(cfgRes.config);
+        }
+      } catch (err: any) {
+        console.error('[dsh-memory UI error]', err);
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
       }
-    } catch (err: any) {
-      console.error('[dsh-memory UI error]', err);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [searchQuery, selectedType, selectedStatus, selectedScope]);
+    },
+    [searchQuery, selectedType, selectedStatus, selectedScope]
+  );
 
   // Load when filters change
   React.useEffect(() => {
@@ -155,6 +175,9 @@ export const MemoryApp: React.FC = () => {
 
   const handleCreateMemory = async (data: {
     content: string;
+    summary?: string;
+    slot_key?: string;
+    importance?: number;
     type: string;
     scope: string;
     pinned: boolean;
@@ -162,19 +185,6 @@ export const MemoryApp: React.FC = () => {
     await performAction('create', data);
     showToast('新记忆已保存并成功入库！');
     loadData(true);
-  };
-
-  const handleMaintain = async () => {
-    setMaintaining(true);
-    try {
-      await performAction('maintain');
-      showToast('离线维护完成：冷记忆归档与候选清理已就绪');
-      loadData(true);
-    } catch (err: any) {
-      showToast(err?.message || '维护失败');
-    } finally {
-      setMaintaining(false);
-    }
   };
 
   // Multi-Selection handlers
@@ -238,6 +248,16 @@ export const MemoryApp: React.FC = () => {
         (a, b) =>
           (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updated_at - a.updated_at
       );
+    } else if (sortBy === 'importance') {
+      list.sort(
+        (a, b) =>
+          (b.importance ?? 5) - (a.importance ?? 5) || b.updated_at - a.updated_at
+      );
+    } else if (sortBy === 'utility') {
+      list.sort(
+        (a, b) =>
+          (b.utility ?? 0) - (a.utility ?? 0) || b.updated_at - a.updated_at
+      );
     } else if (sortBy === 'use_count') {
       list.sort((a, b) => b.use_count - a.use_count || b.updated_at - a.updated_at);
     } else if (sortBy === 'confidence') {
@@ -259,175 +279,220 @@ export const MemoryApp: React.FC = () => {
   const counts = {
     all: st?.total ?? 0,
     preference: st?.byType['preference'] ?? 0,
-    fact: st?.byType['fact'] ?? 0,
-    procedure: st?.byType['procedure'] ?? 0,
+    semantic: (st?.byType['semantic'] ?? 0) + (st?.byType['fact'] ?? 0),
+    procedural: (st?.byType['procedural'] ?? 0) + (st?.byType['procedure'] ?? 0),
+    experience:
+      (st?.byType['episodic'] ?? 0) +
+      (st?.byType['failure'] ?? 0) +
+      (st?.byType['belief'] ?? 0) +
+      (st?.byType['goal'] ?? 0) +
+      (st?.byType['meta'] ?? 0),
     candidate: st?.byStatus['candidate'] ?? 0,
     archived: st?.byStatus['archived'] ?? 0,
+    pinned: st?.pinnedCount ?? 0,
   };
 
   return (
-    <div className="dshm-root">
-      <div className="dshm-container">
-        {/* Toast notification */}
-        {toast && (
-          <div className="dshm-toast">
-            <span className="dshm-toast-icon">✨</span>
-            <span className="dshm-toast-text">{toast}</span>
-          </div>
-        )}
+    <GlassThemeContext.Provider
+      value={{ variant: glassVariant, setVariant: setGlassVariant }}
+    >
+      <div className="dshm-root" data-glass-variant={glassVariant}>
+        {/* Ambient Mesh Glow Orbs for Glassmorphism */}
+        <div className="dshm-ambient-orb is-orb-1" aria-hidden="true" />
+        <div className="dshm-ambient-orb is-orb-2" aria-hidden="true" />
+        <div className="dshm-ambient-orb is-orb-3" aria-hidden="true" />
 
-        {/* 1. Header with View Mode & Backup */}
-        <MemoryHeader
-          onRefresh={() => loadData(true)}
-          onNewMemory={() => setIsNewModalOpen(true)}
-          onMaintain={handleMaintain}
-          onOpenConfig={() => setIsConfigModalOpen(true)}
-          onOpenBackup={() => setIsBackupModalOpen(true)}
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-          llmConfig={llmConfig}
-          isRefreshing={refreshing}
-          isMaintaining={maintaining}
-        />
+        <div className="dshm-container">
+          {/* Toast notification */}
+          {toast && (
+            <div className="dshm-toast glass-base glass-dark">
+              <span className="dshm-toast-icon">✨</span>
+              <span className="dshm-toast-text">{toast}</span>
+            </div>
+          )}
 
-        {/* 2. Top Stats Tiles */}
-        <StatCards
-          overview={overview}
-          onFilterSelect={(status, type) => {
-            if (status) setSelectedStatus(status);
-            if (type) setSelectedType(type);
-          }}
-        />
-
-        {/* 3. Main Content: Graph View vs List View */}
-        {viewMode === 'graph' ? (
-          <GraphView
-            onInspect={(id) => setInspectingId(id)}
+          {/* 1. GlassNavbar Header with 5-Tab Workspace Navigation & Quick Actions */}
+          <MemoryHeader
+            onRefresh={() => loadData(true)}
+            onNewMemory={() => setIsNewModalOpen(true)}
+            onOpenConfig={() => setIsConfigModalOpen(true)}
+            onOpenBackup={() => setIsBackupModalOpen(true)}
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+            llmConfig={llmConfig}
+            isRefreshing={refreshing}
+            totalMemories={counts.all}
+            pendingRepairsCount={overview?.pendingRepairsCount || 0}
+            coreMemoryCount={overview?.coreMemoryCount || 0}
           />
-        ) : (
-          <>
-            {/* 3.1. Filter Toolbar */}
-            <FilterToolbar
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
-              selectedType={selectedType}
-              onTypeChange={setSelectedType}
-              selectedStatus={selectedStatus}
-              onStatusChange={setSelectedStatus}
-              selectedScope={selectedScope}
-              onScopeChange={setSelectedScope}
-              sortBy={sortBy}
-              onSortChange={setSortBy}
-              counts={counts}
-              totalLoaded={memories.length}
-              isAllSelected={
-                memories.length > 0 && selectedIds.size === memories.length
-              }
-              onToggleSelectAll={handleToggleSelectAll}
+
+          {/* 2. Top Bento Stat Tiles (GlassCard) */}
+          <StatCards
+            overview={overview}
+            onFilterSelect={(status, type) => {
+              setViewMode('memories');
+              if (status !== undefined) setSelectedStatus(status);
+              if (type !== undefined) setSelectedType(type);
+            }}
+            onNavigateView={setViewMode}
+          />
+
+          {/* 3. Main Workspace Views */}
+          {viewMode === 'core' ? (
+            <CoreMemoryView
+              onToast={showToast}
+              onInspect={(id) => setInspectingId(id)}
+              onUpdated={() => loadData(true)}
             />
+          ) : viewMode === 'sandbox' ? (
+            <RecallSandboxView
+              onToast={showToast}
+              onInspect={(id) => setInspectingId(id)}
+            />
+          ) : viewMode === 'graph' ? (
+            <GraphView
+              onInspect={(id) => setInspectingId(id)}
+              onToast={showToast}
+            />
+          ) : viewMode === 'evolution' ? (
+            <EvolutionView
+              onToast={showToast}
+              onInspect={(id) => setInspectingId(id)}
+              onUpdated={() => loadData(true)}
+            />
+          ) : (
+            <>
+              {/* 3.1. Filter Toolbar (GlassCard + GlassInput) */}
+              <FilterToolbar
+                searchQuery={searchQuery}
+                onSearchChange={setSearchQuery}
+                selectedType={selectedType}
+                onTypeChange={setSelectedType}
+                selectedStatus={selectedStatus}
+                onStatusChange={setSelectedStatus}
+                selectedScope={selectedScope}
+                onScopeChange={setSelectedScope}
+                sortBy={sortBy}
+                onSortChange={setSortBy}
+                density={density}
+                onDensityChange={setDensity}
+                counts={counts}
+                totalLoaded={memories.length}
+                isAllSelected={
+                  memories.length > 0 && selectedIds.size === memories.length
+                }
+                onToggleSelectAll={handleToggleSelectAll}
+              />
 
-            {/* 3.2. Memory Cards List */}
-            {loading ? (
-              <div
-                style={{
-                  textAlign: 'center',
-                  padding: '60px 0',
-                  color: 'var(--dsw-alias-label-secondary)',
-                }}
-              >
+              {/* 3.2. Memory Cards / Compact Table List */}
+              {loading ? (
+                <GlassCard variant={glassVariant} interactive={false} className="dshm-loading-state">
+                  <div className="dshm-spin">
+                    <RefreshIcon size={24} />
+                  </div>
+                  <div>正在加载长期记忆库…</div>
+                </GlassCard>
+              ) : sortedMemories.length === 0 ? (
+                <GlassCard variant={glassVariant} interactive={false} className="dshm-empty-state">
+                  <div className="dshm-empty-icon">📂</div>
+                  <h3 className="dshm-empty-title">暂无匹配的长期记忆</h3>
+                  <p className="dshm-empty-desc">
+                    {searchQuery
+                      ? `未找到与 “${searchQuery}” 相关的记忆，请尝试更换关键词。`
+                      : '当前分类下暂无记忆条目。您可以点击上方“记录记忆”手动录入，或在日常会话中让系统自动提炼。'}
+                  </p>
+                  <GlassButton
+                    type="button"
+                    variant={glassVariant}
+                    intent="primary"
+                    className="dshm-btn dshm-btn-primary"
+                    onClick={() => setIsNewModalOpen(true)}
+                  >
+                    + 记录第一条记忆
+                  </GlassButton>
+                </GlassCard>
+              ) : (
                 <div
-                  className="dshm-spin"
-                  style={{ display: 'inline-block', marginBottom: 12 }}
+                  className={
+                    density === 'compact' ? 'dshm-compact-list' : 'dshm-card-list'
+                  }
                 >
-                  <RefreshIcon size={24} />
+                  {density === 'compact' && (
+                    <div className="dshm-compact-thead glass-base glass-dark">
+                      <span className="dshm-th-left">类别 / 槽位 / 状态</span>
+                      <span className="dshm-th-body">记忆正文 (Memory Content)</span>
+                      <span className="dshm-th-right">置信度 / 命中 / 更新时间 / 操作</span>
+                    </div>
+                  )}
+                  {sortedMemories.map((mem) => (
+                    <MemoryCard
+                      key={mem.id}
+                      memory={mem}
+                      density={density}
+                      selected={selectedIds.has(mem.id)}
+                      onSelectToggle={handleSelectToggle}
+                      onPinToggle={handlePinToggle}
+                      onFreezeToggle={handleFreezeToggle}
+                      onForget={handleForget}
+                      onRestore={handleRestore}
+                      onConfirm={handleConfirm}
+                      onApprove={handleApprove}
+                      onInspect={(id) => setInspectingId(id)}
+                      onToast={showToast}
+                    />
+                  ))}
                 </div>
-                <div>正在加载长期记忆库…</div>
-              </div>
-            ) : sortedMemories.length === 0 ? (
-              <div className="dshm-empty-state">
-                <div className="dshm-empty-icon">📂</div>
-                <h3 className="dshm-empty-title">暂无匹配的长期记忆</h3>
-                <p className="dshm-empty-desc">
-                  {searchQuery
-                    ? `未找到与 “${searchQuery}” 相关的记忆，请尝试更换关键词。`
-                    : '当前分类下暂无记忆条目。您可以点击上方“记录记忆”手动录入，或在日常会话中让系统自动提炼。'}
-                </p>
-                <button
-                  type="button"
-                  className="dshm-btn dshm-btn-primary"
-                  style={{ marginTop: 8 }}
-                  onClick={() => setIsNewModalOpen(true)}
-                >
-                  + 记录第一条记忆
-                </button>
-              </div>
-            ) : (
-              <div className="dshm-card-list">
-                {sortedMemories.map((mem) => (
-                  <MemoryCard
-                    key={mem.id}
-                    memory={mem}
-                    selected={selectedIds.has(mem.id)}
-                    onSelectToggle={handleSelectToggle}
-                    onPinToggle={handlePinToggle}
-                    onFreezeToggle={handleFreezeToggle}
-                    onForget={handleForget}
-                    onRestore={handleRestore}
-                    onConfirm={handleConfirm}
-                    onApprove={handleApprove}
-                    onInspect={(id) => setInspectingId(id)}
-                    onToast={showToast}
-                  />
-                ))}
-              </div>
-            )}
-          </>
-        )}
+              )}
+            </>
+          )}
 
-        {/* 4. Floating Batch Action Bar */}
-        <BatchBar
-          selectedCount={selectedIds.size}
-          onClear={() => setSelectedIds(new Set())}
-          onBatchPin={() => handleBatchAction('pin')}
-          onBatchUnpin={() => handleBatchAction('unpin')}
-          onBatchFreeze={() => handleBatchAction('freeze')}
-          onBatchForget={() => handleBatchAction('forget')}
-          onBatchRestore={() => handleBatchAction('restore')}
-          onBatchExport={handleBatchExport}
-        />
+          {/* 4. Floating Batch Action Bar (in memories view) */}
+          {viewMode === 'memories' && (
+            <BatchBar
+              selectedCount={selectedIds.size}
+              onClear={() => setSelectedIds(new Set())}
+              onBatchPin={() => handleBatchAction('pin')}
+              onBatchUnpin={() => handleBatchAction('unpin')}
+              onBatchFreeze={() => handleBatchAction('freeze')}
+              onBatchForget={() => handleBatchAction('forget')}
+              onBatchRestore={() => handleBatchAction('restore')}
+              onBatchExport={handleBatchExport}
+            />
+          )}
 
-        {/* 5. Modals */}
-        <NewMemoryModal
-          isOpen={isNewModalOpen}
-          onClose={() => setIsNewModalOpen(false)}
-          onSubmit={handleCreateMemory}
-        />
+          {/* 5. GlassModal Modals */}
+          <NewMemoryModal
+            isOpen={isNewModalOpen}
+            onClose={() => setIsNewModalOpen(false)}
+            onSubmit={handleCreateMemory}
+          />
 
-        <MemoryDetailModal
-          memoryId={inspectingId}
-          onClose={() => setInspectingId(null)}
-          onToast={showToast}
-          onMemoryUpdated={() => loadData(true)}
-        />
+          <MemoryDetailModal
+            memoryId={inspectingId}
+            onClose={() => setInspectingId(null)}
+            onToast={showToast}
+            onMemoryUpdated={() => loadData(true)}
+          />
 
-        <LLMConfigModal
-          isOpen={isConfigModalOpen}
-          onClose={() => setIsConfigModalOpen(false)}
-          config={llmConfig}
-          onSaved={(updated) => {
-            setLlmConfig(updated);
-            loadData(true);
-          }}
-          onToast={showToast}
-        />
+          <LLMConfigModal
+            isOpen={isConfigModalOpen}
+            onClose={() => setIsConfigModalOpen(false)}
+            config={llmConfig}
+            onSaved={(updated) => {
+              setLlmConfig(updated);
+              loadData(true);
+            }}
+            onToast={showToast}
+          />
 
-        <BackupModal
-          isOpen={isBackupModalOpen}
-          onClose={() => setIsBackupModalOpen(false)}
-          onToast={showToast}
-          onSuccess={() => loadData(true)}
-        />
+          <BackupModal
+            isOpen={isBackupModalOpen}
+            onClose={() => setIsBackupModalOpen(false)}
+            onToast={showToast}
+            onSuccess={() => loadData(true)}
+          />
+        </div>
       </div>
-    </div>
+    </GlassThemeContext.Provider>
   );
 };

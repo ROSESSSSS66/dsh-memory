@@ -2,6 +2,23 @@ import * as React from 'react';
 import { MemoryApp } from './MemoryApp.js';
 import { BrainIcon } from './components/Icons.js';
 
+export {
+  GlassCard,
+  GlassButton,
+  GlassInput,
+  GlassModal,
+  GlassNavbar,
+  GlassThemeContext,
+  useGlassVariant,
+  getGlassUtilityClasses,
+  type GlassVariant,
+  type GlassCardProps,
+  type GlassButtonProps,
+  type GlassInputProps,
+  type GlassModalProps,
+  type GlassNavbarProps,
+} from './components/GlassUI.js';
+
 export const name = 'dsh-memory';
 export const inject = ['slots'];
 
