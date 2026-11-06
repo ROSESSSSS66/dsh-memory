@@ -79,6 +79,8 @@ export interface MemoryRecord {
   last_used_at?: number | null;
   last_repair_at?: number | null;
   embedding?: Uint8Array | null;
+  importance?: number; // 1..10, 默认 5 (Stanford Generative Agents / Zep)
+  invalidated_at?: number | null; // Zep 时序失效时间戳
 }
 
 export interface CandidateInput {
@@ -101,6 +103,8 @@ export interface CandidateInput {
   }[];
   entities?: string[];
   valid_from?: number | null;
+  valid_to?: number | null;
+  importance?: number; // 1..10
   status?: 'candidate' | 'active';
   actor: 'rule' | 'llm' | 'user' | 'lab' | 'maintenance';
 }
@@ -111,6 +115,25 @@ export type UpsertResult =
   | { action: 'superseded'; id: string; oldId: string }
   | { action: 'conflict_pending'; id: string; withId: string }
   | { action: 'rejected'; reason: string };
+
+export type ReconcileAction = 'ADD' | 'UPDATE' | 'DELETE' | 'NOOP';
+
+export interface ReconcileDecision {
+  action: ReconcileAction;
+  targetId?: string;
+  reason: string;
+  confidence: number;
+}
+
+export type CoreMemoryBlock = 'human' | 'persona' | 'project' | string;
+
+export interface CoreMemoryEntry {
+  block: CoreMemoryBlock;
+  content: string;
+  updated_at: number;
+  version: number;
+  id: string;
+}
 
 export type ChannelName = 'lexical' | 'entity' | 'typed' | 'temporal' | 'preference' | 'vector';
 
@@ -124,6 +147,7 @@ export interface StrategyConfig {
     freshness: number;
     consistency: number;
     specificity: number;
+    importance?: number;
   };
   minRelevance: number;
   dynamicBudgetTokens: number;
@@ -187,3 +211,51 @@ export interface Context {
   emit(event: string, ...args: any[]): void;
   [key: string]: any;
 }
+
+export interface GraphNode {
+  id: string;
+  label: string;
+  type: 'memory' | 'entity';
+  memoryType?: MemoryType;
+  scope?: Scope;
+  status?: MemoryStatus;
+  confidence?: number;
+  utility?: number;
+  pinned?: number;
+  connections?: number;
+}
+
+export interface GraphLink {
+  source: string;
+  target: string;
+  rel: string; // 'supersedes' | 'derived_from' | 'contradicts' | 'related' | 'mentions'
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  links: GraphLink[];
+  stats: {
+    totalNodes: number;
+    memoryNodes: number;
+    entityNodes: number;
+    totalLinks: number;
+  };
+}
+
+export interface MarkdownFrontmatter {
+  id: string;
+  type: MemoryType;
+  scope: Scope;
+  status: MemoryStatus;
+  summary: string;
+  slot_key?: string | null;
+  workspace_id?: string | null;
+  session_id?: string | null;
+  confidence: number;
+  utility: number;
+  pinned: number;
+  entities?: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+

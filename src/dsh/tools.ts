@@ -7,7 +7,9 @@ import { fuseCandidates, DEFAULT_STRATEGY } from '../retrieval/fuse.js';
 import { TAG_MAP } from '../retrieval/render.js';
 import { budgetTokens } from '../core/tokens.js';
 import { redactSecrets } from '../core/privacy.js';
-import { upsertCandidate } from '../core/writer.js';
+import { upsertCandidate, confirmMemory, mergeMemories } from '../core/writer.js';
+import { getCoreMemory, getAllCoreMemories, setCoreMemory, appendCoreMemory, renderCoreMemoryMarkdown } from '../core/core-memory.js';
+import { reconcileAndUpsert, reconcileCandidate } from '../evolution/reconciler.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
 export interface ToolContext {
@@ -320,5 +322,211 @@ export class MemoryTools {
     }
 
     return `saved as candidate ${(insertRes as any).id}`;
+  }
+
+  /**
+   * 5. memory_confirm (汲取自 tr1v3r/dsh-ltm)
+   */
+  public confirm(
+    params: { id: string },
+    agentCtx: { workspaceId: string }
+  ): string {
+    const rawId = (params.id || '').trim();
+    if (!rawId) return 'Error: memory id is required';
+
+    const wsId = workspaceId(agentCtx.workspaceId);
+    let mem: MemoryRecord | undefined;
+    try {
+      mem = get(this.db, rawId, { workspaceId: wsId });
+    } catch (err: any) {
+      return `Error: ${err?.message || 'Memory lookup failed'}`;
+    }
+
+    if (!mem) return `Error: memory '${rawId}' not found in current scope.`;
+
+    const res = confirmMemory(this.db, mem.id, 'llm');
+    if (!res.success) return `Error: ${res.message}`;
+    return res.message;
+  }
+
+  /**
+   * 6. memory_merge (汲取自 tr1v3r/dsh-ltm)
+   */
+  public merge(
+    params: { sourceId: string; targetId: string; reason?: string },
+    agentCtx: { workspaceId: string }
+  ): string {
+    const srcId = (params.sourceId || '').trim();
+    const tgtId = (params.targetId || '').trim();
+    if (!srcId || !tgtId) return 'Error: sourceId and targetId are required';
+
+    const wsId = workspaceId(agentCtx.workspaceId);
+    let srcMem: MemoryRecord | undefined;
+    let tgtMem: MemoryRecord | undefined;
+    try {
+      srcMem = get(this.db, srcId, { workspaceId: wsId });
+      tgtMem = get(this.db, tgtId, { workspaceId: wsId });
+    } catch (err: any) {
+      return `Error: ${err?.message || 'Lookup failed'}`;
+    }
+
+    if (!srcMem) return `Error: source memory '${srcId}' not found.`;
+    if (!tgtMem) return `Error: target memory '${tgtId}' not found.`;
+
+    const res = mergeMemories(this.db, srcMem.id, tgtMem.id, params.reason || 'manual_merge', 'llm');
+    if (!res.success) return `Error: ${res.message}`;
+    return res.message;
+  }
+
+  /**
+   * 7. core_read (汲取自 Letta/MemGPT 核心工作区)
+   */
+  public coreRead(
+    params: { block?: string },
+    agentCtx: { workspaceId: string }
+  ): string {
+    const wsId = workspaceId(agentCtx.workspaceId);
+    if (params.block) {
+      const entry = getCoreMemory(this.db, params.block, { workspaceId: wsId });
+      if (!entry) return `Core memory block '${params.block}' is empty.`;
+      return `[CORE MEMORY: ${entry.block.toUpperCase()}] (v${entry.version})\n${entry.content}`;
+    }
+    const all = getAllCoreMemories(this.db, { workspaceId: wsId });
+    if (all.length === 0) return 'No core memory blocks configured.';
+    return renderCoreMemoryMarkdown(all);
+  }
+
+  /**
+   * 8. core_set (汲取自 Letta/MemGPT 核心工作区自编辑)
+   */
+  public coreSet(
+    params: { block: string; content: string },
+    agentCtx: { workspaceId: string }
+  ): string {
+    const wsId = workspaceId(agentCtx.workspaceId);
+    if (!params.block || !params.content) {
+      return 'Error: both block and content are required';
+    }
+    try {
+      const res = setCoreMemory(this.db, params.block, params.content, { workspaceId: wsId, actor: 'assistant' });
+      return `Core memory block '${params.block}' ${res.action} successfully (id: ${res.id}).`;
+    } catch (err: any) {
+      return `Error: ${err?.message || 'Failed to set core memory'}`;
+    }
+  }
+
+  /**
+   * 9. core_append (汲取自 Letta/MemGPT core_memory_append)
+   */
+  public coreAppend(
+    params: { block: string; text: string },
+    agentCtx: { workspaceId: string }
+  ): string {
+    const wsId = workspaceId(agentCtx.workspaceId);
+    if (!params.block || !params.text) {
+      return 'Error: both block and text are required';
+    }
+    try {
+      const res = appendCoreMemory(this.db, params.block, params.text, { workspaceId: wsId, actor: 'assistant' });
+      return `Appended to core memory block '${params.block}' successfully.`;
+    } catch (err: any) {
+      return `Error: ${err?.message || 'Failed to append to core memory'}`;
+    }
+  }
+
+  /**
+   * 10. reconcile (汲取自 Mem0 智能调和)
+   */
+  public reconcile(
+    params: { content: string; type?: string; slotKey?: string },
+    agentCtx: { workspaceId: string; sessionId: string }
+  ): string {
+    const rawContent = (params.content || '').trim();
+    if (!rawContent) return 'Error: content is required for reconciliation';
+
+    const wsId = workspaceId(agentCtx.workspaceId);
+    const sessionId = agentCtx.sessionId || 'default_session';
+    const type = (params.type || 'semantic') as any;
+
+    const candInput = {
+      type,
+      content: rawContent,
+      slot_key: params.slotKey,
+      scope: 'workspace' as const,
+      workspaceId: wsId,
+      sessionId,
+      source_kind: 'assistant' as const,
+      origin_kinds: ['assistant' as const],
+      confidence: 0.8,
+      importance: 7,
+      status: 'active' as const,
+      sources: [{ session_id: sessionId, seq: 0, kind: 'assistant' }],
+      actor: 'llm' as const,
+    };
+
+    const res = reconcileAndUpsert(this.db, candInput);
+    return `Reconciled: action=${res.decision.action}, reason=${res.decision.reason}, resultAction=${res.action}`;
+  }
+
+  /**
+   * 11. 统一 memory 工具接口 (汲取自 LZMW/dsh-memory 单工具设计，节省提示词上下文)
+   */
+  public unified(
+    params: {
+      action: 'search' | 'expand' | 'note' | 'feedback' | 'confirm' | 'merge' | 'core_read' | 'core_set' | 'core_append' | 'reconcile';
+      query?: string;
+      id?: string;
+      sourceId?: string;
+      targetId?: string;
+      content?: string;
+      kind?: 'fact' | 'preference' | 'procedure';
+      contentRev?: number;
+      helpful?: boolean;
+      note?: string;
+      limit?: number;
+      types?: string[];
+      reason?: string;
+      block?: string;
+      text?: string;
+      slotKey?: string;
+    },
+    agentCtx: { workspaceId: string; sessionId: string; turn?: number }
+  ): string {
+    const action = params.action;
+    switch (action) {
+      case 'search':
+        return this.search({ query: params.query || '', limit: params.limit, types: params.types }, agentCtx);
+      case 'expand':
+        return this.expand({ id: params.id || '' }, agentCtx);
+      case 'note':
+        return this.note({ content: params.content || '', kind: params.kind || 'fact' }, agentCtx);
+      case 'feedback':
+        return this.feedback(
+          {
+            id: params.id || '',
+            contentRev: params.contentRev || 1,
+            helpful: params.helpful ?? true,
+            note: params.note,
+          },
+          agentCtx
+        );
+      case 'confirm':
+        return this.confirm({ id: params.id || '' }, agentCtx);
+      case 'merge':
+        return this.merge(
+          { sourceId: params.sourceId || '', targetId: params.targetId || '', reason: params.reason },
+          agentCtx
+        );
+      case 'core_read':
+        return this.coreRead({ block: params.block }, agentCtx);
+      case 'core_set':
+        return this.coreSet({ block: params.block || 'project', content: params.content || '' }, agentCtx);
+      case 'core_append':
+        return this.coreAppend({ block: params.block || 'project', text: params.text || params.content || '' }, agentCtx);
+      case 'reconcile':
+        return this.reconcile({ content: params.content || '', type: params.kind || 'semantic', slotKey: params.slotKey }, agentCtx);
+      default:
+        return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile`;
+    }
   }
 }

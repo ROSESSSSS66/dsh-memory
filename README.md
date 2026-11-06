@@ -4,7 +4,8 @@
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
-  <img src="https://img.shields.io/badge/Tests-230_Passed-success?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
+  <img src="https://img.shields.io/badge/Tests-274_Passed-success?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Recall%40Inject-97.2%25-blueviolet?style=flat-square" alt="Recall Rate" />
   <img src="https://img.shields.io/badge/Online_Latency-p95_%3C_1ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />
@@ -186,6 +187,26 @@ npm run build
 
 ---
 
+---
+
+## 🌟 融合 GitHub 热门高 Star 项目与社区方案优势 (Merged from GitHub Top-Star Projects)
+
+深入调研 GitHub 上最热门的 AI 长期记忆项目（**Mem0** 68k+ ⭐, **Letta / MemGPT** 25k+ ⭐, **Zep / Graphiti** 25k+ ⭐, **Stanford Generative Agents** 14k+ ⭐, **Cline Memory Bank** 等）与 DSH 社区方案，吸取各自精髓并无缝整合进本项目：
+
+| 来源项目与开源标杆 | 核心优点与痛点解决 | 本项目融合实现 |
+|---|---|---|
+| **`Mem0`**<br>(68k+ ⭐ `mem0ai/mem0`) | • **智能记忆调和 (ADD/UPDATE/DELETE/NOOP)**：候选事实与历史库智能比对，杜绝冗余并自动推演知识演进<br>• **用户/智能体/工作区分层**：精细化命名空间 | • **调和状态机** (`reconciler.ts`)：自动决策 ADD(新知识)、UPDATE(演变取代)、DELETE(显式推翻)、NOOP(重复忽略)<br>• **一键调和指令**：`/memory reconcile <content>` 及工具支持 |
+| **`Letta / MemGPT`**<br>(25k+ ⭐ `letta-ai/letta`) | • **Core Memory 核心工作区 (Scratchpad)**：模型上下文常驻、自管理的虚拟内存块（`human` 用户画像 / `persona` 智能体准则 / `project` 项目规范）<br>• **模型自编辑能力**：模型像操作寄存器一样自更新核心设定 | • **Core Memory 模块** (`core-memory.ts`)：在 System Prompt 顶部结构化呈现 Core Memory 块<br>• **模型专用自操作工具**：`core_read`, `core_set`, `core_append`<br>• **交互命令**：`/memory core [block] [content]` |
+| **`Zep / Graphiti`**<br>(25k+ ⭐ `getzep/graphiti`) | • **Bi-temporal 时序有效性模型**：区分事件发生时间与时效失效时间，自动过滤/惩罚陈旧过期事实<br>• **时序图谱连边**：追踪实体随时间的变迁状态 | • **时效惩罚因子** (`fuse.ts`)：自动结合 `valid_to` 与 `invalidated_at` 进行时序失效惩罚，杜绝幻觉召回<br>• **时序失效归档**：`invalidateMemory` 自动时间戳溯源 |
+| **`Stanford Generative Agents`**<br>(14k+ ⭐ Park et al.) | • **三因子检索打分公式**：Recency(时效) + Importance(重要度 1-10) + Relevance(相关度)<br>• 区分闲聊琐事与重大架构决策 | • **重要度因子**：为记忆显式引入 `importance` (1-10)，在多路融合打分器中与置信度/效用/时效平滑融合 |
+| **`Cline / Roo-Code`**<br>(流行 AI 编程智能体) | • **标准化 Memory Bank**：结构化 4 大 Markdown 文档 (`activeContext.md`, `systemPatterns.md`, `productContext.md`, `progress.md`)，无缝与代码库 Git 协同 | • **双向 Memory Bank 同步** (`markdown.ts`)：<br>  - `/memory export-bank [dir]` 一键生成 4 大标准文档<br>  - `/memory import-bank [dir]` 一键增量同步导入数据库 |
+| **`LZMW/dsh-memory`** | • 纯 Markdown 存储且人类可读可编辑，Git / Obsidian 无缝漫游<br>• 误删保护与 `.trash/` 备份<br>• 单工具接口设计，大幅节省 System Prompt 工具描述 Token | • **Markdown 双向同步**：`exportToMarkdown` / `importFromMarkdown`，带 YAML Frontmatter<br>• **安全回收站**：`trashMemory` 自动归档至 `.trash/`，支持 `/memory restore`<br>• **统一工具**：提供 `memory` 聚合工具调度全部原子动作 |
+| **`qwert702/dsh-memory`**<br>& **`dsh-mnemon`** | • 视觉化知识网络，直观查看实体与记忆节点互联关系<br>• Web GUI 拓扑交互与因果链追踪 | • **知识图谱生成**：`/api/dsh-memory/graph` REST 端点<br>• **Mermaid 原地渲染**：`/memory graph` 指令直接在聊天窗口输出知识拓扑流图 |
+| **`@tr1v3r/dsh-ltm`** | • 事实显式确认（主动对抗衰减）<br>• 重复知识显式合并取代<br>• 一键从历史插件无痛迁移 | • **事实确认机制**：`confirmMemory` 激活候选并强化置信度与效用（`/memory confirm`）<br>• **显式合并取代**：`mergeMemories` 转移证据/实体并标记 `supersedes`（`/memory merge`）<br>• **一键迁移**：`/memory migrate <format> <path>` 支持 JSON/Markdown 自动侦测 |
+| **`creativedswork/dsh-expmem`** | • MemGPT 式上下文压力感知，长会话自适应触发 Compaction/Distill | • **上下文压力监测**：`SessionListener` 实时追踪轮次与事件数，超阈值自适应调度后台提炼 |
+
+---
+
 ## 🎮 交互指南
 
 ### 1. 聊天窗口常用命令 (`/memory`)
@@ -193,16 +214,25 @@ npm run build
 | 交互命令 | 说明与用法 |
 |---|---|
 | `/memory status` 或 `stats` | 实时查看当前工作区记忆总数、活跃策略版本及今日 LLM 配额消耗 |
+| `/memory core [block] [内容]` | **[Letta]** 浏览或设置常驻 Core Memory 核心块（`human`, `persona`, `project`） |
+| `/memory reconcile <内容>` | **[Mem0]** 对输入内容执行智能调和（检测 ADD/UPDATE/DELETE/NOOP）并原子入库 |
+| `/memory export-bank [目录]` | **[Cline]** 一键导出标准化 Memory Bank（`activeContext`, `systemPatterns`, `productContext`, `progress`） |
+| `/memory import-bank [目录]` | **[Cline]** 从 Memory Bank 目录导入并双向同步记忆库 |
 | `/memory list [页码]` | 分页浏览已沉淀记忆，包含类型、状态与更新时间 |
-| `/memory search <关键词>` | 手动模拟召回引擎，输出匹配打分及通道明细 |
 | `/memory inspect <ID>` | 完整溯源该记忆的提炼来源（产生会话、轮次、原句摘录） |
-| `/memory pin <ID>` | 将关键规则或项目约束固定至稳定层 System Prompt（永久不衰减） |
-| `/memory unpin <ID>` | 取消固定置顶 |
-| `/memory forget <ID>` | 物理删除指定的记忆及其全文索引关联 |
-| `/memory add <文本内容>` | 快捷手动录入一条事实记忆 |
-| `/memory export <文件路径>` | 将当前记忆库完整安全备份为指定单文件 |
-| `/memory import <文件路径>` | 从备份文件安全导入恢复记忆库 |
-| `/memory eval` | 在会话中原地启动 120 条基准回归评测，即时输出命中报告 |
+| `/memory confirm <ID>` | 显式确认事实依然有效，激活候选并提升可信度与效用 |
+| `/memory merge <源ID> <目标ID>` | 将两条重复或重叠记忆合并，源记忆自动置为 `superseded` |
+| `/memory graph [limit]` | 生成知识拓扑图谱，在会话中以 Mermaid 关系图直观渲染 |
+| `/memory export-md <目录路径>` | 将记忆导出为带 YAML Frontmatter 的 Markdown 知识库目录 |
+| `/memory import-md <目录路径>` | 从 Markdown 目录增量导入或恢复记忆 |
+| `/memory migrate <format> <路径>` | 一键从 JSON 或 Markdown 备份迁移入库 |
+| `/memory pin <ID>` / `unpin <ID>` | 固定至稳定层 System Prompt / 取消置顶 |
+| `/memory freeze <ID>` / `unfreeze` | 冻结记忆（防止离线自演化修改） / 解冻 |
+| `/memory forget <ID>` | 归档记忆并自动备份存根至 `.trash/` 回收站 |
+| `/memory restore <ID>` | 从回收站或归档状态恢复为活跃记忆 |
+| `/memory export <文件路径>` | 完整备份数据库文件或 JSON 导出 |
+| `/memory import <文件路径>` | 导入数据库文件或 JSON 记录 |
+| `/memory eval` | 原地启动 120 条基准回归评测，即时输出命中报告 |
 
 ### 2. 模型自主工具 (Model Tools)
 
@@ -212,6 +242,13 @@ npm run build
 - **`memory_expand`**：当召回的摘要不足时，展开记忆完整正文与证明凭据。
 - **`memory_feedback`**：对已注入记忆的有效性给予反馈（支持 EMA 效用动态学习）。
 - **`memory_note`**：自主记录待审批的候选记忆备忘（每轮受限 ≤3 次，防自作主张）。
+- **`memory_confirm`**：显式确认已知事实的正确性，对抗记忆遗忘与时间衰减。
+- **`memory_merge`**：主动发现冲突或重复知识时，请求合并并建立替代因果链。
+- **`memory_core`**：**[Letta]** 读写常驻上下文的 Core Memory（`action: read | set | append`）。
+- **`memory`**：**统一聚合工具**，将 search / expand / note / feedback / confirm / merge / core_read / core_set / core_append / reconcile 封装为单一接口，将工具模式下的提示词开销压缩至最低。
+- **`memory_merge`**：主动发现冲突或重复知识时，请求合并并建立替代因果链。
+- **`memory`**：**统一聚合工具**，将 search / expand / note / feedback / confirm / merge 封装为单一接口，将工具模式下的提示词开销压缩至最低。
+
 
 ---
 
@@ -246,6 +283,17 @@ npm run eval
 1. **零外部服务阻断风险**：在线路径与外部网络彻底解耦。即使第三方 LLM API 故障、网络离线，DSH 的交互流畅度完全不受影响。
 2. **锁竞争与异常自愈**：数据库临时被外部进程占用或异常时，插件启动自动优雅降级，保障 DSH 正常对话，绝不产生非预期闪退。
 3. **因果与事实版本化**：每条记忆的修订严格保持单向因果链（`supersedes`），旧版事实自动沉淀为历史节点，提供完整的时间线可解释性。
+
+---
+
+## 🤝 贡献与分支规范
+
+本项目实行严格的分支保护与 PR 审核机制，所有后续代码提交均遵循：
+- **禁止直推 `main` 分支**；
+- 必须基于 `feat/*`、`fix/*` 等特性分支开发并跑通 `npm run check && npm run build`；
+- 提交 Pull Request，通过 GitHub Actions 自动化门禁与代码审查后合并。
+
+详见规范说明文档：[CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ---
 

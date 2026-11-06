@@ -16,8 +16,12 @@ export function openDb(dbPath: string = ':memory:'): Db {
   if (dbPath !== ':memory:') {
     try {
       rawDb.exec('PRAGMA journal_mode = WAL;');
+      rawDb.exec('PRAGMA synchronous = NORMAL;');
     } catch {}
   }
+  try {
+    rawDb.exec('PRAGMA busy_timeout = 5000;');
+  } catch {}
   rawDb.exec('PRAGMA foreign_keys = ON;');
 
   let savepointDepth = 0;
@@ -128,6 +132,19 @@ function runMigrations(db: Db): void {
     db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('contract_version', '1.1')");
     db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('created_at', ?)", [now.toString()]);
   }
+
+  // 保证关系表反向索引存在 (性能优化)
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS ix_mem_rel_to ON memory_relations(to_id, rel);");
+  } catch {}
+
+  // 保证 Stanford / Zep 时序与重要度字段存在
+  try {
+    db.exec("ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 5;");
+  } catch {}
+  try {
+    db.exec("ALTER TABLE memories ADD COLUMN invalidated_at INTEGER;");
+  } catch {}
 }
 
 function loadMigrationFile(fileName: string): string {

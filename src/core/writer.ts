@@ -377,8 +377,9 @@ function insertNewRecord(
       id, type, status, content, summary, slot_key, scope, workspace_id, session_id,
       origin_kinds, approved_at, approved_by, source_kind, confidence, utility,
       use_count, success_count, fail_count, token_cost, summary_cost, hash,
-      version, content_rev, pinned, valid_from, valid_to, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      version, content_rev, pinned, valid_from, valid_to, created_at, updated_at,
+      importance, invalidated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       c.type,
@@ -405,9 +406,11 @@ function insertNewRecord(
       1, // content_rev
       0, // pinned
       c.valid_from || null,
-      null, // valid_to
+      c.valid_to || null,
       now,
       now,
+      Math.max(1, Math.min(10, c.importance || 5)),
+      null, // invalidated_at
     ]
   );
 
@@ -435,7 +438,7 @@ function insertNewRecord(
   return id;
 }
 
-function addRelation(db: Db, from_id: string, to_id: string, rel: string, now: number) {
+export function addRelation(db: Db, from_id: string, to_id: string, rel: string, now: number) {
   db.run(
     `INSERT OR IGNORE INTO memory_relations(from_id, to_id, rel, metadata, created_at) VALUES (?, ?, ?, '{}', ?)`,
     [from_id, to_id, rel, now]
@@ -732,3 +735,178 @@ export function applyUtility(
     [utility, deltaSuccess, deltaFail, now, now, id]
   );
 }
+
+/**
+ * 确认记忆：提升可信度与效用，支持将 candidate 激活
+ */
+export function confirmMemory(
+  db: Db,
+  id: string,
+  actor: string = 'user',
+  now: number = Date.now()
+): { success: boolean; memory?: MemoryRecord; message: string } {
+  return db.transaction(() => {
+    const memory = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
+    if (!memory) return { success: false, message: `Memory '${id}' not found` };
+    if (memory.status === 'archived' || memory.status === 'rejected') {
+      return { success: false, message: `Memory '${id}' is ${memory.status}` };
+    }
+
+    saveVersionSnapshot(db, memory, 'confirm', actor, now);
+
+    const boostConf = actor === 'user' ? 0.2 : 0.1;
+    const newConfidence = Math.min(1.0, memory.confidence + boostConf);
+    const newUtility = Math.min(1.0, memory.utility + 0.15);
+    const newStatus = memory.status === 'candidate' ? 'active' : memory.status;
+    const approvedAt = memory.status === 'candidate' ? now : memory.approved_at;
+    const approvedBy = memory.status === 'candidate' ? actor : memory.approved_by;
+
+    db.run(
+      `UPDATE memories
+       SET confidence = ?,
+           utility = ?,
+           status = ?,
+           approved_at = ?,
+           approved_by = ?,
+           success_count = success_count + 1,
+           updated_at = ?
+       WHERE id = ?`,
+      [newConfidence, newUtility, newStatus, approvedAt, approvedBy, now, id]
+    );
+
+    const updated = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
+    return {
+      success: true,
+      memory: updated,
+      message: `Memory '${id}' confirmed (confidence: ${newConfidence.toFixed(2)}, utility: ${newUtility.toFixed(2)})`,
+    };
+  });
+}
+
+/**
+ * 显式合并记忆：将 sourceId 合并进 targetId，转移证据与实体，并将 sourceId 置为 superseded
+ */
+export function mergeMemories(
+  db: Db,
+  sourceId: string,
+  targetId: string,
+  reason: string = 'deduplication',
+  actor: string = 'user',
+  now: number = Date.now()
+): { success: boolean; message: string } {
+  return db.transaction(() => {
+    if (sourceId === targetId) {
+      return { success: false, message: 'Source and target memories must be different' };
+    }
+    const source = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [sourceId]);
+    const target = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [targetId]);
+    if (!source) return { success: false, message: `Source memory '${sourceId}' not found` };
+    if (!target) return { success: false, message: `Target memory '${targetId}' not found` };
+
+    // 保存快照
+    saveVersionSnapshot(db, source, 'merge_source', actor, now);
+    saveVersionSnapshot(db, target, 'merge_target', actor, now);
+
+    // 1. 将 source 的 sources 转移/追加到 target
+    const srcSources = db.all<{ session_id: string; seq: number; kind: string; excerpt?: string | null }>(
+      `SELECT session_id, seq, kind, excerpt FROM memory_sources WHERE memory_id = ?`,
+      [sourceId]
+    );
+    for (const s of srcSources) {
+      db.run(
+        `INSERT OR IGNORE INTO memory_sources (memory_id, content_rev, session_id, seq, kind, excerpt, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [targetId, target.content_rev, s.session_id, s.seq, s.kind, s.excerpt || null, now]
+      );
+    }
+
+    // 2. 将 source 的 entities 转移到 target
+    const srcEntities = db.all<{ entity: string }>(
+      `SELECT entity FROM memory_entities WHERE memory_id = ?`,
+      [sourceId]
+    );
+    for (const e of srcEntities) {
+      db.run(`INSERT OR IGNORE INTO memory_entities (memory_id, entity) VALUES (?, ?)`, [targetId, e.entity]);
+    }
+
+    // 3. 建立 supersedes 关系: target supersedes source
+    db.run(
+      `INSERT OR REPLACE INTO memory_relations (from_id, to_id, rel, metadata, created_at)
+       VALUES (?, ?, 'supersedes', ?, ?)`,
+      [targetId, sourceId, JSON.stringify({ reason, actor }), now]
+    );
+
+    // 4. 将 source 置为 superseded
+    db.run(
+      `UPDATE memories
+       SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ?
+       WHERE id = ?`,
+      [now, now, sourceId]
+    );
+
+    // 5. 强化 target 的效用与成功计数
+    const newUtility = Math.min(1.0, target.utility + 0.1);
+    const newConfidence = Math.min(1.0, Math.max(target.confidence, source.confidence) + 0.05);
+    db.run(
+      `UPDATE memories
+       SET utility = ?,
+           confidence = ?,
+           success_count = success_count + 1,
+           updated_at = ?
+       WHERE id = ?`,
+      [newUtility, newConfidence, now, targetId]
+    );
+
+    return {
+      success: true,
+      message: `Successfully merged '${sourceId}' into '${targetId}' (superseded '${sourceId}')`,
+    };
+  });
+}
+
+/**
+ * 恢复归档记忆为 active
+ */
+export function restoreMemory(
+  db: Db,
+  id: string,
+  actor: string = 'user',
+  now: number = Date.now()
+): { success: boolean; message: string } {
+  return db.transaction(() => {
+    const memory = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
+    if (!memory) return { success: false, message: `Memory '${id}' not found` };
+
+    saveVersionSnapshot(db, memory, 'restore', actor, now);
+    db.run(`UPDATE memories SET status = 'active', valid_to = NULL, updated_at = ? WHERE id = ?`, [now, id]);
+    return { success: true, message: `Memory '${id}' restored to active status` };
+  });
+}
+
+/**
+ * 标记记忆失效/归档 (Zep 时序失效与 Mem0 DELETE 动作)
+ */
+export function invalidateMemory(
+  db: Db,
+  id: string,
+  reason: string = 'invalidated',
+  actor: string = 'user',
+  now: number = Date.now()
+): boolean {
+  return db.transaction(() => {
+    const mem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
+    if (!mem) return false;
+    saveVersionSnapshot(db, mem, reason, actor, now);
+    db.run(
+      `UPDATE memories
+       SET status = 'archived',
+           valid_to = ?,
+           invalidated_at = ?,
+           updated_at = ?
+       WHERE id = ?`,
+      [now, now, now, id]
+    );
+    return true;
+  });
+}
+

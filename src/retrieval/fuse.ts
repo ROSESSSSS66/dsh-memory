@@ -226,10 +226,16 @@ export function fuseCandidates(
       continue;
     }
 
-    // freshness
+    // freshness (Zep: 支持时序失效区间自动惩罚)
     const ageDays = Math.max(0, (now - (mem.last_used_at ?? mem.updated_at)) / 86400000);
     const hl = HALF_LIFE[mem.type] || 365;
-    const freshness = Math.exp(-Math.LN2 * (ageDays / hl));
+    let freshnessMod = 1.0;
+    if (mem.invalidated_at && now >= mem.invalidated_at) {
+      freshnessMod = 0.1;
+    } else if (mem.valid_to && now > mem.valid_to) {
+      freshnessMod = 0.2;
+    }
+    const freshness = Math.exp(-Math.LN2 * (ageDays / hl)) * freshnessMod;
 
     // consistency (若存在 active/frozen 的矛盾项，降至 0.3，否则 1.0)
     const consistency = contradictionsSet.has(id) ? 0.3 : 1.0;
@@ -238,13 +244,18 @@ export function fuseCandidates(
     const entCount = (memoryEntitiesMap.get(id) || new Set()).size;
     const specificity = Math.min(1, 0.4 + 0.2 * Math.min(entCount, 3));
 
+    // importance (Stanford Generative Agents 1-10 因子)
+    const impWeight = weights.importance ?? 0;
+    const importanceScore = ((mem.importance ?? 5) / 10.0);
+
     const score =
       weights.relevance * relevance +
       weights.confidence * mem.confidence +
       weights.utility * mem.utility +
       weights.freshness * freshness +
       weights.consistency * consistency +
-      weights.specificity * specificity;
+      weights.specificity * specificity +
+      impWeight * importanceScore;
 
     scoredList.push({
       memory: mem,

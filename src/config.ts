@@ -23,6 +23,8 @@ export const DEFAULTS = {
     baseURL: '',
     model: 'deepseek-ai/deepseek-v4-flash-0731',
     apiKeyEnv: '',
+    apiKey: '',
+    protocol: 'chat/completions' as 'chat/completions' | 'responses' | 'messages',
   },
   dailyLLMCalls: 40,
   dailyLLMTokens: 200_000,
@@ -55,7 +57,18 @@ export const DEFAULTS = {
   },
 };
 
-export type PluginConfig = typeof DEFAULTS;
+export interface OfflineLLMConfig {
+  useDshLlm: boolean;
+  baseURL: string;
+  model: string;
+  apiKeyEnv: string;
+  apiKey?: string;
+  protocol?: 'chat/completions' | 'responses' | 'messages';
+}
+
+export type PluginConfig = Omit<typeof DEFAULTS, 'offlineLLM'> & {
+  offlineLLM: OfflineLLMConfig;
+};
 
 export function validateConfig(raw: Partial<PluginConfig> = {}): PluginConfig {
   const cfg: PluginConfig = {
@@ -148,6 +161,12 @@ export function validateConfig(raw: Partial<PluginConfig> = {}): PluginConfig {
     cfg.embedding.dim = 0;
   }
 
+  // offlineLLM protocol 校验
+  const validProtocols = ['chat/completions', 'responses', 'messages'];
+  if (!validProtocols.includes(cfg.offlineLLM.protocol as string)) {
+    cfg.offlineLLM.protocol = 'chat/completions';
+  }
+
   // 默认 scope 校验
   if (!['session', 'workspace', 'user', 'global'].includes(cfg.defaultScope)) {
     cfg.defaultScope = DEFAULTS.defaultScope;
@@ -155,3 +174,38 @@ export function validateConfig(raw: Partial<PluginConfig> = {}): PluginConfig {
 
   return cfg;
 }
+
+export function loadConfigFromDb(db: any, baseCfg: PluginConfig = DEFAULTS): PluginConfig {
+  try {
+    const row = db.get('SELECT value FROM meta WHERE key = ?', ['config_override']);
+    if (row?.value) {
+      const parsed = JSON.parse(row.value);
+      return validateConfig({
+        ...baseCfg,
+        ...parsed,
+        offlineLLM: { ...baseCfg.offlineLLM, ...(parsed.offlineLLM || {}) },
+        privacy: { ...baseCfg.privacy, ...(parsed.privacy || {}) },
+        embedding: { ...baseCfg.embedding, ...(parsed.embedding || {}) },
+      });
+    }
+  } catch {}
+  return baseCfg;
+}
+
+export function saveConfigToDb(db: any, patch: Partial<PluginConfig>): PluginConfig {
+  const current = loadConfigFromDb(db, DEFAULTS);
+  const merged: any = {
+    ...current,
+    ...patch,
+    offlineLLM: { ...current.offlineLLM, ...(patch.offlineLLM || {}) },
+    privacy: { ...current.privacy, ...(patch.privacy || {}) },
+    embedding: { ...current.embedding, ...(patch.embedding || {}) },
+  };
+  const updated = validateConfig(merged);
+  db.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
+    'config_override',
+    JSON.stringify(updated),
+  ]);
+  return updated;
+}
+

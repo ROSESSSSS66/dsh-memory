@@ -56,20 +56,32 @@ export function generateShortCodes(
     const seen = new Map<string, string>();
     let hasCollision = false;
 
+    // 1. 内存内前缀碰撞预检 (微秒级，避免内部冲突时无谓浪费数据库查询)
     for (const m of memories) {
-      // id 格式为 'm_' + 16位串
       const rawPart = m.id.startsWith('m_') ? m.id.slice(2) : m.id;
       const code = 'm_' + rawPart.slice(0, len);
       if (seen.has(code) && seen.get(code) !== m.id) {
         hasCollision = true;
         break;
       }
-      if (db && scopeCtx) {
-        try {
-          const scope = scopeFilterSQL({
-            workspaceId: scopeCtx.workspaceId,
-            sessionId: scopeCtx.sessionId || '',
-          });
+      seen.set(code, m.id);
+      result.set(m.id, code);
+    }
+
+    if (hasCollision) {
+      len++;
+      continue;
+    }
+
+    // 2. 数据库作用域唯一性校验
+    if (db && scopeCtx) {
+      try {
+        const scope = scopeFilterSQL({
+          workspaceId: scopeCtx.workspaceId,
+          sessionId: scopeCtx.sessionId || '',
+        });
+        for (const m of memories) {
+          const code = result.get(m.id)!;
           const row = db.get<{ cnt: number }>(
             `SELECT COUNT(*) as cnt FROM memories WHERE id LIKE ? AND ${scope.sql} AND id != ?`,
             [code + '%', ...scope.params, m.id]
@@ -78,12 +90,10 @@ export function generateShortCodes(
             hasCollision = true;
             break;
           }
-        } catch {
-          // 忽略数据库查询错误，保持本地短码推导
         }
+      } catch {
+        // 忽略数据库查询错误，保持本地短码推导
       }
-      seen.set(code, m.id);
-      result.set(m.id, code);
     }
 
     if (!hasCollision) {

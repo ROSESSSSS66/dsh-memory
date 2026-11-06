@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULTS, validateConfig } from '../src/config.js';
+import { DEFAULTS, validateConfig, loadConfigFromDb, saveConfigToDb } from '../src/config.js';
 import { name, inject, Config, apply } from '../src/index.js';
+import { openDb } from '../src/core/db.js';
 
 describe('Config validation', () => {
   it('should return defaults when empty object provided', () => {
@@ -65,5 +66,33 @@ describe('Plugin entry exports', () => {
     let called = false;
     apply({} as any, { enabled: false });
     expect(called).toBe(false);
+  });
+
+  it('should persist and load config override from meta table', () => {
+    const db = openDb(':memory:');
+    const initial = loadConfigFromDb(db, DEFAULTS);
+    expect(initial.offlineLLM.model).toBe(DEFAULTS.offlineLLM.model);
+
+    // Save partial patch
+    const saved = saveConfigToDb(db, {
+      offlineLLM: {
+        useDshLlm: false,
+        baseURL: 'https://api.deepseek.com/v1',
+        model: 'deepseek-chat',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        apiKey: 'sk-123456',
+      },
+      dailyLLMCalls: 80,
+    });
+    expect(saved.offlineLLM.baseURL).toBe('https://api.deepseek.com/v1');
+    expect(saved.offlineLLM.apiKey).toBe('sk-123456');
+    expect(saved.dailyLLMCalls).toBe(80);
+
+    // Load in fresh call
+    const loaded = loadConfigFromDb(db, DEFAULTS);
+    expect(loaded.offlineLLM.baseURL).toBe('https://api.deepseek.com/v1');
+    expect(loaded.offlineLLM.apiKey).toBe('sk-123456');
+    expect(loaded.dailyLLMCalls).toBe(80);
+    expect(loaded.hardBudgetTokens).toBe(DEFAULTS.hardBudgetTokens);
   });
 });

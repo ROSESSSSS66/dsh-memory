@@ -1,7 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
-import { DEFAULTS, validateConfig, type PluginConfig } from '../config.js';
+import { DEFAULTS, validateConfig, loadConfigFromDb, type PluginConfig } from '../config.js';
 import { openDb } from '../core/db.js';
 import { IngestQueue } from '../ingest/queue.js';
 import { registerSessionListener } from './session-listener.js';
@@ -23,10 +23,11 @@ import {
   checkAndRepairFts,
   cleanOldTelemetry,
 } from '../evolution/maintenance.js';
+import { registerWebRoutes } from './web.js';
 import type { Db } from '../types.js';
 
 export const name = 'dsh-memory';
-export const inject = ['agents', 'sessionProjections', 'systemPrompt', 'tools', 'commands'];
+export const inject = ['agents', 'sessionProjections', 'systemPrompt', 'tools', 'commands', 'webServer'];
 
 export const Config = {
   '~standard': {
@@ -51,16 +52,16 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
   let queue: IngestQueue | undefined;
 
   try {
-    const cfg = validateConfig(config);
-    if (!cfg.enabled) {
+    const initialCfg = validateConfig(config);
+    if (!initialCfg.enabled) {
       console.log('[dsh-memory] Plugin is disabled by configuration');
       return;
     }
 
     // 1. 打开数据库（支持配置 dbPath，默认 ~/.dsh/storages/dsh-memory/memory.db）
     const defaultDataDir = path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory');
-    const dataDir = cfg.dataDir || defaultDataDir;
-    const dbPath = cfg.dbPath || path.join(dataDir, 'memory.db');
+    const dataDir = initialCfg.dataDir || defaultDataDir;
+    const dbPath = initialCfg.dbPath || path.join(dataDir, 'memory.db');
     try {
       const parentDir = path.dirname(path.resolve(dbPath));
       if (!fs.existsSync(parentDir)) {
@@ -79,6 +80,9 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
 
     if (!db) return;
     const currentDb: Db = db;
+
+    // 合并存储中的用户自定义动态配置 (LLM 配置、风控与隐私选项)
+    const cfg = loadConfigFromDb(currentDb, initialCfg);
 
     console.log('[dsh-memory] Plugin initialized with database at:', dbPath);
 
@@ -126,6 +130,13 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
     // 2. 初始化摄入队列与 Session 事件监听器
     queue = new IngestQueue(currentDb, cfg);
     const unlistenSession = registerSessionListener(ctx, queue, cfg);
+
+    // 2.1 监听上下文压力事件，自适应触发后台抽取 (汲取自 creativedswork/dsh-expmem)
+    const unlistenPressure = ctx.on ? ctx.on('memory/context-pressure', (evt: any) => {
+      if (evt?.sessionId) {
+        scheduler.enqueue('distill', evt.sessionId, { sessionId: evt.sessionId });
+      }
+    }) : undefined;
 
     // 3. 初始化稳定层 Prompt Section 管理器
     promptSections = new PromptSectionManager(currentDb, cfg);
@@ -228,6 +239,103 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
           return tools.note(args, { workspaceId: cwd, sessionId: sessId, turn });
         },
       });
+
+      // tool 5: memory_confirm (汲取自 tr1v3r/dsh-ltm)
+      ctx.tools.register({
+        name: 'memory_confirm',
+        description: '显式确认某条记忆的事实依然正确有效，强化其可信度与效用。',
+        parameters: {
+          id: { type: 'string', required: true, description: '记忆完整 ID 或短码' },
+        },
+        output: {
+          schema: { type: 'string' },
+          render: (_args: any, value: string) => [{ type: 'text', text: value }],
+        },
+        execute: async (args: any, exec: any) => {
+          const agent = exec?.agent || ctx.agent;
+          const cwd = agent?.cwd || process.cwd();
+          return tools.confirm(args, { workspaceId: cwd });
+        },
+      });
+
+      // tool 6: memory_merge (汲取自 tr1v3r/dsh-ltm)
+      ctx.tools.register({
+        name: 'memory_merge',
+        description: '将两条重复或相关的记忆合并为一条规范记录，旧记忆自动被取代。',
+        parameters: {
+          sourceId: { type: 'string', required: true, description: '待合并/被取代的记忆 ID' },
+          targetId: { type: 'string', required: true, description: '保留并吸收证据的目标记忆 ID' },
+          reason: { type: 'string', description: '合并原因说明' },
+        },
+        output: {
+          schema: { type: 'string' },
+          render: (_args: any, value: string) => [{ type: 'text', text: value }],
+        },
+        execute: async (args: any, exec: any) => {
+          const agent = exec?.agent || ctx.agent;
+          const cwd = agent?.cwd || process.cwd();
+          return tools.merge(args, { workspaceId: cwd });
+        },
+      });
+
+      // tool 7: memory (统一工具，汲取自 LZMW/dsh-memory 单工具设计，极大节省提示词空间)
+      ctx.tools.register({
+        name: 'memory',
+        description: '长期记忆统一集成工具 (支持 search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile)。',
+        parameters: {
+          action: {
+            type: 'string',
+            required: true,
+            description: '操作类型: search | expand | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile',
+          },
+          query: { type: 'string', description: '搜索关键词 (action=search 时使用)' },
+          id: { type: 'string', description: '记忆 ID (action=expand/feedback/confirm 时使用)' },
+          sourceId: { type: 'string', description: '待合并的源记忆 ID (action=merge 时使用)' },
+          targetId: { type: 'string', description: '目标记忆 ID (action=merge 时使用)' },
+          content: { type: 'string', description: '备忘/核心块/调和正文 (action=note/core_set/reconcile 时使用)' },
+          kind: { type: 'string', description: '备忘类型: fact | preference | procedure (action=note 时使用)' },
+          contentRev: { type: 'integer', description: '正文修订号 (action=feedback 时使用)' },
+          helpful: { type: 'boolean', description: '是否有帮助 (action=feedback 时使用)' },
+          limit: { type: 'number', description: '返回结果数量限制' },
+          block: { type: 'string', description: '核心块名称 (human | persona | project, action=core_* 时使用)' },
+          text: { type: 'string', description: '追加文本 (action=core_append 时使用)' },
+        },
+        output: {
+          schema: { type: 'string' },
+          render: (_args: any, value: string) => [{ type: 'text', text: value }],
+        },
+        execute: async (args: any, exec: any) => {
+          const agent = exec?.agent || ctx.agent;
+          const cwd = agent?.cwd || process.cwd();
+          const sessId = agent?.session?.id || 'default_session';
+          const turn = agent?.position?.turn ?? 0;
+          return tools.unified(args, { workspaceId: cwd, sessionId: sessId, turn });
+        },
+      });
+
+      // tool 8: memory_core (汲取自 Letta/MemGPT 核心工作区自编辑)
+      ctx.tools.register({
+        name: 'memory_core',
+        description: '读写常驻模型上下文的核心记忆块 (human 用户画像, persona 智能体准则, project 项目强制规则)。',
+        parameters: {
+          action: { type: 'string', required: true, description: '操作: read | set | append' },
+          block: { type: 'string', description: '核心块名称: human | persona | project (默认 project)' },
+          content: { type: 'string', description: '设置的内容 (action=set 时使用)' },
+          text: { type: 'string', description: '追加的内容 (action=append 时使用)' },
+        },
+        output: {
+          schema: { type: 'string' },
+          render: (_args: any, value: string) => [{ type: 'text', text: value }],
+        },
+        execute: async (args: any, exec: any) => {
+          const agent = exec?.agent || ctx.agent;
+          const cwd = agent?.cwd || process.cwd();
+          if (args.action === 'read') return tools.coreRead({ block: args.block }, { workspaceId: cwd });
+          if (args.action === 'set') return tools.coreSet({ block: args.block || 'project', content: args.content || '' }, { workspaceId: cwd });
+          if (args.action === 'append') return tools.coreAppend({ block: args.block || 'project', text: args.text || args.content || '' }, { workspaceId: cwd });
+          return `Error: unknown action '${args.action}'. Supported: read, set, append`;
+        },
+      });
     }
 
     // 6. 初始化并注册用户命令 /memory
@@ -237,7 +345,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
       ctx.commands.register({
         name: 'memory',
         description: '长期记忆系统管理与状态检查',
-        input: { hint: 'stats | inspect <id> | list | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending' },
+        input: { hint: 'stats | inspect <id> | list | confirm <id> | merge <src> <tgt> | graph | export-md <path> | import-md <path> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending' },
         handler: ({ agent, rawInput }: any) => {
           const cwd = agent?.cwd || process.cwd();
           const sessId = agent?.session?.id || 'default_session';
@@ -252,12 +360,17 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
     // 6.2 注册 turn-stopping 延迟调度监听器
     const unlistenTurnStopping = registerTurnStopping(ctx, scheduler);
 
+    // 6.3 注册 Web 端点（供 DSH 前端侧栏面板访问）
+    const unlistenWeb = registerWebRoutes(ctx, currentDb, cfg);
+
     // 7. 卸载与清理
     if (typeof ctx.on === 'function') {
       ctx.on('dispose', () => {
         try {
+          unlistenWeb();
           unlistenTurnStopping();
           unlistenSession();
+          if (unlistenPressure) unlistenPressure();
           unlistenPreStep();
           scheduler.stop();
           promptSections?.disposeAll();

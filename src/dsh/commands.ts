@@ -1,7 +1,32 @@
 import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import type { Db, MemoryRecord } from '../types.js';
-import { get, list, stats, sources, history } from '../core/store.js';
-import { approveCandidate, editContent, rollback as rollbackVersion } from '../core/writer.js';
+import { get, list, stats, sources, history, getGraphData, renderMermaidGraph } from '../core/store.js';
+import {
+  approveCandidate,
+  editContent,
+  rollback as rollbackVersion,
+  confirmMemory,
+  mergeMemories,
+  restoreMemory,
+} from '../core/writer.js';
+import {
+  exportToMarkdown,
+  importFromMarkdown,
+  trashMemory,
+  restoreFromTrash,
+  exportMemoryBank,
+  importMemoryBank,
+} from '../core/markdown.js';
+import {
+  getCoreMemory,
+  getAllCoreMemories,
+  setCoreMemory,
+  appendCoreMemory,
+  renderCoreMemoryMarkdown,
+} from '../core/core-memory.js';
+import { reconcileAndUpsert } from '../evolution/reconciler.js';
 import { workspaceId } from '../core/scope.js';
 import { redactSecrets } from '../core/privacy.js';
 import { runBackfill } from '../ingest/backfill.js';
@@ -155,12 +180,128 @@ export class MemoryCommands {
     const mem = get(this.db, idOrShortId, { workspaceId: wsId });
     if (!mem) return `Memory '${idOrShortId}' not found.`;
 
+    // 安全回收站：先存根备份到 .trash 目录 (汲取自 LZMW/dsh-memory)
+    try {
+      const trashDir = path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory', '.trash');
+      trashMemory(this.db, mem.id, trashDir);
+    } catch {}
+
     this.db.run(
       `UPDATE memories SET status = 'archived', updated_at = ? WHERE id = ?`,
       [Date.now(), mem.id]
     );
     return `Memory ${mem.id} archived.`;
   }
+
+  /**
+   * /memory confirm <id> (汲取自 tr1v3r/dsh-ltm)
+   */
+  public confirm(idOrShortId: string, ctx: CommandContext): string {
+    const wsId = workspaceId(ctx.workspaceId);
+    const mem = get(this.db, idOrShortId, { workspaceId: wsId });
+    if (!mem) return `Memory '${idOrShortId}' not found.`;
+
+    const res = confirmMemory(this.db, mem.id, 'user');
+    return res.message;
+  }
+
+  /**
+   * /memory merge <sourceId> <targetId> (汲取自 tr1v3r/dsh-ltm)
+   */
+  public merge(sourceId: string, targetId: string, ctx: CommandContext): string {
+    if (!sourceId || !targetId) {
+      return 'Usage: /memory merge <sourceId> <targetId>';
+    }
+    const wsId = workspaceId(ctx.workspaceId);
+    const srcMem = get(this.db, sourceId, { workspaceId: wsId });
+    const tgtMem = get(this.db, targetId, { workspaceId: wsId });
+    if (!srcMem) return `Source memory '${sourceId}' not found.`;
+    if (!tgtMem) return `Target memory '${targetId}' not found.`;
+
+    const res = mergeMemories(this.db, srcMem.id, tgtMem.id, 'manual_merge', 'user');
+    return res.message;
+  }
+
+  /**
+   * /memory restore <id>
+   */
+  public restore(idOrShortId: string, ctx: CommandContext): string {
+    const wsId = workspaceId(ctx.workspaceId);
+    let mem: MemoryRecord | undefined;
+    try {
+      mem = get(this.db, idOrShortId, { workspaceId: wsId });
+    } catch {}
+
+    const trashDir = path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory', '.trash');
+    if (mem) {
+      const res = restoreMemory(this.db, mem.id, 'user');
+      return res.message;
+    }
+    const res = restoreFromTrash(this.db, idOrShortId, trashDir);
+    return res.message;
+  }
+
+  /**
+   * /memory graph [limit] (汲取自 qwert702/dsh-memory Obsidian 拓扑图)
+   */
+  public graph(limitStr?: string, ctx?: CommandContext): string {
+    const wsId = ctx ? workspaceId(ctx.workspaceId) : undefined;
+    const limit = limitStr ? parseInt(limitStr, 10) : 30;
+    const gData = getGraphData(this.db, { workspaceId: wsId, limit: isNaN(limit) ? 30 : limit });
+    const mermaid = renderMermaidGraph(gData, 25);
+
+    return [
+      `📊 知识拓扑图谱概览 (共 ${gData.stats.totalNodes} 节点: ${gData.stats.memoryNodes} 记忆 / ${gData.stats.entityNodes} 实体，${gData.stats.totalLinks} 条关联关系):`,
+      '',
+      mermaid,
+    ].join('\n');
+  }
+
+  /**
+   * /memory export-md <path> (汲取自 LZMW/dsh-memory)
+   */
+  public exportToMarkdownDir(targetDir: string, ctx: CommandContext): string {
+    const wsId = workspaceId(ctx.workspaceId);
+    const res = exportToMarkdown(this.db, targetDir, { workspaceId: wsId });
+    return `Successfully exported ${res.exportedCount} memories to Markdown directory: ${res.dir}`;
+  }
+
+  /**
+   * /memory import-md <path> (汲取自 LZMW/dsh-memory)
+   */
+  public importFromMarkdownDir(sourceDir: string, ctx: CommandContext): string {
+    const wsId = workspaceId(ctx.workspaceId);
+    const res = importFromMarkdown(this.db, sourceDir, { workspaceId: wsId, actor: 'user' });
+    let msg = `Import completed: ${res.importedCount} new memories inserted, ${res.updatedCount} updated.`;
+    if (res.errors.length > 0) {
+      msg += ` (${res.errors.length} warnings/skipped)`;
+    }
+    return msg;
+  }
+
+  /**
+   * /memory migrate <format> <path> (汲取自 tr1v3r/dsh-ltm 迁移工具)
+   */
+  public migrate(format: string, sourcePath: string, ctx: CommandContext): string {
+    const fmt = (format || '').toLowerCase();
+    if (fmt === 'markdown' || fmt === 'md') {
+      return this.importFromMarkdownDir(sourcePath, ctx);
+    }
+    if (fmt === 'json') {
+      return this.importFromJson(sourcePath, ctx);
+    }
+    if (fs.existsSync(sourcePath)) {
+      const stat = fs.statSync(sourcePath);
+      if (stat.isDirectory()) {
+        return this.importFromMarkdownDir(sourcePath, ctx);
+      }
+      if (sourcePath.endsWith('.json')) {
+        return this.importFromJson(sourcePath, ctx);
+      }
+    }
+    return `Usage: /memory migrate <markdown|json> <path>`;
+  }
+
 
   /**
    * /memory pin <id> / unpin <id>
@@ -317,7 +458,7 @@ export class MemoryCommands {
     if (!trimmed || trimmed === 'help') {
       return {
         kind: 'success',
-        text: 'Available commands: stats | inspect <id> | list | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
+        text: 'Available commands: stats | inspect <id> | list | confirm <id> | merge <src> <tgt> | restore <id> | graph [limit] | export-md <dir> | import-md <dir> | migrate <format> <path> | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
       };
     }
 
@@ -365,6 +506,65 @@ export class MemoryCommands {
         output = this.setFreeze(rest[0], false, ctx);
       } else if (sub === 'approve') {
         output = this.approve(rest[0], ctx);
+      } else if (sub === 'confirm') {
+        output = this.confirm(rest[0], ctx);
+      } else if (sub === 'merge') {
+        output = this.merge(rest[0], rest[1], ctx);
+      } else if (sub === 'restore') {
+        output = this.restore(rest[0], ctx);
+      } else if (sub === 'graph') {
+        output = this.graph(rest[0], ctx);
+      } else if (sub === 'core') {
+        const block = rest[0];
+        const content = rest.slice(1).join(' ').trim();
+        const wsId = workspaceId(ctx.workspaceId);
+        if (block && content) {
+          const res = setCoreMemory(this.db, block, content, { workspaceId: wsId, actor: 'user' });
+          output = `Core memory block '${block}' ${res.action} successfully (id: ${res.id}).`;
+        } else if (block) {
+          const entry = getCoreMemory(this.db, block, { workspaceId: wsId });
+          output = entry ? `[CORE MEMORY: ${entry.block.toUpperCase()}] (v${entry.version})\n${entry.content}` : `Core memory block '${block}' is empty.`;
+        } else {
+          const all = getAllCoreMemories(this.db, { workspaceId: wsId });
+          output = all.length > 0 ? renderCoreMemoryMarkdown(all) : 'No core memory blocks configured. Usage: /memory core <human|persona|project> <content>';
+        }
+      } else if (sub === 'export-bank') {
+        const targetDir = rest[0] || path.join(process.cwd(), '.dsh', 'memory-bank');
+        const res = exportMemoryBank(this.db, targetDir, { workspaceId: ctx.workspaceId });
+        output = `Successfully exported ${res.totalMemories} memories to Memory Bank at: ${targetDir}\nFiles: ${res.filesWritten.map((f) => path.basename(f)).join(', ')}`;
+      } else if (sub === 'import-bank') {
+        const sourceDir = rest[0] || path.join(process.cwd(), '.dsh', 'memory-bank');
+        const res = importMemoryBank(this.db, sourceDir, { workspaceId: ctx.workspaceId });
+        output = `Successfully processed ${res.filesProcessed} files and imported/updated ${res.imported} memories from Memory Bank at: ${sourceDir}`;
+      } else if (sub === 'reconcile') {
+        const content = rest.join(' ').trim();
+        if (!content) {
+          output = 'Usage: /memory reconcile <content>';
+        } else {
+          const wsId = workspaceId(ctx.workspaceId);
+          const sessId = ctx.sessionId || 'default_session';
+          const res = reconcileAndUpsert(this.db, {
+            type: 'semantic',
+            content,
+            scope: 'workspace',
+            workspaceId: wsId,
+            sessionId: sessId,
+            source_kind: 'user',
+            confidence: 0.9,
+            importance: 8,
+            status: 'active',
+            origin_kinds: ['user'],
+            sources: [{ session_id: sessId, seq: 0, kind: 'manual', excerpt: content }],
+            actor: 'user',
+          });
+          output = `Reconciliation finished: action=${res.decision.action} (${res.decision.reason}), databaseAction=${res.action}`;
+        }
+      } else if (sub === 'export-md') {
+        output = this.exportToMarkdownDir(rest[0] || path.join(process.cwd(), '.dsh', 'memory'), ctx);
+      } else if (sub === 'import-md') {
+        output = this.importFromMarkdownDir(rest[0] || path.join(process.cwd(), '.dsh', 'memory'), ctx);
+      } else if (sub === 'migrate') {
+        output = this.migrate(rest[0], rest[1], ctx);
       } else if (sub === 'approve-repair') {
         const pId = parseInt(rest[0], 10);
         if (isNaN(pId)) {

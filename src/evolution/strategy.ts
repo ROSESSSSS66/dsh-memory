@@ -42,7 +42,7 @@ export function validateAndClampStrategy(
   const scoreWeights = { ...rawWeights };
   if (sum > 0) {
     for (const k of Object.keys(scoreWeights) as (keyof typeof scoreWeights)[]) {
-      scoreWeights[k] = Number((scoreWeights[k] / sum).toFixed(4));
+      scoreWeights[k] = Number(((scoreWeights[k] ?? 0) / sum).toFixed(4));
     }
   }
 

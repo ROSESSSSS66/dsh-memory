@@ -61,6 +61,13 @@ export class JobScheduler {
   }
 
   /**
+   * 将任务入队 (幂等)
+   */
+  enqueue(kind: string, key: string, payload?: any): boolean {
+    return enqueueJob(this.db, { kind, key, payload });
+  }
+
+  /**
    * 立即触发一次离线任务消化循环
    */
   async triggerNow(): Promise<number> {

@@ -36,6 +36,152 @@ export interface OfflineLLMFailure {
 
 export type OfflineLLMResult = OfflineLLMSuccess | OfflineLLMFailure;
 
+export type LLMProtocol = 'chat/completions' | 'responses' | 'messages';
+
+export function resolveEndpointAndProtocol(
+  baseURL: string,
+  configuredProtocol: LLMProtocol = 'chat/completions'
+): { endpointUrl: string; protocol: LLMProtocol } {
+  const trimmed = (baseURL || '').trim().replace(/\/+$/, '');
+  if (trimmed.endsWith('/responses')) {
+    return { endpointUrl: trimmed, protocol: 'responses' };
+  }
+  if (trimmed.endsWith('/messages')) {
+    return { endpointUrl: trimmed, protocol: 'messages' };
+  }
+  if (trimmed.endsWith('/chat/completions')) {
+    return { endpointUrl: trimmed, protocol: 'chat/completions' };
+  }
+
+  const protocol = configuredProtocol || 'chat/completions';
+  return {
+    endpointUrl: `${trimmed}/${protocol}`,
+    protocol,
+  };
+}
+
+export function buildProtocolPayload(
+  protocol: LLMProtocol,
+  model: string,
+  sanitizedSystem: string,
+  sanitizedUser: string,
+  maxOutputTokens: number
+): { requestBody: string; headers: Record<string, string> } {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (protocol === 'messages') {
+    headers['anthropic-version'] = '2023-06-01';
+    const body = {
+      model,
+      system: sanitizedSystem,
+      messages: [{ role: 'user', content: sanitizedUser }],
+      max_tokens: maxOutputTokens,
+      temperature: 0.0,
+    };
+    return { requestBody: JSON.stringify(body), headers };
+  }
+
+  if (protocol === 'responses') {
+    const body = {
+      model,
+      input: [
+        { role: 'system', content: sanitizedSystem },
+        { role: 'user', content: sanitizedUser },
+      ],
+      temperature: 0.0,
+      max_output_tokens: maxOutputTokens,
+    };
+    return { requestBody: JSON.stringify(body), headers };
+  }
+
+  // Default: chat/completions
+  const body = {
+    model,
+    messages: [
+      { role: 'system', content: sanitizedSystem },
+      { role: 'user', content: sanitizedUser },
+    ],
+    temperature: 0.0,
+    max_tokens: maxOutputTokens,
+    response_format: { type: 'json_object' },
+  };
+  return { requestBody: JSON.stringify(body), headers };
+}
+
+export function extractResponseContent(data: any): string | null {
+  if (!data) return null;
+
+  // 1. OpenAI chat/completions: choices[0].message.content
+  if (typeof data?.choices?.[0]?.message?.content === 'string') {
+    return data.choices[0].message.content;
+  }
+
+  // 2. OpenAI responses: output_text or output array
+  if (typeof data?.output_text === 'string') {
+    return data.output_text;
+  }
+  if (Array.isArray(data?.output)) {
+    let text = '';
+    for (const item of data.output) {
+      if (typeof item === 'string') text += item;
+      else if (item?.content) {
+        if (Array.isArray(item.content)) {
+          text += item.content.map((c: any) => c?.text || '').join('');
+        } else if (typeof item.content === 'string') {
+          text += item.content;
+        }
+      }
+    }
+    if (text) return text;
+  }
+
+  // 3. Anthropic messages: content array of text blocks
+  if (Array.isArray(data?.content)) {
+    const text = data.content
+      .filter((b: any) => b?.type === 'text')
+      .map((b: any) => b?.text || '')
+      .join('');
+    if (text) return text;
+  } else if (typeof data?.content === 'string') {
+    return data.content;
+  }
+
+  // 4. Fallback direct text
+  if (typeof data?.text === 'string') {
+    return data.text;
+  }
+
+  return null;
+}
+
+export function extractResponseUsage(
+  data: any
+): { prompt_tokens: number; completion_tokens: number } | undefined {
+  const usage = data?.usage;
+  if (!usage) return undefined;
+
+  const inTokens =
+    typeof usage.prompt_tokens === 'number'
+      ? usage.prompt_tokens
+      : typeof usage.input_tokens === 'number'
+      ? usage.input_tokens
+      : undefined;
+
+  const outTokens =
+    typeof usage.completion_tokens === 'number'
+      ? usage.completion_tokens
+      : typeof usage.output_tokens === 'number'
+      ? usage.output_tokens
+      : undefined;
+
+  if (typeof inTokens === 'number' && typeof outTokens === 'number') {
+    return { prompt_tokens: inTokens, completion_tokens: outTokens };
+  }
+  return undefined;
+}
+
 /**
  * 离线 LLM 调用客户端
  * 严格执行：隐私闸门 -> 输入上界 -> 账本预留 -> 网络调用/重试 -> 结算
@@ -89,28 +235,21 @@ export async function callOfflineLLM(
   const reservedTokens = estimatedInput + params.maxOutputTokens;
   const model = cfg.offlineLLM.model || 'deepseek-ai/deepseek-v4-flash-0731';
 
-  // 读取 API 密钥（只从环境变量读取，不写入日志）
-  let apiKey = '';
-  if (cfg.offlineLLM.apiKeyEnv && process.env[cfg.offlineLLM.apiKeyEnv]) {
+  // 读取 API 密钥（优先直接配置的 apiKey，其次从环境变量读取）
+  let apiKey = cfg.offlineLLM.apiKey || '';
+  if (!apiKey && cfg.offlineLLM.apiKeyEnv && process.env[cfg.offlineLLM.apiKeyEnv]) {
     apiKey = process.env[cfg.offlineLLM.apiKeyEnv]!;
   }
 
-  // 构造标准 /chat/completions URL
-  let endpointUrl = baseURL;
-  if (!endpointUrl.endsWith('/chat/completions')) {
-    endpointUrl = endpointUrl.replace(/\/+$/, '') + '/chat/completions';
-  }
-
-  const requestBody = JSON.stringify({
+  // 构造标准端点 URL 与协议负载
+  const { endpointUrl, protocol } = resolveEndpointAndProtocol(baseURL, cfg.offlineLLM.protocol);
+  const { requestBody, headers: protocolHeaders } = buildProtocolPayload(
+    protocol,
     model,
-    messages: [
-      { role: 'system', content: sanitizedSystem },
-      { role: 'user', content: sanitizedUser },
-    ],
-    temperature: 0.0,
-    max_tokens: params.maxOutputTokens,
-    response_format: { type: 'json_object' },
-  });
+    sanitizedSystem,
+    sanitizedUser,
+    params.maxOutputTokens
+  );
 
   // 4. 重试循环（最多 3 次发送尝试）
   const maxAttempts = 3;
@@ -163,10 +302,13 @@ export async function callOfflineLLM(
 
     try {
       const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
+        ...protocolHeaders,
       };
       if (apiKey) {
         headers['Authorization'] = `Bearer ${apiKey}`;
+        if (protocol === 'messages') {
+          headers['x-api-key'] = apiKey;
+        }
       }
 
       const res = await fetchImpl(endpointUrl, {
@@ -202,7 +344,7 @@ export async function callOfflineLLM(
 
       // 请求成功，解析返回内容
       const data: any = await res.json();
-      const rawContent = data?.choices?.[0]?.message?.content;
+      const rawContent = extractResponseContent(data);
       if (typeof rawContent !== 'string') {
         settle(db, {
           ledgerId,
@@ -214,7 +356,7 @@ export async function callOfflineLLM(
       }
 
       // 处理使用量结算
-      const usage = data?.usage;
+      const usage = extractResponseUsage(data);
       if (
         usage &&
         typeof usage.prompt_tokens === 'number' &&

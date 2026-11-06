@@ -325,4 +325,115 @@ describe('Evolution LLM Client (M3-T1)', () => {
     expect((res as any).error).toBe('daily_calls_exceeded');
     expect(fetchCount).toBe(0);
   });
+
+  it('correctly handles messages protocol (Claude) request and response parsing', async () => {
+    let capturedUrl = '';
+    let capturedHeaders: any = {};
+    let capturedBody: any = {};
+
+    const mockFetch: typeof fetch = async (url: any, init: any) => {
+      capturedUrl = String(url);
+      capturedHeaders = init.headers;
+      capturedBody = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({
+          content: [{ type: 'text', text: '{"analysis":"ok"}' }],
+          usage: { input_tokens: 120, output_tokens: 30 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const claudeCfg: PluginConfig = {
+      ...baseCfg,
+      offlineLLM: {
+        useDshLlm: false,
+        baseURL: 'https://api.anthropic.com/v1',
+        model: 'claude-3-5-sonnet',
+        apiKey: 'sk-ant-test',
+        apiKeyEnv: '',
+        protocol: 'messages',
+      },
+      privacy: {
+        offlineConsent: true,
+        allowedOfflineEndpoints: ['https://api.anthropic.com'],
+      },
+    };
+
+    const res = await callOfflineLLM(
+      db,
+      {
+        jobKind: 'distill',
+        promptVersion: 'distill-v2',
+        systemPrompt: 'Sys',
+        userPrompt: 'Usr',
+        maxOutputTokens: 1000,
+        cwd: '/ws/demo',
+        workspaceId: 'ws1',
+        fetchFn: mockFetch,
+      },
+      claudeCfg
+    );
+
+    expect(res.ok).toBe(true);
+    expect((res as any).content).toBe('{"analysis":"ok"}');
+    expect(capturedUrl).toBe('https://api.anthropic.com/v1/messages');
+    expect(capturedHeaders['x-api-key']).toBe('sk-ant-test');
+    expect(capturedHeaders['anthropic-version']).toBe('2023-06-01');
+    expect(capturedBody.system).toBe('Sys');
+  });
+
+  it('correctly handles responses protocol request and response parsing', async () => {
+    let capturedUrl = '';
+    let capturedBody: any = {};
+
+    const mockFetch: typeof fetch = async (url: any, init: any) => {
+      capturedUrl = String(url);
+      capturedBody = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({
+          output_text: '{"result":"responses_ok"}',
+          usage: { prompt_tokens: 80, completion_tokens: 25 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const respCfg: PluginConfig = {
+      ...baseCfg,
+      offlineLLM: {
+        useDshLlm: false,
+        baseURL: 'https://www.dorodoro.xyz/v1',
+        model: 'deepseek-chat',
+        apiKey: 'sk-doro-key',
+        apiKeyEnv: '',
+        protocol: 'responses',
+      },
+      privacy: {
+        offlineConsent: true,
+        allowedOfflineEndpoints: ['https://www.dorodoro.xyz'],
+      },
+    };
+
+    const res = await callOfflineLLM(
+      db,
+      {
+        jobKind: 'distill',
+        promptVersion: 'distill-v2',
+        systemPrompt: 'Sys',
+        userPrompt: 'Usr',
+        maxOutputTokens: 1000,
+        cwd: '/ws/demo',
+        workspaceId: 'ws1',
+        fetchFn: mockFetch,
+      },
+      respCfg
+    );
+
+    expect(res.ok).toBe(true);
+    expect((res as any).content).toBe('{"result":"responses_ok"}');
+    expect(capturedUrl).toBe('https://www.dorodoro.xyz/v1/responses');
+    expect(capturedBody.input).toBeDefined();
+    expect(capturedBody.max_output_tokens).toBe(1000);
+  });
 });

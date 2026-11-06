@@ -22,12 +22,18 @@ export const IGNORED_EVENT_TYPES = new Set([
 export class SessionListener {
   private queue: IngestQueue;
   private cfg: PluginConfig;
+  private ctx?: Context;
   // session_id -> Map<callId, toolName>
   private toolCallMaps = new Map<string, Map<string, string>>();
+  // session_id -> turn count & event count (汲取自 dsh-expmem 上下文压力感知)
+  private sessionTurnCounts = new Map<string, number>();
+  private sessionEventCounts = new Map<string, number>();
+  private pressureNotified = new Set<string>();
 
-  constructor(queue: IngestQueue, cfg: PluginConfig = DEFAULTS) {
+  constructor(queue: IngestQueue, cfg: PluginConfig = DEFAULTS, ctx?: Context) {
     this.queue = queue;
     this.cfg = cfg;
+    this.ctx = ctx;
   }
 
   public handleEvent(session: any, event: any): void {
@@ -184,6 +190,27 @@ export class SessionListener {
     };
 
     this.queue.push(rawEvent);
+
+    // 4. 上下文压力感知 (汲取自 creativedswork/dsh-expmem)
+    if (turn !== null) {
+      const prevTurn = this.sessionTurnCounts.get(sessionId) || 0;
+      if (turn > prevTurn) this.sessionTurnCounts.set(sessionId, turn);
+    }
+    const eventCount = (this.sessionEventCounts.get(sessionId) || 0) + 1;
+    this.sessionEventCounts.set(sessionId, eventCount);
+
+    const currentTurn = this.sessionTurnCounts.get(sessionId) || 0;
+    if ((currentTurn >= 15 || eventCount >= 40) && !this.pressureNotified.has(sessionId)) {
+      this.pressureNotified.add(sessionId);
+      if (this.ctx && typeof this.ctx.emit === 'function') {
+        this.ctx.emit('memory/context-pressure', {
+          sessionId,
+          workspaceId: wsId,
+          turn: currentTurn,
+          eventCount,
+        });
+      }
+    }
   }
 }
 
@@ -192,7 +219,7 @@ export function registerSessionListener(
   queue: IngestQueue,
   cfg: PluginConfig = DEFAULTS
 ): () => void {
-  const listener = new SessionListener(queue, cfg);
+  const listener = new SessionListener(queue, cfg, ctx);
   return ctx.on('session/event', (session: any, event: any) => {
     listener.handleEvent(session, event);
   });

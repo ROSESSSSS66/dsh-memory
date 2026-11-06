@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS memories (
   pinned        INTEGER NOT NULL DEFAULT 0,  -- 1 表示属于稳定层（进入 system prompt 段）
   valid_from    INTEGER,
   valid_to      INTEGER,
+  importance    INTEGER NOT NULL DEFAULT 5,  -- 1..10 (Stanford Generative Agents / Zep)
+  invalidated_at INTEGER,                    -- Zep 时序失效时间戳
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
   last_used_at  INTEGER,
@@ -93,6 +95,7 @@ CREATE TABLE IF NOT EXISTS memory_relations (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (from_id, to_id, rel)
 );
+CREATE INDEX IF NOT EXISTS ix_mem_rel_to ON memory_relations(to_id, rel);
 
 -- 版本快照：每次修改 memories 前，把旧行的完整 JSON 存到这里
 CREATE TABLE IF NOT EXISTS memory_versions (

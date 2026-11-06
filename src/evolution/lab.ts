@@ -53,7 +53,7 @@ export function mutateStrategy(
   // 3. 评分权重变异
   const scoreWeights = { ...base.scoreWeights };
   for (const k of Object.keys(scoreWeights) as (keyof typeof scoreWeights)[]) {
-    scoreWeights[k] = Math.max(0.01, mut(scoreWeights[k], 0.01, 1.0));
+    scoreWeights[k] = Math.max(0.01, mut(scoreWeights[k] ?? 0.2, 0.01, 1.0));
   }
 
   // 4. minRelevance 变异

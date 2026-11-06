@@ -21,6 +21,7 @@ export function redactSecrets(input: string): RedactResult {
   const pemRegex = /-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY-----/g;
   if (pemRegex.test(text)) {
     detectedKinds.push('PEM_KEY');
+    pemRegex.lastIndex = 0;
     text = text.replace(pemRegex, '[REDACTED:PEM_KEY]');
   }
 
@@ -28,27 +29,54 @@ export function redactSecrets(input: string): RedactResult {
   const jwtRegex = /\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]+\b/g;
   if (jwtRegex.test(text)) {
     detectedKinds.push('JWT');
+    jwtRegex.lastIndex = 0;
     text = text.replace(jwtRegex, '[REDACTED:JWT]');
   }
 
-  // 3. 带有账号密码的 URL (例如 postgres://user:pass@host:5432/db)
-  const urlCredRegex = /((?:https?|postgres|postgresql|mysql|mongodb|redis):\/\/[^:\s\/]+):([^@\s\/]+)(@[^\s\/]+)/gi;
-  if (urlCredRegex.test(text)) {
-    detectedKinds.push('URL_CREDENTIAL');
-    text = text.replace(urlCredRegex, '$1:[REDACTED:CREDENTIAL]$3');
+  // 3. 带有账号密码的 URL (支持任意复杂密码如含 @ 符号与各类协议)
+  const urlRegex = /\b((?:https?|ftp|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis[s]?|amqp[s]?):\/\/)([^\s'"]+)/gi;
+  if (urlRegex.test(text)) {
+    urlRegex.lastIndex = 0;
+    text = text.replace(urlRegex, (fullUrl, scheme, authorityAndPath) => {
+      const atIdx = authorityAndPath.lastIndexOf('@');
+      if (atIdx === -1) return fullUrl; // 无凭证
+
+      const userinfo = authorityAndPath.slice(0, atIdx);
+      const hostAndPath = authorityAndPath.slice(atIdx + 1);
+
+      const colonIdx = userinfo.indexOf(':');
+      if (colonIdx === -1) {
+        detectedKinds.push('URL_CREDENTIAL');
+        return `${scheme}[REDACTED:CREDENTIAL]@${hostAndPath}`;
+      } else {
+        const user = userinfo.slice(0, colonIdx);
+        detectedKinds.push('URL_CREDENTIAL');
+        return `${scheme}${user}:[REDACTED:CREDENTIAL]@${hostAndPath}`;
+      }
+    });
   }
 
   // 4. Authorization 头 / 凭证 (Bearer / Basic)
   const authHeaderRegex = /\b(Bearer|Basic)\s+([a-zA-Z0-9_.\-~+/=]{16,})\b/gi;
   if (authHeaderRegex.test(text)) {
     detectedKinds.push('AUTH_TOKEN');
+    authHeaderRegex.lastIndex = 0;
     text = text.replace(authHeaderRegex, '$1 [REDACTED:TOKEN]');
   }
 
-  // 5. 显式敏感字段赋值 (例如 api_key = "...", password: "...")
-  const keyValRegex = /\b(api[_-]?key|secret|password|passwd|access[_-]?token|auth[_-]?token)\s*([:=])\s*(['"]?)([a-zA-Z0-9_.\-]{8,})\3/gi;
+  // 5. 常见厂商独立 API Key / Access Token (如 sk-..., ghp_..., github_pat_..., AKIA..., xox...)
+  const standaloneKeyRegex = /\b(sk-(?:ant-api\d{2}-|proj-|live-|test-)?[a-zA-Z0-9_\-]{20,}|gh[pousr]_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{50,}|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9a-zA-Z]{10,48})\b/g;
+  if (standaloneKeyRegex.test(text)) {
+    detectedKinds.push('API_KEY');
+    standaloneKeyRegex.lastIndex = 0;
+    text = text.replace(standaloneKeyRegex, '[REDACTED:API_KEY]');
+  }
+
+  // 6. 显式敏感字段赋值 (例如 api_key = "...", password: "...")
+  const keyValRegex = /\b(api[_-]?key|secret|password|passwd|access[_-]?token|auth[_-]?token|private[_-]?key)\s*([:=])\s*(['"]?)([^\s'"]{8,})\3/gi;
   if (keyValRegex.test(text)) {
     detectedKinds.push('SECRET_KEY');
+    keyValRegex.lastIndex = 0;
     text = text.replace(keyValRegex, '$1$2$3[REDACTED:SECRET]$3');
   }
 
