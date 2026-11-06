@@ -2,8 +2,9 @@ import * as React from 'react';
 import {
   getMemoryTypeMeta,
   type SandboxResponseUI,
+  type ReconcileResponseUI,
 } from '../types.js';
-import { fetchSandboxData } from '../api.js';
+import { fetchSandboxData, runReconcile } from '../api.js';
 import {
   SearchIcon,
   SparklesIcon,
@@ -13,6 +14,7 @@ import {
   CodeIcon,
   ActivityIcon,
   TargetIcon,
+  CheckIcon,
 } from './Icons.js';
 import { GlassCard, GlassButton, GlassInput, useGlassVariant } from './GlassUI.js';
 
@@ -29,11 +31,16 @@ const PRESET_QUERIES = [
 ];
 
 const CHANNEL_LABELS: Record<string, { label: string; cls: string }> = {
+  lexical: { label: 'BM25 全文', cls: 'is-blue' },
   fts: { label: 'BM25 全文', cls: 'is-blue' },
-  vec: { label: 'Vector 语义', cls: 'is-purple' },
   entity: { label: 'Entity 实体', cls: 'is-emerald' },
+  typed: { label: 'Typed 类型', cls: 'is-amber' },
   slot: { label: 'Slot 槽位', cls: 'is-amber' },
+  temporal: { label: 'Temporal 时间', cls: 'is-cyan' },
   graph: { label: 'Graph 拓扑', cls: 'is-cyan' },
+  preference: { label: 'Preference 偏好', cls: 'is-purple' },
+  vector: { label: 'Vector 向量', cls: 'is-purple' },
+  vec: { label: 'Vector 向量', cls: 'is-purple' },
 };
 
 export const RecallSandboxView: React.FC<RecallSandboxViewProps> = ({
@@ -46,6 +53,13 @@ export const RecallSandboxView: React.FC<RecallSandboxViewProps> = ({
   const [simulating, setSimulating] = React.useState(false);
   const [query, setQuery] = React.useState('');
   const [activePromptTab, setActivePromptTab] = React.useState<'dynamic' | 'stable'>('dynamic');
+
+  // Mem0 Reconcile Playground state
+  const [reconcileInput, setReconcileInput] = React.useState('');
+  const [reconcileSlotKey, setReconcileSlotKey] = React.useState('');
+  const [reconcileType, setReconcileType] = React.useState<'semantic' | 'preference' | 'procedural'>('semantic');
+  const [reconcilePreview, setReconcilePreview] = React.useState<ReconcileResponseUI | null>(null);
+  const [reconciling, setReconciling] = React.useState(false);
 
   const loadSandbox = React.useCallback(async (testQuery?: string) => {
     if (testQuery !== undefined) setSimulating(true);
@@ -81,6 +95,31 @@ export const RecallSandboxView: React.FC<RecallSandboxViewProps> = ({
     if (!text) return;
     navigator.clipboard?.writeText(text);
     onToast(`已复制 ${label} Prompt XML 到剪贴板`);
+  };
+
+  const handleReconcileTest = async (dryRun: boolean) => {
+    if (!reconcileInput.trim() || reconcileInput.trim().length < 4) {
+      onToast('请输入至少 4 个字符的陈述内容');
+      return;
+    }
+    setReconciling(true);
+    try {
+      const res = await runReconcile({
+        content: reconcileInput.trim(),
+        type: reconcileType,
+        slot_key: reconcileSlotKey.trim() || undefined,
+        dryRun,
+      });
+      setReconcilePreview(res);
+      if (!dryRun) {
+        onToast(`已执行动态调和 [${res.decision.action}]：${res.decision.reason}`);
+        loadSandbox(query || undefined);
+      }
+    } catch (err: any) {
+      onToast(err?.message || '调和模拟失败');
+    } finally {
+      setReconciling(false);
+    }
   };
 
   if (loading && !data) {
@@ -178,7 +217,7 @@ export const RecallSandboxView: React.FC<RecallSandboxViewProps> = ({
             </span>
             <span className="dshm-ctx-legend-item">
               <i className="dshm-ctx-dot is-dynamic" />
-              <strong>动态召回层 (5-Channel RRF):</strong> {dynamicTokens} / {dynamicBudget} tok ({sim?.items.length ?? 0} 条)
+              <strong>动态召回层 (6-Channel RRF):</strong> {dynamicTokens} / {dynamicBudget} tok ({sim?.items.length ?? 0} 条)
             </span>
             <span className="dshm-ctx-legend-item">
               <i className="dshm-ctx-dot is-free" />
@@ -188,9 +227,9 @@ export const RecallSandboxView: React.FC<RecallSandboxViewProps> = ({
         </div>
       </GlassCard>
 
-      {/* 2. Interactive 5-Channel Recall Playground + Prompt Preview */}
+      {/* 2. Interactive 6-Channel Recall Playground + Prompt Preview */}
       <div className="dshm-sandbox-grid">
-        {/* Left: Query Simulator & 5-Channel Recall Hits */}
+        {/* Left: Query Simulator & Multi-Channel Recall Hits */}
         <GlassCard variant={variant} interactive={false} className="dshm-evo-panel">
           <div className="dshm-evo-panel-header">
             <div className="dshm-evo-panel-title-group">
@@ -198,9 +237,9 @@ export const RecallSandboxView: React.FC<RecallSandboxViewProps> = ({
                 <TargetIcon size={16} />
               </div>
               <div>
-                <h3 className="dshm-evo-panel-title">5 路融合召回调试沙盒 (Recall Playground)</h3>
+                <h3 className="dshm-evo-panel-title">6 路融合召回调试沙盒 (Recall Playground)</h3>
                 <span className="dshm-evo-panel-subtitle">
-                  输入模拟用户提问，透视分词意图解析、5 路通道命中（BM25 / Vector / Entity / Slot / Graph）与 RRF 融合排序
+                  输入模拟用户提问，透视分词意图解析、6 路通道命中（BM25 / Entity / Typed / Temporal / Preference / Vector）与 RRF 融合排序
                 </span>
               </div>
             </div>
@@ -290,7 +329,7 @@ export const RecallSandboxView: React.FC<RecallSandboxViewProps> = ({
           {/* Recalled Items List */}
           {!sim ? (
             <div className="dshm-evo-empty">
-              点击上方快速测试问题或输入自定义提问，即可查看 5 路召回命中明细与各通道得分。
+              点击上方快速测试问题或输入自定义提问，即可查看 6 路召回命中明细与各通道得分。
             </div>
           ) : sim.items.length === 0 ? (
             <div className="dshm-evo-empty">
@@ -395,6 +434,114 @@ export const RecallSandboxView: React.FC<RecallSandboxViewProps> = ({
           <pre className="dshm-prompt-preview-code">{promptText}</pre>
         </GlassCard>
       </div>
+
+      {/* 2.5. Mem0 Dynamic Reconciliation Playground (ADD / UPDATE / DELETE / NOOP) */}
+      <GlassCard variant={variant} interactive={false} className="dshm-evo-panel">
+        <div className="dshm-evo-panel-header">
+          <div className="dshm-evo-panel-title-group">
+            <div className="dshm-stat-icon-wrapper dshm-icon-purple">
+              <SparklesIcon size={16} />
+            </div>
+            <div>
+              <h3 className="dshm-evo-panel-title">
+                Mem0 动态冲突调和器沙盒 (Reconcile Decision Playground)
+              </h3>
+              <span className="dshm-evo-panel-subtitle">
+                输入新事实或否定陈述，预览调和器如何自动判定 `ADD`（新增）、`UPDATE`（覆写旧槽位）、`DELETE`（否定归档）或 `NOOP`（幂等跳过）
+              </span>
+            </div>
+          </div>
+          <div className="dshm-evo-panel-actions">
+            <select
+              className="dshm-select"
+              value={reconcileType}
+              onChange={(e) => setReconcileType(e.target.value as any)}
+            >
+              <option value="semantic">事实知识 (Semantic)</option>
+              <option value="preference">偏好习惯 (Preference)</option>
+              <option value="procedural">流程规范 (Procedural)</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="dshm-sandbox-search-form">
+          <GlassInput
+            type="text"
+            variant={variant}
+            wrapperClassName="dshm-search-box"
+            className="dshm-search-input"
+            placeholder="例如：不要再使用 Webpack 了，改用 Vite 构建（或输入任意待调和的新事实）…"
+            value={reconcileInput}
+            onChange={(e) => setReconcileInput(e.target.value)}
+          />
+          <GlassInput
+            type="text"
+            variant={variant}
+            placeholder="可选槽位 (如 pkg_manager)"
+            value={reconcileSlotKey}
+            onChange={(e) => setReconcileSlotKey(e.target.value)}
+          />
+          <GlassButton
+            type="button"
+            variant={variant}
+            className="dshm-btn dshm-btn-secondary"
+            disabled={reconciling || !reconcileInput.trim()}
+            onClick={() => handleReconcileTest(true)}
+          >
+            <EyeIcon size={13} />
+            <span>预览决策 (Dry-Run)</span>
+          </GlassButton>
+          <GlassButton
+            type="button"
+            variant={variant}
+            intent="primary"
+            className="dshm-btn dshm-btn-primary"
+            disabled={reconciling || !reconcileInput.trim()}
+            onClick={() => handleReconcileTest(false)}
+          >
+            <CheckIcon size={13} />
+            <span>应用调和入库</span>
+          </GlassButton>
+        </div>
+
+        {reconcilePreview && (
+          <div className="dshm-plan-box">
+            <div className="dshm-plan-row">
+              <span className="dshm-plan-label">调和判定动作:</span>
+              <span
+                className={`dshm-tag ${
+                  reconcilePreview.decision.action === 'ADD'
+                    ? 'dshm-tag-fact'
+                    : reconcilePreview.decision.action === 'UPDATE'
+                      ? 'dshm-tag-procedure'
+                      : reconcilePreview.decision.action === 'DELETE'
+                        ? 'dshm-tag-failure'
+                        : 'dshm-tag-scope'
+                }`}
+              >
+                {reconcilePreview.decision.action}
+              </span>
+              <span className="dshm-plan-label">判定置信度:</span>
+              <span className="dshm-tag dshm-tag-slot">
+                {(reconcilePreview.decision.confidence * 100).toFixed(0)}%
+              </span>
+              <span className="dshm-plan-label">原因说明:</span>
+              <span>{reconcilePreview.decision.reason}</span>
+              {reconcilePreview.decision.targetId && (
+                <GlassButton
+                  type="button"
+                  variant={variant}
+                  size="sm"
+                  className="dshm-chip-btn"
+                  onClick={() => onInspect(reconcilePreview.decision.targetId!)}
+                >
+                  目标记忆: {reconcilePreview.decision.targetId.slice(0, 12)}
+                </GlassButton>
+              )}
+            </div>
+          </div>
+        )}
+      </GlassCard>
 
       {/* 3. Mem0 OpenMemory Style: Live Injection & Attribution Audit Log */}
       <GlassCard variant={variant} interactive={false} className="dshm-evo-panel">

@@ -27,6 +27,7 @@ import {
   renderCoreMemoryMarkdown,
 } from '../core/core-memory.js';
 import { reconcileAndUpsert } from '../evolution/reconciler.js';
+import { auditMemoryHealth } from '../core/health.js';
 import { workspaceId } from '../core/scope.js';
 import { redactSecrets } from '../core/privacy.js';
 import { runBackfill } from '../ingest/backfill.js';
@@ -98,6 +99,35 @@ export class MemoryCommands {
   }
 
   /**
+   * /memory doctor (记忆库健康度体检与冲突医生)
+   */
+  public doctor(ctx: CommandContext): string {
+    const wsId = workspaceId(ctx.workspaceId);
+    const report = auditMemoryHealth(this.db, { workspaceId: wsId });
+    const lines = [
+      `🩺 记忆库健康度体检报告：${report.score}/100 (等级 ${report.grade})`,
+      `状态分布：active ${report.counts.active} · candidate ${report.counts.candidate} · frozen ${report.counts.frozen} · superseded ${report.counts.superseded} · archived ${report.counts.archived} (置顶 ${report.counts.pinned})`,
+      `FTS5 索引：${report.ftsConsistent ? '一致 (OK)' : '不一致 (需重建)'} (${report.ftsCount} 行)`,
+      `冗余/同槽位冲突对：${report.duplicatePairs.length} 对 | 活跃矛盾关系：${report.contradictions.length} 组 | 陈旧低效用记忆：${report.staleMemories.length} 条`,
+    ];
+    if (report.duplicatePairs.length > 0) {
+      lines.push('待去重记忆对 (可执行 /memory merge <src> <tgt>):');
+      for (const pair of report.duplicatePairs.slice(0, 5)) {
+        lines.push(
+          `  - ${pair.sourceId} -> ${pair.targetId} (相似度 ${pair.similarity}, 原因: ${pair.reason})`
+        );
+      }
+    }
+    if (report.recommendations.length > 0) {
+      lines.push('优化建议：');
+      for (const rec of report.recommendations) {
+        lines.push(`  • ${rec}`);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  /**
    * /memory inspect <id>
    */
   public inspect(idOrShortId: string, ctx: CommandContext): string {
@@ -125,7 +155,14 @@ export class MemoryCommands {
       'SELECT to_id, rel FROM memory_relations WHERE from_id = ?',
       [mem.id]
     );
-    const relLines = relRows.map((r) => `  - [${r.rel}] -> ${r.to_id}`);
+    const inRelRows = this.db.all<{ from_id: string; rel: string }>(
+      'SELECT from_id, rel FROM memory_relations WHERE to_id = ?',
+      [mem.id]
+    );
+    const relLines = [
+      ...relRows.map((r) => `  - [${r.rel}] -> ${r.to_id}`),
+      ...inRelRows.map((r) => `  - [${r.rel}] <- ${r.from_id}`),
+    ];
 
     const lines = [
       `ID: ${mem.id} (rev ${mem.content_rev}, v${mem.version})`,
@@ -458,7 +495,7 @@ export class MemoryCommands {
     if (!trimmed || trimmed === 'help') {
       return {
         kind: 'success',
-        text: 'Available commands: stats | inspect <id> | list | confirm <id> | merge <src> <tgt> | restore <id> | graph [limit] | export-md <dir> | import-md <dir> | migrate <format> <path> | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
+        text: 'Available commands: stats | doctor | inspect <id> | list | confirm <id> | merge <src> <tgt> | restore <id> | graph [limit] | export-md <dir> | import-md <dir> | migrate <format> <path> | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
       };
     }
 
@@ -470,6 +507,8 @@ export class MemoryCommands {
       let output = '';
       if (sub === 'stats') {
         output = this.stats(ctx);
+      } else if (sub === 'doctor' || sub === 'health') {
+        output = this.doctor(ctx);
       } else if (sub === 'inspect') {
         output = this.inspect(rest[0], ctx);
       } else if (sub === 'history') {

@@ -555,7 +555,7 @@ describe('Web Server API & Sidebar Backend (web.ts)', () => {
     expect(evolveRes.ok).toBe(true);
     expect(evolveRes.result).toBeDefined();
 
-    // Test /sandbox endpoint (Letta ADE Context Inspector & 5-Channel Recall Playground)
+    // Test /sandbox endpoint (Letta ADE Context Inspector & 6-Channel Recall Playground)
     upsertCandidate(
       db,
       {
@@ -579,5 +579,65 @@ describe('Web Server API & Sidebar Backend (web.ts)', () => {
     expect(sandboxRes.recallSimulation).toBeDefined();
     expect(sandboxRes.recallSimulation.items.length).toBeGreaterThanOrEqual(1);
     expect(Array.isArray(sandboxRes.recentInjections)).toBe(true);
+  });
+
+  it('should handle v0.2.0 /health and /reconcile endpoints', async () => {
+    registerWebRoutes(mockCtx, db, DEFAULTS);
+
+    const sendReq = async (method: string, url: string, body?: any) => {
+      let out = '';
+      const req: any = {
+        method,
+        url,
+        on: (ev: string, cb: any) => {
+          if (ev === 'data' && body !== undefined) {
+            cb(Buffer.from(JSON.stringify(body)));
+          }
+          if (ev === 'end') cb();
+        },
+      };
+      await registeredHandler(req, { writeHead: () => {}, end: (d: string) => { out = d; } });
+      return JSON.parse(out);
+    };
+
+    // 1. Reconcile dryRun (ADD)
+    const previewAdd = await sendReq('POST', '/api/dsh-memory/reconcile', {
+      content: '项目构建工具统一使用 Vite 6',
+      type: 'semantic',
+      slot_key: 'bundler',
+      dryRun: true,
+    });
+    expect(previewAdd.ok).toBe(true);
+    expect(previewAdd.dryRun).toBe(true);
+    expect(previewAdd.decision.action).toBe('ADD');
+
+    // 2. Reconcile apply (ADD)
+    const applyAdd = await sendReq('POST', '/api/dsh-memory/reconcile', {
+      content: '项目构建工具统一使用 Vite 6',
+      type: 'semantic',
+      slot_key: 'bundler',
+      dryRun: false,
+    });
+    expect(applyAdd.ok).toBe(true);
+    expect(applyAdd.dryRun).toBe(false);
+    expect(applyAdd.decision.action).toBe('ADD');
+    expect(applyAdd.memory?.id).toBeTruthy();
+
+    // 3. Reconcile dryRun (UPDATE same slot_key)
+    const previewUpdate = await sendReq('POST', '/api/dsh-memory/reconcile', {
+      content: '项目构建工具已升级为 Rspack',
+      type: 'semantic',
+      slot_key: 'bundler',
+      dryRun: true,
+    });
+    expect(previewUpdate.ok).toBe(true);
+    expect(previewUpdate.decision.action).toBe('UPDATE');
+    expect(previewUpdate.decision.targetId).toBe(applyAdd.memory.id);
+
+    // 4. Health check endpoint
+    const healthRes = await sendReq('GET', '/api/dsh-memory/health');
+    expect(healthRes.ok).toBe(true);
+    expect(healthRes.health.score).toBeGreaterThanOrEqual(80);
+    expect(healthRes.health.ftsConsistent).toBe(true);
   });
 });

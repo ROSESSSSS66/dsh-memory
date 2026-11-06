@@ -22,6 +22,8 @@ export interface RecallResult {
   items: SelectedItem[];
   block: string;
   latencyMs: number;
+  strategyVersion?: number;
+  candidatesCount?: number;
 }
 
 /**
@@ -71,6 +73,8 @@ export function recall(
       items: [],
       block: '',
       latencyMs: Date.now() - t0,
+      strategyVersion,
+      candidatesCount: 0,
     };
   }
 
@@ -138,6 +142,8 @@ export function recall(
       items: [],
       block: '',
       latencyMs: Date.now() - t0,
+      strategyVersion,
+      candidatesCount: allIds.size,
     };
   }
 
@@ -166,5 +172,7 @@ export function recall(
     items: selected,
     block,
     latencyMs: Date.now() - t0,
+    strategyVersion,
+    candidatesCount: allIds.size,
   };
 }

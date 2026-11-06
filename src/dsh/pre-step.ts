@@ -3,8 +3,10 @@ import type { Db } from '../types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { workspaceId } from '../core/scope.js';
 import { isWorkspaceExcluded } from '../core/privacy.js';
+import { estimateTokens } from '../core/tokens.js';
 import { buildQueryPlan } from '../retrieval/query.js';
 import { recall } from '../retrieval/recall.js';
+import { getActiveStrategy } from '../evolution/strategy.js';
 import { evaluateTurnOutcome } from '../evolution/outcome.js';
 import type { PromptSectionManager } from './prompt-section.js';
 
@@ -140,16 +142,52 @@ export async function handlePreStep(
       cfg,
     });
 
-    const strategyVersion = ctx.strategyVersion ?? 1;
     const recallResult = recall(ctx.db, plan, {
       workspaceId: wsId,
       sessionId,
       budget: dynamicBudget,
       alreadyInjected,
-      strategyVersion,
+      strategyVersion: ctx.strategyVersion,
       now,
       cfg,
     });
+
+    const strategyVersion =
+      recallResult.strategyVersion ??
+      ctx.strategyVersion ??
+      getActiveStrategy(ctx.db, cfg).version;
+
+    const queryTokens = estimateTokens(userText);
+    const candidatesCount = recallResult.candidatesCount ?? recallResult.items.length;
+    const injectedCount = recallResult.items.length;
+    const injectTokens = recallResult.items.reduce((acc, it) => acc + (it.tokens || 0), 0);
+
+    // 8.1 记录轮次遥测指标 (供 Sentinel 监控与离线策略实验室使用)
+    try {
+      ctx.db.run(
+        `INSERT INTO turn_metrics (
+          session_id, turn, query_tokens, candidates, injected, inject_tokens, latency_ms, correction, strategy_v, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        ON CONFLICT(session_id, turn) DO UPDATE SET
+          query_tokens = excluded.query_tokens,
+          candidates = excluded.candidates,
+          injected = excluded.injected,
+          inject_tokens = excluded.inject_tokens,
+          latency_ms = excluded.latency_ms,
+          strategy_v = excluded.strategy_v`,
+        [
+          sessionId,
+          turn,
+          queryTokens,
+          candidatesCount,
+          injectedCount,
+          injectTokens,
+          recallResult.latencyMs,
+          strategyVersion,
+          now,
+        ]
+      );
+    } catch {}
 
     if (!recallResult.block || recallResult.items.length === 0) {
       return decision;

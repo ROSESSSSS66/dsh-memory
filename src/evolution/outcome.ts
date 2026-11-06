@@ -4,6 +4,7 @@ import { tokenSet, jaccard, extractEntities } from '../core/text.js';
 import { applyUtility } from '../core/writer.js';
 import { enqueueJob } from '../jobs/scheduler.js';
 import { harvestSample } from './lab.js';
+import { enqueueRepairJobIfEligible } from './repair.js';
 
 export const CORRECTION_REGEX = /(不对|错了|不是这样|搞错|不行|没用|还是不行|重来|wrong|incorrect|doesn't work|not what)/i;
 export const CONFIRMATION_REGEX = /(好的|可以|谢谢|完美|成功了|解决了|不错|works|thanks|great|perfect|lgtm)/i;
@@ -172,6 +173,23 @@ export function evaluateTurnOutcome(
         [r, used ? 1 : 0, params.sessionId, params.turn, mem.id]
       );
 
+      // §5.17: 当注入记忆被实际采用且本轮发生负面结果 (r <= -0.6) 时，自动触发 RIME 诊断修复入队
+      if (r <= -0.6 && used) {
+        try {
+          enqueueRepairJobIfEligible(
+            db,
+            {
+              memoryId: mem.id,
+              sessionId: params.sessionId,
+              query: nextUserText || turnFullText.slice(0, 200),
+              turn: params.turn,
+            },
+            cfg,
+            now
+          );
+        } catch {}
+      }
+
       // §6.6 / M5-T3: 真实用户明确肯定 (r=1.0) 且该引用 used=1 时采集为收获用例
       if (r === 1.0 && used) {
         const userEvent = db.get<RawEvent>(
@@ -202,10 +220,13 @@ export function evaluateTurnOutcome(
 
     // 更新或插入 turn_metrics
     db.run(
-      `UPDATE turn_metrics
-       SET outcome = ?, correction = ?
-       WHERE session_id = ? AND turn = ?`,
-      [r, isCorrection ? 1 : 0, params.sessionId, params.turn]
+      `INSERT INTO turn_metrics (
+         session_id, turn, outcome, correction, strategy_v, created_at
+       ) VALUES (?, ?, ?, ?, 1, ?)
+       ON CONFLICT(session_id, turn) DO UPDATE SET
+         outcome = excluded.outcome,
+         correction = excluded.correction`,
+      [params.sessionId, params.turn, r, isCorrection ? 1 : 0, now]
     );
 
     return {

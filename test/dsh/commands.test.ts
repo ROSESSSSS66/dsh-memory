@@ -222,5 +222,9 @@ describe('User Commands (commands.ts)', () => {
     const evalRes = commands.handleCommand('eval factual', { workspaceId: ws1 });
     expect(evalRes.kind).toBe('success');
     expect(evalRes.text).toContain('评测集 factual');
+
+    const doctorRes = commands.handleCommand('doctor', { workspaceId: ws1 });
+    expect(doctorRes.kind).toBe('success');
+    expect(doctorRes.text).toContain('记忆库健康度体检报告');
   });
 });
