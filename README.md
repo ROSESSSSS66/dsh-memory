@@ -14,15 +14,27 @@
 > **专为 DeepSeek Desktop (DSH) 打造的轻量级、自进化长期记忆引擎。**  
 > 告别跨会话遗忘与提示词无限膨胀，兼顾极致的在线性能与全自主的离线知识提炼进化。
 
-<div align="center">
-  <a href="https://www.dorodoro.xyz" target="_blank">
-    <img src="https://img.shields.io/badge/特别赞助-DoroDoro_AI_中转站-FF6B6B?style=for-the-badge&logo=openai&logoColor=white" alt="DoroDoro AI 中转站" />
+<p align="center">
+  <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/⚡_推荐_API_中转-DoroDoro_AI-8B5CF6?style=for-the-badge&logo=openai&logoColor=white" alt="DoroDoro AI" />
+    <img src="https://img.shields.io/badge/服务-企业级聚合网关-2563EB?style=for-the-badge" alt="Gateway" />
+    <img src="https://img.shields.io/badge/协议-100%25_OpenAI_兼容-10B981?style=for-the-badge" alt="Compatibility" />
+    <img src="https://img.shields.io/badge/官网-www.dorodoro.xyz-F59E0B?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Website" />
   </a>
-  <p>
-    ⚡ <b>高速·稳定·全模型大模型 API 聚合中转</b>：<a href="https://www.dorodoro.xyz" target="_blank"><b>www.dorodoro.xyz</b></a><br>
-    国内高速直连 · 聚合 <b>DeepSeek V3 / R1</b>、<b>Claude 3.7 / 3.5 Sonnet</b>、<b>GPT-4o / o1 / o3</b>、<b>Gemini 2.0 / 2.5</b> 全系顶尖模型 · 完美契合 <code>dsh-memory</code> 离线蒸馏与反思演化
-  </p>
-</div>
+</p>
+
+> [!TIP]
+> ### 🚀 开发者推荐服务商 · [DoroDoro AI 中转站](https://www.dorodoro.xyz) (API Gateway)
+> 
+> **企业级大模型聚合网关，为 AI 智能体与开发者提供极速稳定的算力基座：**
+> 
+> 🌐 **官网直达**：**[www.dorodoro.xyz](https://www.dorodoro.xyz)**
+> 
+> - ⚡ **全品类大模型聚合**：一站式接入全球主流商业与开源旗舰大模型，海量算力即开即用
+> - 🚀 **原生协议 100% 兼容**：标准 OpenAI 格式无缝平替，仅需替换 `Base URL`，零配置驱动各类 AI 客户端及本记忆引擎
+> - 🎁 **开箱即用**：按量计费透明无套路，注册即可畅享极速体验
+> 
+> 👉 **[立即前往 DoroDoro AI 开启极速调用 ↗](https://www.dorodoro.xyz)**
 
 ---
 
@@ -204,31 +216,11 @@ npm run build
         # 离线自演化 LLM 接入配置 (兼容 OpenAI 规范)
         llmBaseUrl: "https://api.dorodoro.xyz/v1"
         llmApiKey: "sk-your-dorodoro-key"
-        llmModel: "deepseek-chat" # 或 deepseek-reasoner / claude-3-5-sonnet
+        llmModel: "your-model-name"
 ```
-* **免翻高速直连**：针对国内开发者网络优化，超低请求延迟；
+* **稳定高速网络**：针对开发者网络深度优化，超低请求延迟；
 * **高并发稳定保障**：完美适配长文本批量提炼与复杂反思；
-* **全模型覆盖**：支持 DeepSeek、Claude、OpenAI、Gemini 全系主流模型。
-
----
-
----
-
-## 🌟 融合 GitHub 热门高 Star 项目与社区方案优势 (Merged from GitHub Top-Star Projects)
-
-深入调研 GitHub 上最热门的 AI 长期记忆项目（**Mem0** 68k+ ⭐, **Letta / MemGPT** 25k+ ⭐, **Zep / Graphiti** 25k+ ⭐, **Stanford Generative Agents** 14k+ ⭐, **Cline Memory Bank** 等）与 DSH 社区方案，吸取各自精髓并无缝整合进本项目：
-
-| 来源项目与开源标杆 | 核心优点与痛点解决 | 本项目融合实现 |
-|---|---|---|
-| **`Mem0`**<br>(68k+ ⭐ `mem0ai/mem0`) | • **智能记忆调和 (ADD/UPDATE/DELETE/NOOP)**：候选事实与历史库智能比对，杜绝冗余并自动推演知识演进<br>• **用户/智能体/工作区分层**：精细化命名空间 | • **调和状态机** (`reconciler.ts`)：自动决策 ADD(新知识)、UPDATE(演变取代)、DELETE(显式推翻)、NOOP(重复忽略)<br>• **一键调和指令**：`/memory reconcile <content>` 及工具支持 |
-| **`Letta / MemGPT`**<br>(25k+ ⭐ `letta-ai/letta`) | • **Core Memory 核心工作区 (Scratchpad)**：模型上下文常驻、自管理的虚拟内存块（`human` 用户画像 / `persona` 智能体准则 / `project` 项目规范）<br>• **模型自编辑能力**：模型像操作寄存器一样自更新核心设定 | • **Core Memory 模块** (`core-memory.ts`)：在 System Prompt 顶部结构化呈现 Core Memory 块<br>• **模型专用自操作工具**：`core_read`, `core_set`, `core_append`<br>• **交互命令**：`/memory core [block] [content]` |
-| **`Zep / Graphiti`**<br>(25k+ ⭐ `getzep/graphiti`) | • **Bi-temporal 时序有效性模型**：区分事件发生时间与时效失效时间，自动过滤/惩罚陈旧过期事实<br>• **时序图谱连边**：追踪实体随时间的变迁状态 | • **时效惩罚因子** (`fuse.ts`)：自动结合 `valid_to` 与 `invalidated_at` 进行时序失效惩罚，杜绝幻觉召回<br>• **时序失效归档**：`invalidateMemory` 自动时间戳溯源 |
-| **`Stanford Generative Agents`**<br>(14k+ ⭐ Park et al.) | • **三因子检索打分公式**：Recency(时效) + Importance(重要度 1-10) + Relevance(相关度)<br>• 区分闲聊琐事与重大架构决策 | • **重要度因子**：为记忆显式引入 `importance` (1-10)，在多路融合打分器中与置信度/效用/时效平滑融合 |
-| **`Cline / Roo-Code`**<br>(流行 AI 编程智能体) | • **标准化 Memory Bank**：结构化 4 大 Markdown 文档 (`activeContext.md`, `systemPatterns.md`, `productContext.md`, `progress.md`)，无缝与代码库 Git 协同 | • **双向 Memory Bank 同步** (`markdown.ts`)：<br>  - `/memory export-bank [dir]` 一键生成 4 大标准文档<br>  - `/memory import-bank [dir]` 一键增量同步导入数据库 |
-| **`LZMW/dsh-memory`** | • 纯 Markdown 存储且人类可读可编辑，Git / Obsidian 无缝漫游<br>• 误删保护与 `.trash/` 备份<br>• 单工具接口设计，大幅节省 System Prompt 工具描述 Token | • **Markdown 双向同步**：`exportToMarkdown` / `importFromMarkdown`，带 YAML Frontmatter<br>• **安全回收站**：`trashMemory` 自动归档至 `.trash/`，支持 `/memory restore`<br>• **统一工具**：提供 `memory` 聚合工具调度全部原子动作 |
-| **`qwert702/dsh-memory`**<br>& **`dsh-mnemon`** | • 视觉化知识网络，直观查看实体与记忆节点互联关系<br>• Web GUI 拓扑交互与因果链追踪 | • **知识图谱生成**：`/api/dsh-memory/graph` REST 端点<br>• **Mermaid 原地渲染**：`/memory graph` 指令直接在聊天窗口输出知识拓扑流图 |
-| **`@tr1v3r/dsh-ltm`** | • 事实显式确认（主动对抗衰减）<br>• 重复知识显式合并取代<br>• 一键从历史插件无痛迁移 | • **事实确认机制**：`confirmMemory` 激活候选并强化置信度与效用（`/memory confirm`）<br>• **显式合并取代**：`mergeMemories` 转移证据/实体并标记 `supersedes`（`/memory merge`）<br>• **一键迁移**：`/memory migrate <format> <path>` 支持 JSON/Markdown 自动侦测 |
-| **`creativedswork/dsh-expmem`** | • MemGPT 式上下文压力感知，长会话自适应触发 Compaction/Distill | • **上下文压力监测**：`SessionListener` 实时追踪轮次与事件数，超阈值自适应调度后台提炼 |
+* **全生态覆盖**：一站式聚合主流商业与开源大模型，随心切换。
 
 ---
 
@@ -313,11 +305,23 @@ npm run eval
 
 ## 🤝 特别赞助与合作伙伴 (Sponsors)
 
-| 赞助商 / 合作伙伴 | 服务特色 | 访问直达 |
-|---|---|:---:|
-| ⚡ **[DoroDoro AI 中转站](https://www.dorodoro.xyz)** | 专为 AI 开发者打造的高性能大模型中转平台。聚合 DeepSeek、Claude、OpenAI、Gemini 全系列顶尖模型，国内高速免翻直连，稳定不掉线，完美赋能 AI 智能体与长期记忆引擎。 | [🔗 访问 www.dorodoro.xyz](https://www.dorodoro.xyz) |
-
----
+<table align="center" width="100%">
+  <tr>
+    <td align="center" width="28%">
+      <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer">
+        <img src="https://img.shields.io/badge/⚡_DoroDoro_AI-中转API平台-8B5CF6?style=for-the-badge&logo=openai&logoColor=white" alt="DoroDoro AI" /><br><br>
+        <b>www.dorodoro.xyz</b>
+      </a>
+    </td>
+    <td>
+      <b>开发者专属高性能大模型聚合中转服务</b><br>
+      • <b>全品类模型矩阵</b>：聚合全球主流商业与开源旗舰大模型，海量算力一站直达；<br>
+      • <b>稳定可靠接入</b>：支持高并发调度，保障各类工具流畅调用；<br>
+      • <b>零门槛接入</b>：标准 OpenAI 协议平替，完美适配各类 AI 编程工具与智能体离线演化。<br>
+      👉 <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer"><b>[🔗 立即直达官网体验 ↗]</b></a>
+    </td>
+  </tr>
+</table>
 
 ## 🤝 贡献与分支规范
 
