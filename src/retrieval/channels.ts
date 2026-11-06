@@ -402,11 +402,24 @@ export interface AssociativeNeighbor {
   seedId: string;
   rel: 'related' | 'derived_from';
   seedRank: number;
+  hop?: 1 | 2;
+  seedDegree?: number;
+  activationWeight?: number;
 }
 
 /**
- * 7. GraphRAG 一跳关联拓扑扩展 (Spreading Activation over related / derived_from)
- * 从高优先级种子候选中沿着正向关系边 (related / derived_from) 发现同作用域的关联活跃记忆
+ * SYNAPSE (Jan 2026) / ACT-R 扇出注意力稀释因子 (Fan-Effect Attenuation)
+ * 当种子节点关联的边数 (degree/fan) 越高，单条边分配到的激活能量越低，抑制泛化 Hub 节点噪声
+ */
+export function computeFanAttenuation(degree: number): number {
+  const d = Math.max(1, degree);
+  return Number((1 / (1 + 0.25 * Math.log(1 + Math.max(0, d - 1)))).toFixed(4));
+}
+
+/**
+ * 7. GraphRAG + SYNAPSE 扇出衰减多跳关联拓扑扩展 (Spreading Activation over related / derived_from)
+ * 从高优先级种子候选中沿着正向关系边 (related / derived_from) 发现同作用域的 1~2 跳关联活跃记忆，
+ * 并基于 ACT-R Fan Effect 与跳数阻尼 (gamma = 0.45) 计算激活扩散权重。
  */
 export function expandGraphNeighbors(
   db: Db,
@@ -436,14 +449,22 @@ export function expandGraphNeighbors(
          AND m.type != 'meta'
          AND (${scope.sql})
        LIMIT ?`,
-      [...uniqueSeeds, ...uniqueSeeds, ...uniqueSeeds, ...scope.params, maxNeighbors * 2]
+      [...uniqueSeeds, ...uniqueSeeds, ...uniqueSeeds, ...scope.params, maxNeighbors * 3]
     );
 
     const seedRankMap = new Map<string, number>();
     uniqueSeeds.forEach((id, idx) => seedRankMap.set(id, idx + 1));
 
+    // 计算各判断种子节点的关联扇出度 (Fan Degree)
+    const seedDegreeMap = new Map<string, number>();
+    for (const r of rows) {
+      const seedId = seedRankMap.has(r.from_id) ? r.from_id : r.to_id;
+      seedDegreeMap.set(seedId, (seedDegreeMap.get(seedId) || 0) + 1);
+    }
+
     const results: AssociativeNeighbor[] = [];
     const seen = new Set<string>();
+    const hop1BridgeNodes: Array<{ bridgeId: string; rootSeedId: string; rootRank: number; hop1Weight: number }> = [];
 
     for (const r of rows) {
       const seedId = seedRankMap.has(r.from_id) ? r.from_id : r.to_id;
@@ -453,13 +474,90 @@ export function expandGraphNeighbors(
       if (seen.has(pairKey)) continue;
       seen.add(pairKey);
 
+      const seedRank = seedRankMap.get(seedId) ?? 1;
+      const seedDegree = seedDegreeMap.get(seedId) ?? 1;
+      const activationWeight = computeFanAttenuation(seedDegree);
+
       results.push({
         neighborId,
         seedId,
         rel: r.rel,
-        seedRank: seedRankMap.get(seedId) ?? 1,
+        seedRank,
+        hop: 1,
+        seedDegree,
+        activationWeight,
       });
+
+      if (seedRank <= 2 && !seedRankMap.has(neighborId) && hop1BridgeNodes.length < 4) {
+        hop1BridgeNodes.push({
+          bridgeId: neighborId,
+          rootSeedId: seedId,
+          rootRank: seedRank,
+          hop1Weight: activationWeight,
+        });
+      }
+
       if (results.length >= maxNeighbors) break;
+    }
+
+    // 二跳阻尼扩散 (HippoRAG 2 / SYNAPSE 2-Hop Damped Spreading Activation, gamma = 0.45)
+    if (results.length < maxNeighbors && hop1BridgeNodes.length > 0) {
+      const bridgeIds = hop1BridgeNodes.map((b) => b.bridgeId);
+      const bridgePlaceholders = bridgeIds.map(() => '?').join(', ');
+      const hop2Rows = db.all<{
+        from_id: string;
+        to_id: string;
+        rel: 'related' | 'derived_from';
+        neighbor_id: string;
+      }>(
+        `SELECT r.from_id, r.to_id, r.rel, m.id as neighbor_id
+         FROM memory_relations r
+         JOIN memories m ON (m.id = CASE WHEN r.from_id IN (${bridgePlaceholders}) THEN r.to_id ELSE r.from_id END)
+         WHERE r.rel IN ('related', 'derived_from')
+           AND (r.from_id IN (${bridgePlaceholders}) OR r.to_id IN (${bridgePlaceholders}))
+           AND m.status IN ('active', 'frozen')
+           AND m.type != 'meta'
+           AND (${scope.sql})
+         LIMIT ?`,
+        [...bridgeIds, ...bridgeIds, ...bridgeIds, ...scope.params, maxNeighbors]
+      );
+
+      const bridgeMap = new Map(hop1BridgeNodes.map((b) => [b.bridgeId, b]));
+      const bridgeDegreeMap = new Map<string, number>();
+      for (const r of hop2Rows) {
+        const bId = bridgeMap.has(r.from_id) ? r.from_id : r.to_id;
+        bridgeDegreeMap.set(bId, (bridgeDegreeMap.get(bId) || 0) + 1);
+      }
+
+      for (const r of hop2Rows) {
+        if (results.length >= maxNeighbors) break;
+        const bId = bridgeMap.has(r.from_id) ? r.from_id : r.to_id;
+        const bridgeInfo = bridgeMap.get(bId);
+        if (!bridgeInfo) continue;
+
+        const targetId = r.neighbor_id;
+        if (targetId === bId || targetId === bridgeInfo.rootSeedId || seedRankMap.has(targetId)) {
+          continue;
+        }
+        const pairKey = `${bridgeInfo.rootSeedId}->${targetId}`;
+        if (seen.has(pairKey)) continue;
+        seen.add(pairKey);
+
+        const bridgeDegree = bridgeDegreeMap.get(bId) ?? 1;
+        const hop2Weight = Number(
+          (0.45 * bridgeInfo.hop1Weight * computeFanAttenuation(bridgeDegree)).toFixed(4)
+        );
+
+        results.push({
+          neighborId: targetId,
+          seedId: bridgeInfo.rootSeedId,
+          rel: r.rel,
+          seedRank: bridgeInfo.rootRank,
+          hop: 2,
+          seedDegree: bridgeDegree,
+          activationWeight: hop2Weight,
+        });
+      }
     }
 
     return results;

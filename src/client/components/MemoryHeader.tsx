@@ -59,11 +59,11 @@ export const MemoryHeader: React.FC<MemoryHeaderProps> = ({
       variant={variant}
       brandIcon={<BrainIcon size={20} />}
       title="长期记忆中心"
-      versionBadge={<span className="dshm-badge-version">v0.3.0 · EvolveMem</span>}
+      versionBadge={<span className="dshm-badge-version">v0.4.0 · SYNAPSE + A-Mem</span>}
       subtitle={
         <>
           <span className="dshm-dot-online" />
-          <span>快环 SQLite FTS5 多路融合召回 · 慢环自主蒸馏、RIME 修复与策略进化</span>
+          <span>SYNAPSE 扇叶衰减激活扩散 · A-Mem 双链编织 · 自动冷启动与慢环进化</span>
         </>
       }
       actions={

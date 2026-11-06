@@ -21,7 +21,8 @@ import {
 import { redactSecrets } from '../core/privacy.js';
 import { serializeMemoryToMarkdown } from '../core/markdown.js';
 import { estimateTokens, budgetTokens } from '../core/tokens.js';
-import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
+import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
+import { autoBootstrapMemory } from '../core/bootstrap.js';
 import { backfillMissingEmbeddings } from '../core/vector.js';
 import { findConsolidationClusters, consolidateCluster } from '../evolution/consolidator.js';
 import { buildQueryPlan } from '../retrieval/query.js';
@@ -857,6 +858,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             const autoPinned = autoPinMemories(db);
             const ftsRes = checkAndRepairFts(db);
             const embeddingsBackfilled = backfillMissingEmbeddings(db, { limit: 500 });
+            const linksWeaved = weaveZettelkastenLinks(db, { maxNewLinks: 25 });
             cleanOldTelemetry(db);
             const sentinel = checkSentinelAndRollback(db);
             sendJson(res, 200, {
@@ -872,6 +874,17 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 sentinelRollback: sentinel.rolledBack,
               },
             });
+            return;
+          }
+
+          if (action === 'bootstrap' || action === 'init') {
+            const bootstrap = autoBootstrapMemory(db, {
+              workspacePath: body.workspacePath || process.cwd(),
+              cfg,
+              force: body.force !== false,
+              includeBackfill: body.includeBackfill !== false,
+            });
+            sendJson(res, 200, { ok: true, bootstrap });
             return;
           }
 
@@ -1041,7 +1054,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           sendJson(res, 200, {
             ok: true,
-            version: '0.3.0',
+            version: '0.4.0',
             exportedAt: Date.now(),
             total: items.length,
             memories: items,

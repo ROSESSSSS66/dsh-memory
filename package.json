@@ -1,13 +1,15 @@
 {
   "name": "dsh-memory",
-  "version": "0.3.0",
-  "description": "DSH Self-Evolving Memory System — Sub-millisecond 7-channel GraphRAG + Vector hybrid recall, Letta Core Memory, Mem0 conflict reconciler, Memory Doctor Auto-Heal, EvolveMem strategy lab, and Glassmorphism workbench for DeepSeek Desktop (DSH)",
+  "version": "0.4.0",
+  "description": "DSH Self-Evolving Memory System v0.4.0 — Sub-millisecond 7-channel SYNAPSE fan-attenuated spreading activation + A-Mem Zettelkasten dynamic linking, ACT-R spaced-repetition utility, Letta Core Memory, Mem0 conflict reconciler, automatic post-install memory initialization, and Glassmorphism workbench for DeepSeek Desktop (DSH)",
   "keywords": [
     "dsh",
     "deepseek",
     "agent-memory",
     "long-term-memory",
     "self-evolving",
+    "synapse",
+    "a-mem",
     "letta",
     "mem0",
     "sqlite-fts5",
@@ -41,6 +43,8 @@
   "scripts": {
     "build": "tsup && npm run build:client",
     "build:client": "node scripts/build-client.mjs",
+    "postinstall": "node scripts/postinstall.mjs",
+    "init": "node scripts/postinstall.mjs --force",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test",

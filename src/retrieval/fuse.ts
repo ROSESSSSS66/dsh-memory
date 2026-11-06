@@ -53,6 +53,25 @@ export interface ScoredCandidate {
 }
 
 /**
+ * SYNAPSE (Jan 2026) / SAGE / ACT-R 基础激活与艾宾浩斯频次强化衰减模型
+ * 每次成功召回与正向反馈都会对有效半衰期产生对数延展效应 (Spaced Repetition / Rehearsal Boost)
+ */
+export function computeActRBaseActivation(
+  ageDays: number,
+  halfLifeDays: number,
+  useCount: number = 0,
+  successCount: number = 0,
+  freshnessMod: number = 1.0
+): number {
+  const safeAge = Math.max(0, ageDays);
+  const safeHalfLife = Math.max(1, halfLifeDays);
+  const rehearsalBoost =
+    1 + 0.35 * Math.log(1 + Math.max(0, useCount) + 2 * Math.max(0, successCount));
+  const effectiveHalfLife = safeHalfLife * rehearsalBoost;
+  return Math.exp(-Math.LN2 * (safeAge / effectiveHalfLife)) * freshnessMod;
+}
+
+/**
  * 检查时间是否与范围重叠
  */
 function isMemoryInTimeRange(m: MemoryRecord, range: { from: number; to: number }): boolean {
@@ -68,7 +87,7 @@ function isMemoryInTimeRange(m: MemoryRecord, range: { from: number; to: number 
 }
 
 /**
- * 融合与打分 (§5.6)
+ * 融合与打分 (§5.6 + SYNAPSE Fan-Effect & ACT-R Base-Level Activation)
  */
 export function fuseCandidates(
   plan: QueryPlan,
@@ -195,21 +214,26 @@ export function fuseCandidates(
     return [];
   }
 
-  // 2.5 GraphRAG 一跳关联扩展与关系协同检测 (仅在已有种子通过绝对相关性硬门槛时触发)
+  // 2.5 GraphRAG + SYNAPSE 扇出衰减关联扩展与关系协同检测 (仅在已有种子通过绝对相关性硬门槛时触发)
   const gatedSet = new Set(gatedMemoryIds);
   const graphExpandedIds = new Set<string>();
   const graphBonusRrf = new Map<string, number>();
   const synergySet = new Set<string>();
+  const synergyWeightMap = new Map<string, number>();
 
   if (associativeNeighbors.length > 0 && (plan.contentTokens.length > 0 || plan.entities.length > 0)) {
     for (const edge of associativeNeighbors) {
       if (!gatedSet.has(edge.seedId)) continue;
       if (contradictionsSet.has(edge.neighborId)) continue;
 
+      const fanWeight = edge.activationWeight ?? 1.0;
+
       if (gatedSet.has(edge.neighborId)) {
-        // 两条通过硬门槛的候选之间存在 related / derived_from 关系 -> 触发关系协同增益
+        // 两条通过硬门槛的候选之间存在 related / derived_from 关系 -> 触发 SYNAPSE 扇出调制协同增益
         synergySet.add(edge.seedId);
         synergySet.add(edge.neighborId);
+        synergyWeightMap.set(edge.seedId, Math.max(synergyWeightMap.get(edge.seedId) || 0, fanWeight));
+        synergyWeightMap.set(edge.neighborId, Math.max(synergyWeightMap.get(edge.neighborId) || 0, fanWeight));
         continue;
       }
 
@@ -219,7 +243,7 @@ export function fuseCandidates(
       if (nMem.status !== 'active' && nMem.status !== 'frozen') continue;
       if (nMem.type === 'meta') continue;
 
-      // 校验一跳邻居与当前查询存在词汇或实体锚点关联 (防止无关漂移)
+      // 校验关联邻居与当前查询存在词汇或实体锚点关联 (防止无关漂移)
       const nTokens = tokenSet(`${nMem.content} ${nMem.summary}`);
       let hasTokenOverlap = false;
       for (const ct of plan.contentTokens) {
@@ -245,7 +269,11 @@ export function fuseCandidates(
         graphExpandedIds.add(edge.neighborId);
         synergySet.add(edge.seedId);
         synergySet.add(edge.neighborId);
-        const rrfContrib = 0.65 / (strategy.rrfK + edge.seedRank + 2);
+        synergyWeightMap.set(edge.seedId, Math.max(synergyWeightMap.get(edge.seedId) || 0, fanWeight));
+        synergyWeightMap.set(edge.neighborId, Math.max(synergyWeightMap.get(edge.neighborId) || 0, fanWeight));
+
+        const hopPenalty = edge.hop === 2 ? 2 : 0;
+        const rrfContrib = (0.65 * fanWeight) / (strategy.rrfK + edge.seedRank + 2 + hopPenalty);
         graphBonusRrf.set(
           edge.neighborId,
           Math.max(graphBonusRrf.get(edge.neighborId) || 0, rrfContrib)
@@ -288,7 +316,7 @@ export function fuseCandidates(
       continue;
     }
 
-    // freshness (Zep: 支持时序失效区间自动惩罚)
+    // freshness (Zep 时序失效区间惩罚 + SYNAPSE/ACT-R 艾宾浩斯频次强化模型)
     const ageDays = Math.max(0, (now - (mem.last_used_at ?? mem.updated_at)) / 86400000);
     const hl = HALF_LIFE[mem.type] || 365;
     let freshnessMod = 1.0;
@@ -297,7 +325,13 @@ export function fuseCandidates(
     } else if (mem.valid_to && now > mem.valid_to) {
       freshnessMod = 0.2;
     }
-    const freshness = Math.exp(-Math.LN2 * (ageDays / hl)) * freshnessMod;
+    const freshness = computeActRBaseActivation(
+      ageDays,
+      hl,
+      mem.use_count ?? 0,
+      mem.success_count ?? 0,
+      freshnessMod
+    );
 
     // consistency (若存在 active/frozen 的矛盾项，降至 0.3，否则 1.0)
     const consistency = contradictionsSet.has(id) ? 0.3 : 1.0;
@@ -310,9 +344,10 @@ export function fuseCandidates(
     const impWeight = weights.importance ?? 0;
     const importanceScore = ((mem.importance ?? 5) / 10.0);
 
-    // Relational Synergy Boost (同簇知识协同加成)
+    // Relational Synergy Boost (SYNAPSE 扇出注意力调制协同增益)
     const isSynergy = synergySet.has(id) && !contradictionsSet.has(id);
-    const synergyBonus = isSynergy ? 0.035 : 0;
+    const synFan = synergyWeightMap.get(id) ?? 1.0;
+    const synergyBonus = isSynergy ? 0.02 + 0.015 * synFan : 0;
 
     const rawScore =
       weights.relevance * relevance +

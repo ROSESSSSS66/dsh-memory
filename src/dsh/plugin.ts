@@ -27,6 +27,8 @@ import {
 } from '../evolution/maintenance.js';
 import { registerWebRoutes } from './web.js';
 import { backfillMissingEmbeddings } from '../core/vector.js';
+import { weaveZettelkastenLinks } from '../core/health.js';
+import { autoBootstrapMemory } from '../core/bootstrap.js';
 import type { Db } from '../types.js';
 
 export const name = 'dsh-memory';
@@ -49,7 +51,7 @@ export const Config = {
   default: DEFAULTS,
 };
 
-export function apply(ctx: any, config?: Partial<PluginConfig>) {
+export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap?: boolean }) {
   let db: Db | undefined;
   let promptSections: PromptSectionManager | undefined;
   let queue: IngestQueue | undefined;
@@ -89,9 +91,28 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
 
     console.log('[dsh-memory] Plugin initialized with database at:', dbPath);
 
-    // 1.1 启动恢复：running 任务恢复为 failed，保留额度一致性，并补齐本地 128D 特征向量
+    // 1.1 启动恢复与首次安装冷启动自动记忆初始化 (v0.4.0 Auto-Bootstrap)
     recoverJobsOnStartup(currentDb);
     try {
+      const isDefaultDbPath = !initialCfg.dbPath && !initialCfg.dataDir;
+      const shouldAutoBootstrap =
+        config?.autoBootstrap === true ||
+        (isDefaultDbPath && config?.autoBootstrap !== false);
+      if (shouldAutoBootstrap) {
+        const bootRes = autoBootstrapMemory(currentDb, {
+          workspacePath: process.cwd(),
+          cfg,
+        });
+        if (!bootRes.alreadyInitialized) {
+          console.log(
+            `[dsh-memory] Auto-initialized workspace memory (core=${
+              bootRes.coreBlocksInitialized.join(',') || 'ready'
+            }, seeded=${bootRes.workspaceMemoriesSeeded}, backfill=${
+              bootRes.backfillMemoriesCreated
+            }, links=${bootRes.linksWeaved})`
+          );
+        }
+      }
       backfillMissingEmbeddings(currentDb, { limit: 200 });
     } catch {}
 
@@ -130,6 +151,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
       autoPinMemories(currentDb);
       checkAndRepairFts(currentDb);
       backfillMissingEmbeddings(currentDb, { limit: 500 });
+      weaveZettelkastenLinks(currentDb, { maxNewLinks: 25 });
       cleanOldTelemetry(currentDb);
       checkSentinelAndRollback(currentDb);
       return { action: 'done' };
@@ -303,12 +325,12 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
       // tool 7: memory (统一工具，汲取自 LZMW/dsh-memory 单工具设计，极大节省提示词空间)
       ctx.tools.register({
         name: 'memory',
-        description: '长期记忆统一集成工具 (支持 search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal)。',
+        description: '长期记忆统一集成工具 (支持 search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal, init)。',
         parameters: {
           action: {
             type: 'string',
             required: true,
-            description: '操作类型: search | expand | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile | doctor | heal',
+            description: '操作类型: search | expand | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile | doctor | heal | init',
           },
           query: { type: 'string', description: '搜索关键词 (action=search 时使用)' },
           id: { type: 'string', description: '记忆 ID (action=expand/feedback/confirm 时使用)' },
@@ -367,7 +389,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
       ctx.commands.register({
         name: 'memory',
         description: '长期记忆系统管理与状态检查',
-        input: { hint: 'stats | doctor | inspect <id> | list | confirm <id> | merge <src> <tgt> | graph | export-md <path> | import-md <path> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending' },
+        input: { hint: 'init | stats | doctor | heal | inspect <id> | list | confirm <id> | merge <src> <tgt> | graph | export-md <path> | import-md <path> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending' },
         handler: ({ agent, rawInput }: any) => {
           const cwd = agent?.cwd || process.cwd();
           const sessId = agent?.session?.id || 'default_session';

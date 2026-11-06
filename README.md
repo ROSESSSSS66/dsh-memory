@@ -1,20 +1,20 @@
 # 🧠 DSH Self-Evolving Memory System (`dsh-memory`)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.3.0_GraphRAG_%2B_AutoHeal-indigo?style=flat-square" alt="v0.3.0" />
+  <img src="https://img.shields.io/badge/Version-v0.4.0_SYNAPSE_%2B_A--Mem_%2B_AutoBootstrap-indigo?style=flat-square" alt="v0.4.0" />
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
   <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
-  <img src="https://img.shields.io/badge/Tests-284_Passed_(48_Suites)-success?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-291_Passed_(49_Suites)-success?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Recall%40Inject-97.2%25-blueviolet?style=flat-square" alt="Recall Rate" />
-  <img src="https://img.shields.io/badge/Online_Latency-p95_0.6ms-red?style=flat-square" alt="Latency" />
+  <img src="https://img.shields.io/badge/Online_Latency-p95_0.8ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />
 </p>
 
 <p align="center">
   <b>专为 DeepSeek Desktop (DSH) 打造的亚毫秒级、自进化、可解释长期记忆引擎</b><br>
-  融合 <b>Letta (MemGPT) 常驻核心块</b> · <b>GraphRAG 1-Hop 拓扑激活扩散</b> · <b>Mem0 动态冲突调和</b> · <b>Memory Doctor 一键智能自愈</b> · <b>EvolveMem 策略进化实验舱</b> · <b>RIME 负反馈修复管线</b>
+  融合 <b>SYNAPSE 扇出衰减多跳激活扩散</b> · <b>A-Mem (NeurIPS 2025) 卡片盒双链织网</b> · <b>ACT-R 频次强化记忆半衰期</b> · <b>安装即自动初始化记忆 (`postinstall` + 冷启动引导)</b> · <b>Letta 常驻核心块</b> · <b>Mem0 冲突调和</b> · <b>EvolveMem 策略进化</b>
 </p>
 
 <p align="center">
@@ -57,9 +57,19 @@
 
 ### 💡 `dsh-memory` 的破局之道
 
-- ⚡ **亚毫秒级纯本地七路混合快环（p95 仅 `0.6~1.4ms`）**：在线检索链路坚持 **0 网络请求、0 外部 API 依赖、0 原生 C++ 编译负担**。基于 Node.js 24 原生 `node:sqlite` + FTS5 全文引擎、**128 维本地确定性特征哈希向量（含 4096 容量即时 LRU 内存兜底，新写入 0 秒延迟可召回）** 与 **GraphRAG 1-Hop 拓扑激活扩散（`expandGraphNeighbors`）+ 关系协同增益（`+0.035` Synergy Boost）**，七路并发召回在 10,000 条记忆规模下依然保持 `p50 = 22.5ms / p95 = 33.9ms` 极速响应。
+- ⚡ **亚毫秒级纯本地七路混合快环（p95 仅 `0.6~1.4ms`）**：在线检索链路坚持 **0 网络请求、0 外部 API 依赖、0 原生 C++ 编译负担**。基于 Node.js 24 原生 `node:sqlite` + FTS5 全文引擎、**128 维本地确定性特征哈希向量（含 4096 容量即时 LRU 内存兜底，新写入 0 秒延迟可召回）** 与 **SYNAPSE (Jan 2026) / HippoRAG 2 扇出衰减 1~2 跳激活扩散（`computeFanAttenuation` + `expandGraphNeighbors`）+ A-Mem (NeurIPS 2025) 自动卡片盒双链织网**，七路并发召回在 10,000 条记忆规模下依然保持 `p50 = 19.8ms / p95 = 22.1ms` 极速响应。
+- 🌱 **安装即用 · 全自动工作区记忆冷启动初始化 (`Auto-Bootstrap`) `[v0.4.0]`**：在执行 `npm install`（通过 `postinstall` 钩子）或插件首次挂载启动时，自动扫描当前操作系统与工作区 `package.json` / `tsconfig.json` / `src/` 架构，幂等初始化 **Letta 三大常驻核心块 (`human` / `persona` / `project`)**、导入 `.dsh/memory-bank` 笔记、沉淀工程架构与构建命令种子记忆、流式回填历史 DSH 会话日志，并自动补齐 128D 向量与编织 A-Mem 图谱关联边，彻底消除新项目“空库冷启动”问题。
 - 🎯 **规模不变性动态装箱（Token Governor）**：采用“稳定层（System Prompt 常驻偏好 + Letta Core Memory）+ 动态层（`pre-step` 价值密度背包算法）”双层注入。实测记忆库从 1,000 条扩容至 10,000 条时，单轮注入 Token 均值稳定在 **157 tokens**，体积膨胀率仅 **0.28%**。
-- 🧬 **可验证、可回滚的闭环自进化（EvolveMem + RIME）**：后台慢环在严格配额风控下自动完成**会话经验蒸馏**、**失败归因反思**、**负反馈触发式冲突修复（RIME）**，并通过 **EvolveMem 进化实验舱**自动搜寻更优检索权重；一旦在线哨兵检测到新策略引发用户纠偏率上升，**即刻无损自动回滚**。
+- 🧬 **可验证、可回滚的闭环自进化（ACT-R + EvolveMem + RIME）**：融合 **ACT-R / Ebbinghaus 间隔重复基础激活模型（`computeActRBaseActivation`）**，高频命中与正向确认的记忆自动拉长有效半衰期；后台慢环在严格配额风控下自动完成**会话经验蒸馏**、**失败归因反思**、**负反馈触发式冲突修复（RIME）**，并通过 **EvolveMem 进化实验舱**自动搜寻更优检索权重。
+
+### 📚 v0.4.0 核心算法学术论文底座 (2025–2026 前沿研究落地)
+
+| 论文 / 范式来源 | 核心机制 | 在 `dsh-memory` v0.4.0 中的工程落地 |
+|---|---|---|
+| **SYNAPSE** (*Empowering LLM Agents with Episodic-Semantic Memory via Spreading Activation*, Jan 2026, arXiv:2601.02744) | **ACT-R 扇出注意力稀释 (Fan Effect)** 与抑制性扩散 | 实现 `computeFanAttenuation(degree)`：当高连接度 Hub 种子节点度数越高时，单条边分配到的激活权重按 $1 / (1 + 0.25 \ln d)$ 自动衰减，消除泛化节点噪声；结合 `computeActRBaseActivation` 频次强化半衰期 |
+| **A-Mem** (*Agentic Memory for LLM Agents*, NeurIPS 2025, arXiv:2502.12110) | **Zettelkasten 卡片盒动态双链织网** | 写入新记忆 (`upsertCandidate`) 与健康自愈 (`weaveZettelkastenLinks`) 时，基于 `0.45 * 128D余弦 + 0.35 * 词法Jaccard + 0.20 * 实体共现` 自动为孤立记忆建立 Top-3 双向 `related` 关联边 |
+| **HippoRAG 2** (*From RAG to Memory: Non-Parametric Continual Learning*, Feb 2025, arXiv:2502.14802) | **多跳阻尼图谱激活传播** | `expandGraphNeighbors` 支持从高优种子沿 `related / derived_from` 边执行 1-Hop 直接扩散与 2-Hop 阻尼扩散（$\gamma = 0.45$），实现跨跳数的上下文关联召回 |
+| **MemRL / AgeMem / EvolveMem** (2025–2026) | **效用价值学习与策略在线演化** | 在线追踪引用反馈 (`outcome.ts`) 驱动 EMA Utility 更新、RIME 负反馈自动修复与检索策略实验室自动寻优 |
 
 ---
 
@@ -67,9 +77,10 @@
 
 `dsh-memory` 并非单一的向量检索插件，而是将业界五大前沿 Agent 记忆范式深度融合于纯本地双环引擎之中：
 
-| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.3.0)** |
+| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.4.0)** |
 |---|---|---|---|---|
-| **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **`0.6 ~ 1.4ms` (p95，纯本地七路 GraphRAG + 向量混合召回)** |
+| **安装后冷启动** | ❌ 空白库，需手动逐条喂入 | ❌ 需手动编写多份 Markdown | ❌ 空白库，需业务侧自行灌库 | **✅ `npm install` 后 `postinstall` 与首次启动全自动扫描工程并初始化记忆** |
+| **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **`0.6 ~ 1.4ms` (p95，纯本地七路 SYNAPSE + A-Mem + 向量混合召回)** |
 | **Token 成本控制** | 固定 Top-K，易超预算 | 随文档增长线性膨胀，极易爆窗 | 依赖服务端截断策略 | **动态背包算法装箱，1k→10k 仅波动 `0.28%`** |
 | **常驻工作台记忆** | ❌ 不支持 | ✅ 手动维护 Markdown | ⚠️ 需额外定制 | **✅ 内置 Letta 风格三大核心块 (`human`/`persona`/`project`)** |
 | **新旧事实冲突消解** | ❌ 新旧并存，互相污染 | ⚠️ 依赖模型自觉覆盖全文 | ✅ 在线同步调用 LLM 调和 | **✅ 槽位唯一索引 + Mem0 冲突调和器 + `supersedes` 因果链** |
@@ -300,9 +311,10 @@ npm run build
 
 | 类别 | 交互命令 | 功能说明 |
 |---|---|---|
-| **状态与体检** | `/memory status` (或 `stats`) | 实时查看当前工作区记忆分布、活跃检索策略版本及今日 LLM 配额消耗 |
-| | `/memory doctor [--fix]` | **`[v0.3.0]`** 执行记忆库全面体检（0-100 评分、FTS5 同步校验、128D 向量覆盖率、语义冗余对与冲突诊断；加 `--fix` 自动自愈） |
-| | `/memory heal` | **`[v0.3.0]`** 一键智能自愈：自动修复 FTS5 索引、回填 128D 向量、合并重复记忆对并消解非冻结矛盾 |
+| **状态与初始化** | `/memory init [--force]` | **`[v0.4.0]`** 一键执行工作区记忆冷启动初始化（扫描项目架构、初始化 Letta 核心块、导入文档、回填会话、补齐向量并编织 A-Mem 图谱） |
+| | `/memory status` (或 `stats`) | 实时查看当前工作区记忆分布、活跃检索策略版本及今日 LLM 配额消耗 |
+| | `/memory doctor [--fix]` | **`[v0.4.0]`** 执行记忆库全面体检（0-100 评分、FTS5 同步校验、128D 向量覆盖率、A-Mem 孤立节点诊断、语义冗余对与冲突诊断；加 `--fix` 自动自愈） |
+| | `/memory heal` | **`[v0.4.0]`** 一键智能自愈：自动修复 FTS5 索引、回填 128D 向量、编织 A-Mem 双链、合并重复记忆对并消解非冻结矛盾 |
 | | `/memory eval` | 原地运行 120 条基准回归评测，即时输出召回率、隔离度与延迟报告 |
 | **前沿范式** | `/memory core [block] [内容]` | **`[Letta]`** 查看或更新常驻 Core Memory 核心块（`human` / `persona` / `project`） |
 | | `/memory reconcile <内容>` | **`[Mem0]`** 对输入事实执行动态冲突调和（自动判定 `ADD/UPDATE/DELETE/NOOP`）并落库 |

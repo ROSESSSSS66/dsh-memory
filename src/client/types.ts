@@ -400,6 +400,7 @@ export interface MemoryHealthReportUI {
   ftsCount: number;
   missingEmbeddingsCount?: number;
   embeddingsReadyCount?: number;
+  orphanMemoriesCount?: number;
   duplicatePairs: Array<{
     sourceId: string;
     targetId: string;
@@ -429,6 +430,7 @@ export interface MemoryHealthReportUI {
 export interface AutoHealResultUI {
   ftsRebuilt: boolean;
   embeddingsBackfilled: number;
+  linksWeaved?: number;
   duplicatesMerged: number;
   contradictionsResolved: number;
   beforeScore: number;

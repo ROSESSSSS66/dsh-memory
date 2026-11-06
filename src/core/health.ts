@@ -1,11 +1,11 @@
 import type { Db, MemoryRecord } from '../types.js';
-import { tokenSet, jaccard } from './text.js';
+import { tokenSet, jaccard, extractEntities } from './text.js';
 import {
   getOrComputeEmbedding,
   cosineSimilarity,
   backfillMissingEmbeddings,
 } from './vector.js';
-import { mergeMemories, saveVersionSnapshot } from './writer.js';
+import { mergeMemories, saveVersionSnapshot, addRelation } from './writer.js';
 import { checkAndRepairFts } from '../evolution/maintenance.js';
 
 export interface DuplicatePairItem {
@@ -49,6 +49,7 @@ export interface MemoryHealthReport {
   ftsCount: number;
   missingEmbeddingsCount?: number;
   embeddingsReadyCount?: number;
+  orphanMemoriesCount?: number;
   duplicatePairs: DuplicatePairItem[];
   contradictions: ContradictionItem[];
   staleMemories: StaleMemoryItem[];
@@ -64,6 +65,7 @@ export interface AutoHealResult {
   embeddingsBackfilled: number;
   duplicatesMerged: number;
   contradictionsResolved: number;
+  linksWeaved: number;
   report: MemoryHealthReport;
 }
 
@@ -72,9 +74,9 @@ export interface AutoHealResult {
  * 审计维度：
  * 1. 状态分布与候选积压 (Active / Candidate / Frozen / Superseded / Archived)
  * 2. FTS5 倒排索引与主表一致性
- * 3. 同作用域下的槽位冲突与高相似度冗余对 (Jaccard >= 0.65 或相同 slot_key)
+ * 3. 同作用域下的槽位冲突与高相似度冗余对 (Jaccard >= 0.65 或相同 slot_key 或 128D 语义重合)
  * 4. 仍处于 Active/Frozen 状态的显式 contradicts 矛盾关系
- * 5. 低效用长期未召回的陈旧记忆 (Stale Memories)
+ * 5. 低效用长期未召回的陈旧记忆 (Stale Memories) 与 A-Mem 孤岛节点统计
  */
 export function auditMemoryHealth(
   db: Db,
@@ -306,6 +308,23 @@ export function auditMemoryHealth(
     daysUnused: Math.max(0, Math.floor((now - Number(r.ref_time || now)) / 86_400_000)),
   }));
 
+  // 统计尚未建立任何拓扑关系边的孤岛记忆数 (A-Mem Zettelkasten 连通度诊断)
+  const connectedIdSet = new Set<string>();
+  const allRelRows = db.all<{ from_id: string; to_id: string }>(
+    `SELECT from_id, to_id FROM memory_relations WHERE rel IN ('related', 'derived_from', 'supersedes')`
+  );
+  for (const rel of allRelRows) {
+    connectedIdSet.add(rel.from_id);
+    connectedIdSet.add(rel.to_id);
+  }
+  let orphanMemoriesCount = 0;
+  for (const r of activeRows) {
+    if (r.slot_key?.startsWith('core:')) continue;
+    if (!connectedIdSet.has(r.id)) {
+      orphanMemoriesCount++;
+    }
+  }
+
   // 计算 0-100 综合健康分
   let score = 100;
   if (!ftsConsistent) score -= 25;
@@ -350,6 +369,11 @@ export function auditMemoryHealth(
       `当前有 ${counts.candidate} 条候选记忆待晋升，建议触发「蒸馏会话 (Distill)」或「反思升华 (Reflect)」加速沉淀。`
     );
   }
+  if (orphanMemoriesCount >= 3) {
+    recommendations.push(
+      `检测到 ${orphanMemoriesCount} 条缺乏拓扑关联的孤岛记忆，建议执行「一键智能自愈 (Auto-Heal)」触发 A-Mem 双链织网。`
+    );
+  }
   if (recommendations.length === 0) {
     recommendations.push('记忆库结构健康：FTS5 索引同步、无冗余槽位冲突、无活跃矛盾记忆。');
   }
@@ -362,6 +386,7 @@ export function auditMemoryHealth(
     ftsCount,
     missingEmbeddingsCount,
     embeddingsReadyCount,
+    orphanMemoriesCount,
     duplicatePairs,
     contradictions,
     staleMemories,
@@ -371,11 +396,154 @@ export function auditMemoryHealth(
 }
 
 /**
- * 记忆库一键智能自愈引擎 (Auto-Healing Memory Doctor, v0.3.0)
+ * A-Mem (NeurIPS 2025, arXiv:2502.12110) Zettelkasten 自动双链织网引擎
+ * 扫描同作用域内的活跃记忆，基于 128D 本地向量余弦 + 实体共现 + 词汇 Jaccard 为孤岛/弱连通节点自动编织 related 边
+ */
+export function weaveZettelkastenLinks(
+  db: Db,
+  options: { workspaceId?: string; maxNewLinks?: number; now?: number } = {}
+): number {
+  const now = options.now ?? Date.now();
+  const maxNewLinks = options.maxNewLinks ?? 30;
+  const wsFilter = options.workspaceId;
+
+  const activeRows = wsFilter
+    ? db.all<{
+        id: string;
+        scope: string;
+        workspace_id: string | null;
+        type: string;
+        summary: string;
+        content: string;
+        slot_key: string | null;
+        hash: string;
+        embedding: Uint8Array | Buffer | null;
+      }>(
+        `SELECT id, scope, workspace_id, type, summary, content, slot_key, hash, embedding
+         FROM memories
+         WHERE status IN ('active', 'frozen')
+           AND type != 'meta'
+           AND COALESCE(slot_key, '') NOT LIKE 'core:%'
+           AND (workspace_id = ? OR scope = 'global')
+         ORDER BY utility DESC, confidence DESC, updated_at DESC
+         LIMIT 120`,
+        [wsFilter]
+      )
+    : db.all<{
+        id: string;
+        scope: string;
+        workspace_id: string | null;
+        type: string;
+        summary: string;
+        content: string;
+        slot_key: string | null;
+        hash: string;
+        embedding: Uint8Array | Buffer | null;
+      }>(
+        `SELECT id, scope, workspace_id, type, summary, content, slot_key, hash, embedding
+         FROM memories
+         WHERE status IN ('active', 'frozen')
+           AND type != 'meta'
+           AND COALESCE(slot_key, '') NOT LIKE 'core:%'
+         ORDER BY utility DESC, confidence DESC, updated_at DESC
+         LIMIT 120`
+      );
+
+  if (activeRows.length < 2) return 0;
+
+  const existingPairs = new Set<string>();
+  const relRows = db.all<{ from_id: string; to_id: string }>(
+    `SELECT from_id, to_id FROM memory_relations`
+  );
+  for (const r of relRows) {
+    existingPairs.add(`${r.from_id}->${r.to_id}`);
+    existingPairs.add(`${r.to_id}->${r.from_id}`);
+  }
+
+  const tokenCache = new Map<string, Set<string>>();
+  const entCache = new Map<string, Set<string>>();
+  const vecCache = new Map<string, Float32Array | null>();
+
+  for (const r of activeRows) {
+    tokenCache.set(r.id, tokenSet(`${r.summary} ${r.content}`));
+    entCache.set(
+      r.id,
+      new Set(
+        extractEntities(`${r.summary} ${r.content}`).map((e) => e.toLowerCase().replace(/\\/g, '/'))
+      )
+    );
+    vecCache.set(r.id, getOrComputeEmbedding(r));
+  }
+
+  const candidateEdges: Array<{ fromId: string; toId: string; affinity: number }> = [];
+
+  for (let i = 0; i < activeRows.length; i++) {
+    const a = activeRows[i];
+    const setA = tokenCache.get(a.id)!;
+    const entA = entCache.get(a.id)!;
+    const vecA = vecCache.get(a.id);
+
+    for (let j = i + 1; j < activeRows.length; j++) {
+      const b = activeRows[j];
+      const sameScope =
+        a.scope === b.scope && (a.scope === 'global' || a.workspace_id === b.workspace_id);
+      if (!sameScope) continue;
+      if (existingPairs.has(`${a.id}->${b.id}`)) continue;
+
+      const setB = tokenCache.get(b.id)!;
+      const jaccardSim = jaccard(setA, setB);
+      // Avoid linking pairs that are actually duplicates (>= 0.65) which should be merged instead
+      if (jaccardSim >= 0.65) continue;
+
+      const vecB = vecCache.get(b.id);
+      const vecSim = vecA && vecB ? Math.max(0, cosineSimilarity(vecA, vecB)) : 0;
+
+      const entB = entCache.get(b.id)!;
+      let sharedEnts = 0;
+      for (const e of entA) {
+        if (entB.has(e)) sharedEnts++;
+      }
+
+      const entBonus = Math.min(1, sharedEnts / 2);
+      const affinity = 0.45 * vecSim + 0.35 * jaccardSim + 0.2 * entBonus;
+
+      if (affinity >= 0.46 || (sharedEnts >= 1 && vecSim >= 0.4) || jaccardSim >= 0.35) {
+        candidateEdges.push({ fromId: a.id, toId: b.id, affinity });
+      }
+    }
+  }
+
+  candidateEdges.sort((a, b) => b.affinity - a.affinity);
+
+  let weaved = 0;
+  const degreeAdded = new Map<string, number>();
+
+  db.transaction(() => {
+    for (const edge of candidateEdges) {
+      if (weaved >= maxNewLinks) break;
+      const degA = degreeAdded.get(edge.fromId) || 0;
+      const degB = degreeAdded.get(edge.toId) || 0;
+      if (degA >= 3 || degB >= 3) continue;
+
+      addRelation(db, edge.fromId, edge.toId, 'related', now);
+      existingPairs.add(`${edge.fromId}->${edge.toId}`);
+      existingPairs.add(`${edge.toId}->${edge.fromId}`);
+      degreeAdded.set(edge.fromId, degA + 1);
+      degreeAdded.set(edge.toId, degB + 1);
+      weaved++;
+    }
+  });
+
+  return weaved;
+}
+
+/**
+ * 记忆库一键智能自愈引擎 (Auto-Healing Memory Doctor, v0.4.0)
  * 1. 自动校验并重建不一致的 FTS5 索引
  * 2. 自动为缺失向量的活跃/冻结记忆回填 128D 本地特征哈希向量
  * 3. 自动合并高置信度同槽位/高重合冗余记忆对，迁移证据与实体并建立 supersedes 因果链
  * 4. 自动消解明显的历史矛盾链 (保留高优/更新项，将旧冲突项标记为 superseded)
+ * 5. 自动执行 A-Mem Zettelkasten 孤岛节点双链织网 (weaveZettelkastenLinks)
  */
 export function autoHealMemoryHealth(
   db: Db,
@@ -430,9 +598,18 @@ export function autoHealMemoryHealth(
     if (mFrom.status === 'frozen' && mTo.status === 'frozen') continue;
 
     // 决定保留者 (winner) 与被取代者 (loser)
-    const scoreA = mFrom.utility * 0.5 + mFrom.confidence * 0.5 + (mFrom.pinned ? 0.5 : 0) + (mFrom.status === 'frozen' ? 1.0 : 0);
-    const scoreB = mTo.utility * 0.5 + mTo.confidence * 0.5 + (mTo.pinned ? 0.5 : 0) + (mTo.status === 'frozen' ? 1.0 : 0);
-    const winner = scoreA > scoreB || (scoreA === scoreB && mFrom.updated_at >= mTo.updated_at) ? mFrom : mTo;
+    const scoreA =
+      mFrom.utility * 0.5 +
+      mFrom.confidence * 0.5 +
+      (mFrom.pinned ? 0.5 : 0) +
+      (mFrom.status === 'frozen' ? 1.0 : 0);
+    const scoreB =
+      mTo.utility * 0.5 +
+      mTo.confidence * 0.5 +
+      (mTo.pinned ? 0.5 : 0) +
+      (mTo.status === 'frozen' ? 1.0 : 0);
+    const winner =
+      scoreA > scoreB || (scoreA === scoreB && mFrom.updated_at >= mTo.updated_at) ? mFrom : mTo;
     const loser = winner.id === mFrom.id ? mTo : mFrom;
 
     if (loser.status === 'frozen' || loser.pinned === 1) continue;
@@ -452,6 +629,13 @@ export function autoHealMemoryHealth(
     contradictionsResolved++;
   }
 
+  // 5. A-Mem Zettelkasten 孤岛节点自动双链织网
+  const linksWeaved = weaveZettelkastenLinks(db, {
+    workspaceId: options.workspaceId,
+    maxNewLinks: 30,
+    now,
+  });
+
   const afterReport = auditMemoryHealth(db, { workspaceId: options.workspaceId, now });
 
   return {
@@ -462,6 +646,7 @@ export function autoHealMemoryHealth(
     embeddingsBackfilled,
     duplicatesMerged,
     contradictionsResolved,
+    linksWeaved,
     report: afterReport,
   };
 }

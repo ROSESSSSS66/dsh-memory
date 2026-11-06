@@ -61,6 +61,7 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
   const [isConsolidating, setIsConsolidating] = React.useState(false);
   const [isDistilling, setIsDistilling] = React.useState(false);
   const [isBackfilling, setIsBackfilling] = React.useState(false);
+  const [isBootstrapping, setIsBootstrapping] = React.useState(false);
   const [backfillResult, setBackfillResult] = React.useState<{
     dryRun: boolean;
     stats: BackfillStatsUI;
@@ -175,7 +176,7 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
       const summary = st
         ? `归档冷记忆 ${st.archivedCold} 条，自动置顶 ${st.autoPinned} 条${
             st.embeddingsBackfilled ? `，回填向量 ${st.embeddingsBackfilled} 条` : ''
-          }${st.ftsRebuilt ? '，已重建 FTS5' : ''}`
+          }${st.linksWeaved ? `，A-Mem 编织边 ${st.linksWeaved} 条` : ''}${st.ftsRebuilt ? '，已重建 FTS5' : ''}`
         : '冷记忆归档、过期候选清理、自动置顶与 FTS5 索引校验已就绪';
       const msg = `离线维护完成：${summary}！`;
       setTaskFeedback({ tone: 'ok', text: msg });
@@ -198,7 +199,7 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
       const h = res?.heal;
       if (h) {
         if (h.report || h.health) setHealth(h.report || h.health);
-        const msg = `一键自愈完成：合并重复 ${h.duplicatesMerged} 对，消解矛盾 ${h.contradictionsResolved} 组，回填向量 ${h.embeddingsBackfilled} 条 (健康分 ${h.beforeScore} → ${h.afterScore} · ${h.afterGrade})`;
+        const msg = `一键自愈完成：合并重复 ${h.duplicatesMerged} 对，消解矛盾 ${h.contradictionsResolved} 组，回填向量 ${h.embeddingsBackfilled} 条，A-Mem 编织边 ${h.linksWeaved || 0} 条 (健康分 ${h.beforeScore} → ${h.afterScore} · ${h.afterGrade})`;
         setTaskFeedback({ tone: 'ok', text: msg });
         onToast(msg);
       } else {
@@ -213,6 +214,27 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
       onToast(msg);
     } finally {
       setIsHealing(false);
+    }
+  };
+
+  const handleBootstrapNow = async () => {
+    setIsBootstrapping(true);
+    try {
+      const res = await performAction('bootstrap', { force: true });
+      const b = res?.bootstrap;
+      const msg = b
+        ? `工作区记忆初始化完成：核心记忆块 [${(b.coreBlocksSeeded || []).join(', ') || '已就绪'}]，工程记忆 +${b.workspaceMemoriesSeeded} 条，A-Mem 图谱编织 +${b.linksWeaved} 条边 (总活跃 ${b.totalActiveMemories} 条)`
+        : '工作区记忆已完成冷启动初始化！';
+      setTaskFeedback({ tone: 'ok', text: msg });
+      onToast(msg);
+      await loadEvolution();
+      onUpdated();
+    } catch (err: any) {
+      const msg = err?.message || '工作区记忆初始化失败';
+      setTaskFeedback({ tone: 'err', text: msg });
+      onToast(msg);
+    } finally {
+      setIsBootstrapping(false);
     }
   };
 
@@ -402,6 +424,10 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
             <div className="dshm-strat-kpi">
               <span>低效用陈旧记忆</span>
               <strong>{health.staleMemories.length} 条</strong>
+            </div>
+            <div className="dshm-strat-kpi">
+              <span>孤立节点 (A-Mem 待编织)</span>
+              <strong>{health.orphanMemoriesCount ?? 0} 条</strong>
             </div>
           </div>
 
@@ -855,6 +881,18 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
           </div>
 
           <div className="dshm-maint-actions">
+            <GlassButton
+              type="button"
+              variant={variant}
+              intent="primary"
+              className="dshm-btn dshm-btn-primary"
+              disabled={isBootstrapping}
+              onClick={handleBootstrapNow}
+              title="自动探测项目架构、初始化 Letta 核心块、导入历史文档并编织 A-Mem 图谱边"
+            >
+              <span>{isBootstrapping ? '初始化中…' : '🌱 一键初始化工作区记忆 (Init)'}</span>
+            </GlassButton>
+
             <GlassButton
               type="button"
               variant={variant}

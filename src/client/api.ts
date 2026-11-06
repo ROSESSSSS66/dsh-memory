@@ -169,6 +169,8 @@ export async function performAction(
     | 'eval'
     | 'heal'
     | 'consolidate'
+    | 'bootstrap'
+    | 'init'
     | 'add-relation',
   payload?: any
 ): Promise<any> {

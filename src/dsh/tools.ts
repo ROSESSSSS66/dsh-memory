@@ -1,6 +1,7 @@
+import fs from 'node:fs';
 import type { Db, MemoryRecord, MemoryType } from '../types.js';
 import { get, sources } from '../core/store.js';
-import { scopeFilterSQL, workspaceId } from '../core/scope.js';
+import { workspaceId } from '../core/scope.js';
 import { buildQueryPlan } from '../retrieval/query.js';
 import { recallLexical, recallEntity } from '../retrieval/channels.js';
 import { fuseCandidates, DEFAULT_STRATEGY } from '../retrieval/fuse.js';
@@ -8,9 +9,16 @@ import { TAG_MAP } from '../retrieval/render.js';
 import { budgetTokens } from '../core/tokens.js';
 import { redactSecrets } from '../core/privacy.js';
 import { upsertCandidate, confirmMemory, mergeMemories } from '../core/writer.js';
-import { getCoreMemory, getAllCoreMemories, setCoreMemory, appendCoreMemory, renderCoreMemoryMarkdown } from '../core/core-memory.js';
+import {
+  getCoreMemory,
+  getAllCoreMemories,
+  setCoreMemory,
+  appendCoreMemory,
+  renderCoreMemoryMarkdown,
+} from '../core/core-memory.js';
 import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
-import { reconcileAndUpsert, reconcileCandidate } from '../evolution/reconciler.js';
+import { autoBootstrapMemory } from '../core/bootstrap.js';
+import { reconcileAndUpsert } from '../evolution/reconciler.js';
 import { enqueueRepairJobIfEligible } from '../evolution/repair.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
@@ -445,7 +453,7 @@ export class MemoryTools {
       return 'Error: both block and text are required';
     }
     try {
-      const res = appendCoreMemory(this.db, params.block, params.text, { workspaceId: wsId, actor: 'assistant' });
+      appendCoreMemory(this.db, params.block, params.text, { workspaceId: wsId, actor: 'assistant' });
       return `Appended to core memory block '${params.block}' successfully.`;
     } catch (err: any) {
       return `Error: ${err?.message || 'Failed to append to core memory'}`;
@@ -499,7 +507,7 @@ export class MemoryTools {
       `[Memory Health Doctor] Score: ${report.score}/100 (Grade ${report.grade})`,
       `Counts: active=${report.counts.active}, candidate=${report.counts.candidate}, frozen=${report.counts.frozen}, superseded=${report.counts.superseded}, archived=${report.counts.archived}, pinned=${report.counts.pinned}`,
       `FTS5 Index: ${report.ftsConsistent ? 'Consistent' : 'Out of sync'} (${report.ftsCount} rows)`,
-      `Near-Duplicates: ${report.duplicatePairs.length} | Active Contradictions: ${report.contradictions.length} | Stale Memories: ${report.staleMemories.length}`,
+      `Near-Duplicates: ${report.duplicatePairs.length} | Active Contradictions: ${report.contradictions.length} | Stale Memories: ${report.staleMemories.length} | Orphans: ${report.orphanMemoriesCount ?? 0}`,
     ];
     if (report.duplicatePairs.length > 0) {
       lines.push('Duplicate Pairs (can merge via memory_merge):');
@@ -517,14 +525,34 @@ export class MemoryTools {
   }
 
   /**
-   * 11.5 heal (一键智能自愈修复：FTS5 重建 + 本地向量回填 + 冗余去重 + 矛盾消解)
+   * 11.5 heal (一键智能自愈修复：FTS5 重建 + 本地向量回填 + 冗余去重 + 矛盾消解 + A-Mem 双链织网)
    */
   public heal(agentCtx: { workspaceId: string }): string {
     const wsId = workspaceId(agentCtx.workspaceId);
     const res = autoHealMemoryHealth(this.db, { workspaceId: wsId });
     return [
       `[Memory Auto-Heal Completed] Score: ${res.beforeScore} -> ${res.afterScore}/100 (Grade ${res.afterGrade})`,
-      `Actions: ftsRebuilt=${res.ftsRebuilt}, embeddingsBackfilled=${res.embeddingsBackfilled}, duplicatesMerged=${res.duplicatesMerged}, contradictionsResolved=${res.contradictionsResolved}`,
+      `Actions: ftsRebuilt=${res.ftsRebuilt}, embeddingsBackfilled=${res.embeddingsBackfilled}, duplicatesMerged=${res.duplicatesMerged}, contradictionsResolved=${res.contradictionsResolved}, linksWeaved=${res.linksWeaved}`,
+    ].join('\n');
+  }
+
+  /**
+   * 11.8 init (v0.4.0 工作区记忆自动初始化与冷启动扫描)
+   */
+  public init(agentCtx: { workspaceId: string }, options?: { force?: boolean }): string {
+    const wsPath =
+      agentCtx.workspaceId && fs.existsSync(agentCtx.workspaceId)
+        ? agentCtx.workspaceId
+        : process.cwd();
+    const res = autoBootstrapMemory(this.db, {
+      workspacePath: wsPath,
+      cfg: this.cfg,
+      force: options?.force ?? false,
+      includeBackfill: true,
+    });
+    return [
+      `[Workspace Memory Bootstrap] workspace=${res.workspaceId}, alreadyInitialized=${res.alreadyInitialized}`,
+      `Result: coreBlocks=[${res.coreBlocksInitialized.join(',')}], seeded=${res.workspaceMemoriesSeeded}, markdownImported=${res.markdownMemoriesImported}, backfillMemories=${res.backfillMemoriesCreated}, embeddingsBackfilled=${res.embeddingsBackfilled}, linksWeaved=${res.linksWeaved}`,
     ].join('\n');
   }
 
@@ -545,7 +573,9 @@ export class MemoryTools {
         | 'core_append'
         | 'reconcile'
         | 'doctor'
-        | 'heal';
+        | 'heal'
+        | 'init'
+        | 'bootstrap';
       query?: string;
       id?: string;
       sourceId?: string;
@@ -561,6 +591,7 @@ export class MemoryTools {
       block?: string;
       text?: string;
       slotKey?: string;
+      force?: boolean;
     },
     agentCtx: { workspaceId: string; sessionId: string; turn?: number }
   ): string {
@@ -592,7 +623,7 @@ export class MemoryTools {
       case 'core_read':
         return this.coreRead({ block: params.block }, agentCtx);
       case 'core_set':
-        return this.coreSet({ block: params.block || 'project', content: params.content || '' }, agentCtx);
+        return this.coreSet({ block: params.block || 'project', content: argsContent(params) }, agentCtx);
       case 'core_append':
         return this.coreAppend({ block: params.block || 'project', text: params.text || params.content || '' }, agentCtx);
       case 'reconcile':
@@ -601,8 +632,15 @@ export class MemoryTools {
         return this.doctor(agentCtx);
       case 'heal':
         return this.heal(agentCtx);
+      case 'init':
+      case 'bootstrap':
+        return this.init(agentCtx, { force: params.force });
       default:
-        return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal`;
+        return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal, init`;
     }
   }
+}
+
+function argsContent(params: { content?: string; text?: string }): string {
+  return params.content || params.text || '';
 }
