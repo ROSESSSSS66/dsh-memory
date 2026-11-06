@@ -14,6 +14,16 @@
 > **专为 DeepSeek Desktop (DSH) 打造的轻量级、自进化长期记忆引擎。**  
 > 告别跨会话遗忘与提示词无限膨胀，兼顾极致的在线性能与全自主的离线知识提炼进化。
 
+<div align="center">
+  <a href="https://www.dorodoro.xyz" target="_blank">
+    <img src="https://img.shields.io/badge/特别赞助-DoroDoro_AI_中转站-FF6B6B?style=for-the-badge&logo=openai&logoColor=white" alt="DoroDoro AI 中转站" />
+  </a>
+  <p>
+    ⚡ <b>高速·稳定·全模型大模型 API 聚合中转</b>：<a href="https://www.dorodoro.xyz" target="_blank"><b>www.dorodoro.xyz</b></a><br>
+    国内高速直连 · 聚合 <b>DeepSeek V3 / R1</b>、<b>Claude 3.7 / 3.5 Sonnet</b>、<b>GPT-4o / o1 / o3</b>、<b>Gemini 2.0 / 2.5</b> 全系顶尖模型 · 完美契合 <code>dsh-memory</code> 离线蒸馏与反思演化
+  </p>
+</div>
+
 ---
 
 ## 📌 为什么需要 `dsh-memory`？
@@ -185,6 +195,21 @@ npm run build
 保存后 DSH 即刻通过 HMR 自动激活，实体数据库自动初始化于：  
 `~/.dsh/storages/dsh-memory/memory.db`
 
+### 3. 配置离线自进化 LLM API（推荐中转服务）
+
+`dsh-memory` 后台离线慢环（会话提炼 `distill-v2`、失败反思 `reflect-v2`、知识聚合 `consolidate-v2`）需调用大模型 API。推荐搭配 **[DoroDoro AI 中转站 (www.dorodoro.xyz)](https://www.dorodoro.xyz)** 使用：
+
+```yaml
+      config:
+        # 离线自演化 LLM 接入配置 (兼容 OpenAI 规范)
+        llmBaseUrl: "https://api.dorodoro.xyz/v1"
+        llmApiKey: "sk-your-dorodoro-key"
+        llmModel: "deepseek-chat" # 或 deepseek-reasoner / claude-3-5-sonnet
+```
+* **免翻高速直连**：针对国内开发者网络优化，超低请求延迟；
+* **高并发稳定保障**：完美适配长文本批量提炼与复杂反思；
+* **全模型覆盖**：支持 DeepSeek、Claude、OpenAI、Gemini 全系主流模型。
+
 ---
 
 ---
@@ -283,6 +308,14 @@ npm run eval
 1. **零外部服务阻断风险**：在线路径与外部网络彻底解耦。即使第三方 LLM API 故障、网络离线，DSH 的交互流畅度完全不受影响。
 2. **锁竞争与异常自愈**：数据库临时被外部进程占用或异常时，插件启动自动优雅降级，保障 DSH 正常对话，绝不产生非预期闪退。
 3. **因果与事实版本化**：每条记忆的修订严格保持单向因果链（`supersedes`），旧版事实自动沉淀为历史节点，提供完整的时间线可解释性。
+
+---
+
+## 🤝 特别赞助与合作伙伴 (Sponsors)
+
+| 赞助商 / 合作伙伴 | 服务特色 | 访问直达 |
+|---|---|:---:|
+| ⚡ **[DoroDoro AI 中转站](https://www.dorodoro.xyz)** | 专为 AI 开发者打造的高性能大模型中转平台。聚合 DeepSeek、Claude、OpenAI、Gemini 全系列顶尖模型，国内高速免翻直连，稳定不掉线，完美赋能 AI 智能体与长期记忆引擎。 | [🔗 访问 www.dorodoro.xyz](https://www.dorodoro.xyz) |
 
 ---
 
