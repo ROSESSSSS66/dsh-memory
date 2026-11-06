@@ -1,7 +1,25 @@
 import type { MemoryRecord } from '../types.js';
 import type { ScoredCandidate } from './fuse.js';
 import { budgetTokens } from '../core/tokens.js';
+import { tokenSet, jaccard } from '../core/text.js';
 import { render, type RenderItem } from './render.js';
+
+/**
+ * LightMem (2025) / Submodular MMR 边际信息增益算子 (Maximal Marginal Relevance over Value-Per-Token)
+ * 对与已选集合存在高词汇重叠 (>= threshold) 的近似冗余候选施加次模边际折损，最大化注入上下文的信息熵密度
+ */
+export function computeMmrMarginalScore(
+  baseVpt: number,
+  maxOverlap: number,
+  lambda: number = 0.65,
+  threshold: number = 0.58
+): number {
+  if (maxOverlap < threshold) {
+    return baseVpt;
+  }
+  const penaltyFactor = Math.max(0.15, 1 - lambda * maxOverlap);
+  return baseVpt * penaltyFactor;
+}
 
 export interface GovernOptions {
   budget: number;
@@ -87,31 +105,28 @@ export function govern(
   const candidates = Array.from(hashMap.values());
   if (candidates.length === 0) return [];
 
-  // 4. 计算 VPT (Value Per Token)
+  // 4. 计算 VPT (Value Per Token) 与词集特征 (用于 LightMem Submodular MMR 边际去重)
   const withVpt = candidates.map((c) => ({
     cand: c,
     vpt: c.score / Math.max(c.memory.token_cost, 30),
+    tokens: tokenSet(`${c.memory.content} ${c.memory.summary}`),
   }));
 
-  // 按 score 降序找最高分的第一条
+  // 按 score 降序找最高分的第一条锚点记忆
   withVpt.sort((a, b) => b.cand.score - a.cand.score);
   const first = withVpt[0];
-  const rest = withVpt.slice(1);
-
-  // 其余项按 vpt 从高到低排序
-  rest.sort((a, b) => b.vpt - a.vpt);
-  const queue = [first, ...rest];
+  const remaining = withVpt.slice(1);
 
   const selected: SelectedItem[] = [];
+  const selectedTokenSets: Set<string>[] = [];
 
   function testBudget(items: RenderItem[]): number {
     const text = render(items, { strategyVersion, layer });
     return budgetTokens(text);
   }
 
-  for (const item of queue) {
-    if (selected.length >= opts.maxItems) break;
-
+  function tryPackCandidate(item: (typeof withVpt)[0]): boolean {
+    if (selected.length >= opts.maxItems) return false;
     const m = item.cand.memory;
 
     // 先尝试 content
@@ -128,7 +143,8 @@ export function govern(
         score: item.cand.score,
         tokens: m.token_cost,
       });
-      continue;
+      selectedTokenSets.push(item.tokens);
+      return true;
     }
 
     // 再尝试 summary
@@ -145,7 +161,38 @@ export function govern(
         score: item.cand.score,
         tokens: m.summary_cost,
       });
+      selectedTokenSets.push(item.tokens);
+      return true;
     }
+    return false;
+  }
+
+  // 先装入最高分锚点项
+  tryPackCandidate(first);
+
+  // 其余项按 LightMem Submodular MMR-VPT 贪心迭代选择
+  while (remaining.length > 0 && selected.length < opts.maxItems) {
+    let bestIdx = 0;
+    let bestMmrVpt = -1;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const item = remaining[i];
+      let maxOverlap = 0;
+      for (const selSet of selectedTokenSets) {
+        const sim = jaccard(item.tokens, selSet);
+        if (sim > maxOverlap) {
+          maxOverlap = sim;
+        }
+      }
+      const mmrVpt = computeMmrMarginalScore(item.vpt, maxOverlap);
+      if (mmrVpt > bestMmrVpt) {
+        bestMmrVpt = mmrVpt;
+        bestIdx = i;
+      }
+    }
+
+    const [nextItem] = remaining.splice(bestIdx, 1);
+    tryPackCandidate(nextItem);
   }
 
   // 6. 最终验证与削减：确保完整实际渲染块严格 <= budget

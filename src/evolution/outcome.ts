@@ -4,6 +4,7 @@ import { tokenSet, jaccard, extractEntities } from '../core/text.js';
 import { applyUtility } from '../core/writer.js';
 import { enqueueJob } from '../jobs/scheduler.js';
 import { harvestSample } from './lab.js';
+import { getActiveStrategy } from './strategy.js';
 import { enqueueRepairJobIfEligible } from './repair.js';
 
 export const CORRECTION_REGEX = /(不对|错了|不是这样|搞错|不行|没用|还是不行|重来|wrong|incorrect|doesn't work|not what)/i;
@@ -218,15 +219,16 @@ export function evaluateTurnOutcome(
       }
     }
 
-    // 更新或插入 turn_metrics
+    // 更新或插入 turn_metrics (动态关联当前活跃策略版本，支撑 Sentinel 精准回滚)
+    const activeStratV = getActiveStrategy(db, cfg).version;
     db.run(
       `INSERT INTO turn_metrics (
          session_id, turn, outcome, correction, strategy_v, created_at
-       ) VALUES (?, ?, ?, ?, 1, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, turn) DO UPDATE SET
          outcome = excluded.outcome,
          correction = excluded.correction`,
-      [params.sessionId, params.turn, r, isCorrection ? 1 : 0, now]
+      [params.sessionId, params.turn, r, isCorrection ? 1 : 0, activeStratV, now]
     );
 
     return {

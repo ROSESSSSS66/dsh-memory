@@ -403,5 +403,67 @@ describe('Fusion and Scoring (fuse.ts)', () => {
       expect(scored.map((s) => s.memory.id)).toContain(memTop.id);
       expect(scored.map((s) => s.memory.id)).not.toContain(memTail.id);
     });
+
+    it('v0.5.0 HippoRAG 2 multi-seed PPR convergence accumulates activation across multiple seeds', () => {
+      const seed1 = createMockMemory({ id: 'm_seed_000000001', content: 'PostgreSQL 连接池主库配置' });
+      const seed2 = createMockMemory({ id: 'm_seed_000000002', content: 'PostgreSQL 连接池副本配置' });
+      const targetNeighbor = createMockMemory({ id: 'm_conv_000000003', content: '连接池最大连接数上限设为 50' });
+      const singleNeighbor = createMockMemory({ id: 'm_sing_000000004', content: '连接池空闲回收时间设为 30s' });
+
+      const plan: QueryPlan = {
+        text: 'PostgreSQL 连接池',
+        tokens: ['postgresql', '连接', '接池'],
+        contentTokens: ['postgresql', '连接', '接池'],
+        entities: ['postgresql'],
+        contextEntities: [],
+        intents: { temporal: false, causal: false, procedural: false, preference: false },
+        temporalBrowse: false,
+        preferenceBrowse: false,
+        now: fixedNow,
+      };
+
+      const channelResults = {
+        lexical: [
+          { id: seed1.id, channel: 'lexical' as const, rank: 1 },
+          { id: seed2.id, channel: 'lexical' as const, rank: 2 },
+        ],
+        entity: [],
+        typed: [],
+        temporal: [],
+        preference: [],
+        vector: [],
+      };
+
+      const neighbors = [
+        { neighborId: targetNeighbor.id, seedId: seed1.id, rel: 'related' as const, seedRank: 1, hop: 1 as const, activationWeight: 1.0 },
+        { neighborId: targetNeighbor.id, seedId: seed2.id, rel: 'related' as const, seedRank: 2, hop: 1 as const, activationWeight: 1.0 },
+        { neighborId: singleNeighbor.id, seedId: seed1.id, rel: 'related' as const, seedRank: 1, hop: 1 as const, activationWeight: 1.0 },
+      ];
+
+      const scored = fuseCandidates(
+        plan,
+        channelResults,
+        new Map([
+          [seed1.id, seed1],
+          [seed2.id, seed2],
+          [targetNeighbor.id, targetNeighbor],
+          [singleNeighbor.id, singleNeighbor],
+        ]),
+        new Map(),
+        new Set(),
+        { ...DEFAULT_STRATEGY, minRelevance: 0.05 },
+        undefined,
+        fixedNow,
+        neighbors
+      );
+
+      const convRes = scored.find((s) => s.memory.id === targetNeighbor.id)!;
+      const singRes = scored.find((s) => s.memory.id === singleNeighbor.id)!;
+      expect(convRes).toBeDefined();
+      expect(singRes).toBeDefined();
+      expect(convRes.convergentSeeds).toBe(2);
+      expect(convRes.fusedRrf).toBeGreaterThan(singRes.fusedRrf);
+      expect(convRes.score).toBeGreaterThan(singRes.score);
+    });
   });
 });

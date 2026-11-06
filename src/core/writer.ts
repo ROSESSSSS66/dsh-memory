@@ -20,7 +20,12 @@ import {
 import { estimateTokens } from './tokens.js';
 import { workspaceId } from './scope.js';
 import { redactSecrets } from './privacy.js';
-import { computeLocalEmbedding, cosineSimilarity, getOrComputeEmbedding } from './vector.js';
+import {
+  computeLocalEmbedding,
+  cosineSimilarity,
+  getOrComputeEmbedding,
+  primeRuntimeVectorCache,
+} from './vector.js';
 
 function generateId(): string {
   const chars = '0123456789abcdefghjkmnpqrstvwxyz';
@@ -366,6 +371,7 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
       approved_by,
       now,
     });
+    primeRuntimeVectorCache(newId, hash, newVec);
 
     for (const relId of relatedIds) {
       addRelation(db, newId, relId, 'related', now);

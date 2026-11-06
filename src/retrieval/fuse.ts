@@ -6,7 +6,7 @@ import type {
   MemoryType,
 } from '../types.js';
 import type { Candidate, AssociativeNeighbor } from './channels.js';
-import { tokenSet } from '../core/text.js';
+import { tokenSet, isTokenMatch } from '../core/text.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
@@ -50,6 +50,7 @@ export interface ScoredCandidate {
   fusedRrf: number;
   graphExpanded?: boolean;
   synergyBoosted?: boolean;
+  convergentSeeds?: number;
 }
 
 /**
@@ -141,12 +142,12 @@ export function fuseCandidates(
     // 门槛条件判定
     let passedGate = false;
 
-    // 条件 A: 词汇覆盖率 (coverage >= minLexicalCoverage 且满足命中词数)
+    // 条件 A: 词汇覆盖率 (coverage >= minLexicalCoverage 且满足命中词数，支持词干与复合词前后缀匹配)
     if (plan.contentTokens.length > 0) {
       const memTokens = tokenSet(`${mem.content} ${mem.summary}`);
       let matchedCount = 0;
       for (const ct of plan.contentTokens) {
-        if (memTokens.has(ct)) {
+        if (isTokenMatch(ct, memTokens)) {
           matchedCount++;
         }
       }
@@ -214,26 +215,39 @@ export function fuseCandidates(
     return [];
   }
 
-  // 2.5 GraphRAG + SYNAPSE 扇出衰减关联扩展与关系协同检测 (仅在已有种子通过绝对相关性硬门槛时触发)
+  // 2.5 HippoRAG 2 (ICML 2025) 多源 PPR 能量汇聚 + SYNAPSE 扇出衰减关联扩展与关系协同检测
+  const initialGatedSet = new Set(gatedMemoryIds);
   const gatedSet = new Set(gatedMemoryIds);
   const graphExpandedIds = new Set<string>();
   const graphBonusRrf = new Map<string, number>();
   const synergySet = new Set<string>();
   const synergyWeightMap = new Map<string, number>();
+  const seedSetByNeighbor = new Map<string, Set<string>>();
+
+  const recordSeedConvergence = (targetId: string, seedId: string) => {
+    let s = seedSetByNeighbor.get(targetId);
+    if (!s) {
+      s = new Set();
+      seedSetByNeighbor.set(targetId, s);
+    }
+    s.add(seedId);
+  };
 
   if (associativeNeighbors.length > 0 && (plan.contentTokens.length > 0 || plan.entities.length > 0)) {
     for (const edge of associativeNeighbors) {
-      if (!gatedSet.has(edge.seedId)) continue;
+      if (!initialGatedSet.has(edge.seedId)) continue;
       if (contradictionsSet.has(edge.neighborId)) continue;
 
       const fanWeight = edge.activationWeight ?? 1.0;
 
-      if (gatedSet.has(edge.neighborId)) {
+      if (initialGatedSet.has(edge.neighborId)) {
         // 两条通过硬门槛的候选之间存在 related / derived_from 关系 -> 触发 SYNAPSE 扇出调制协同增益
         synergySet.add(edge.seedId);
         synergySet.add(edge.neighborId);
         synergyWeightMap.set(edge.seedId, Math.max(synergyWeightMap.get(edge.seedId) || 0, fanWeight));
         synergyWeightMap.set(edge.neighborId, Math.max(synergyWeightMap.get(edge.neighborId) || 0, fanWeight));
+        recordSeedConvergence(edge.neighborId, edge.seedId);
+        recordSeedConvergence(edge.seedId, edge.neighborId);
         continue;
       }
 
@@ -247,7 +261,7 @@ export function fuseCandidates(
       const nTokens = tokenSet(`${nMem.content} ${nMem.summary}`);
       let hasTokenOverlap = false;
       for (const ct of plan.contentTokens) {
-        if (nTokens.has(ct)) {
+        if (isTokenMatch(ct, nTokens)) {
           hasTokenOverlap = true;
           break;
         }
@@ -264,19 +278,23 @@ export function fuseCandidates(
       }
 
       if (hasTokenOverlap) {
-        gatedSet.add(edge.neighborId);
-        gatedMemoryIds.push(edge.neighborId);
+        if (!gatedSet.has(edge.neighborId)) {
+          gatedSet.add(edge.neighborId);
+          gatedMemoryIds.push(edge.neighborId);
+        }
         graphExpandedIds.add(edge.neighborId);
         synergySet.add(edge.seedId);
         synergySet.add(edge.neighborId);
         synergyWeightMap.set(edge.seedId, Math.max(synergyWeightMap.get(edge.seedId) || 0, fanWeight));
         synergyWeightMap.set(edge.neighborId, Math.max(synergyWeightMap.get(edge.neighborId) || 0, fanWeight));
+        recordSeedConvergence(edge.neighborId, edge.seedId);
 
         const hopPenalty = edge.hop === 2 ? 2 : 0;
         const rrfContrib = (0.65 * fanWeight) / (strategy.rrfK + edge.seedRank + 2 + hopPenalty);
+        // HippoRAG 2 PPR 多种子激活能量累加 (Multi-Seed Spreading Activation Accumulation)
         graphBonusRrf.set(
           edge.neighborId,
-          Math.max(graphBonusRrf.get(edge.neighborId) || 0, rrfContrib)
+          (graphBonusRrf.get(edge.neighborId) || 0) + rrfContrib
         );
       }
     }
@@ -344,10 +362,12 @@ export function fuseCandidates(
     const impWeight = weights.importance ?? 0;
     const importanceScore = ((mem.importance ?? 5) / 10.0);
 
-    // Relational Synergy Boost (SYNAPSE 扇出注意力调制协同增益)
+    // Relational Synergy Boost (SYNAPSE 扇出注意力调制协同增益 + HippoRAG 2 多源汇聚增益)
     const isSynergy = synergySet.has(id) && !contradictionsSet.has(id);
     const synFan = synergyWeightMap.get(id) ?? 1.0;
-    const synergyBonus = isSynergy ? 0.02 + 0.015 * synFan : 0;
+    const convergentSeeds = seedSetByNeighbor.get(id)?.size ?? 0;
+    const multiSeedBonus = convergentSeeds >= 2 ? Math.min(0.03, 0.012 * (convergentSeeds - 1)) : 0;
+    const synergyBonus = (isSynergy ? 0.02 + 0.015 * synFan : 0) + multiSeedBonus;
 
     const rawScore =
       weights.relevance * relevance +
@@ -368,6 +388,7 @@ export function fuseCandidates(
       fusedRrf: fused,
       graphExpanded: graphExpandedIds.has(id),
       synergyBoosted: isSynergy,
+      ...(convergentSeeds > 0 ? { convergentSeeds } : {}),
     });
   }
 

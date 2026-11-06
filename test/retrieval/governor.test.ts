@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { MemoryRecord } from '../../src/types.js';
 import type { ScoredCandidate } from '../../src/retrieval/fuse.js';
-import { govern } from '../../src/retrieval/governor.js';
+import { govern, computeMmrMarginalScore } from '../../src/retrieval/governor.js';
 import { render } from '../../src/retrieval/render.js';
 import { budgetTokens } from '../../src/core/tokens.js';
 
@@ -224,5 +224,49 @@ describe('Token Governor (governor.ts)', () => {
     expect(res).toEqual([]);
     const rendered = render(res.map((r) => ({ memory: r.memory, form: r.form })));
     expect(rendered).toBe('');
+  });
+
+  it('v0.5.0 LightMem Submodular MMR prioritizes diverse candidates over near-duplicate paraphrases', () => {
+    expect(computeMmrMarginalScore(0.02, 0.3)).toBe(0.02);
+    expect(computeMmrMarginalScore(0.02, 0.85)).toBeLessThan(0.02);
+
+    const anchor = createScored(
+      {
+        id: 'm_mmr_anchor_001',
+        hash: 'h_anchor',
+        content: '项目核心关系型数据库使用 PostgreSQL 16 服务实例并启用连接池',
+        summary: '项目核心关系型数据库使用 PostgreSQL 16 服务实例并启用连接池',
+        token_cost: 30,
+      },
+      0.92
+    );
+    const redundant = createScored(
+      {
+        id: 'm_mmr_redund_002',
+        hash: 'h_redund',
+        content: '项目核心关系型数据库使用 PostgreSQL 16 服务实例且启用连接池',
+        summary: '项目核心关系型数据库使用 PostgreSQL 16 服务实例且启用连接池',
+        token_cost: 30,
+      },
+      0.88
+    );
+    const orthogonal = createScored(
+      {
+        id: 'm_mmr_ortho_0003',
+        hash: 'h_ortho',
+        content: '异步消息队列缓存集群采用 Redis 7 与 BullMQ 调度器',
+        summary: '异步消息队列缓存集群采用 Redis 7 与 BullMQ 调度器',
+        token_cost: 30,
+      },
+      0.82
+    );
+
+    const res = govern([anchor, redundant, orthogonal], {
+      budget: 1000,
+      maxItems: 2,
+      alreadyInjected: new Set(),
+    });
+
+    expect(res.map((r) => r.memory.id)).toEqual(['m_mmr_anchor_001', 'm_mmr_ortho_0003']);
   });
 });

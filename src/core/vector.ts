@@ -1,5 +1,5 @@
 import type { Db } from '../types.js';
-import { segment, extractEntities } from './text.js';
+import { segment, extractEntities, stemToken } from './text.js';
 
 export const DEFAULT_LOCAL_VECTOR_DIM = 128;
 
@@ -41,12 +41,19 @@ export function computeLocalEmbedding(
     vec[idx] += sign * weight;
   };
 
-  // 1. 词元特征 (Unigrams)
+  // 1. 词元特征 (Unigrams) + FastText 词干归一化特征 (Morphological Stems)
   for (let i = 0; i < tokens.length; i++) {
-    addFeature(`u:${tokens[i]}`, 1.0);
+    const tok = tokens[i];
+    addFeature(`u:${tok}`, 1.0);
+    if (tok.length >= 5 && /^[a-z]+$/.test(tok)) {
+      const stem = stemToken(tok);
+      if (stem !== tok && stem.length >= 3) {
+        addFeature(`u:${stem}`, 0.35);
+      }
+    }
     // 2. 局部词序特征 (Token Bigrams)
     if (i + 1 < tokens.length) {
-      addFeature(`b:${tokens[i]}_${tokens[i + 1]}`, 0.6);
+      addFeature(`b:${tok}_${tokens[i + 1]}`, 0.6);
     }
   }
 
@@ -122,6 +129,19 @@ const runtimeVectorCache = new Map<string, Float32Array>();
 
 export function clearRuntimeVectorCache(): void {
   runtimeVectorCache.clear();
+}
+
+export function primeRuntimeVectorCache(
+  id: string,
+  hashOrKey: string | number,
+  vec: Float32Array
+): void {
+  const cacheKey = `${id}:${hashOrKey}`;
+  if (runtimeVectorCache.size >= MAX_RUNTIME_VECTOR_CACHE) {
+    const oldestKey = runtimeVectorCache.keys().next().value;
+    if (oldestKey) runtimeVectorCache.delete(oldestKey);
+  }
+  runtimeVectorCache.set(cacheKey, vec);
 }
 
 /**

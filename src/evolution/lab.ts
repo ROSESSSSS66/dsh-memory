@@ -154,9 +154,13 @@ export function runStrategyEvolution(
     const candidateReport = runEvalSuite(cases, candidateConfig, cfg);
     const mi = candidateReport.overall;
 
-    // 4. 判定晋升条件 (必须全部满足，见 §5.16)
-    // 4.1 recallAtInject 至少提升 0.02
-    const recallPassed = mi.recallAtInject >= m0.recallAtInject + 0.02;
+    // 4. 判定晋升条件 (必须全部满足，见 §5.16 + 高饱和区 Pareto 效率晋升门)
+    // 4.1 recallAtInject 至少提升 0.02；若基线已处于饱和高分 (>= 0.985)，允许在不降召回的前提下通过降低 >= 5% Token 消耗实现帕累托晋升
+    const recallPassed =
+      mi.recallAtInject >= m0.recallAtInject + 0.02 ||
+      (m0.recallAtInject >= 0.985 &&
+        mi.recallAtInject >= m0.recallAtInject &&
+        mi.avgInjectTokens <= m0.avgInjectTokens * 0.95);
 
     // 4.2 平均注入 Token 不超过基线 1.10 倍
     const tokensPassed = mi.avgInjectTokens <= m0.avgInjectTokens * 1.1;
