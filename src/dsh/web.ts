@@ -473,7 +473,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           return;
         }
 
-        // 1.6. Memory Health & Conflict Doctor (v0.2.0)
+        // 1.6. Memory Health & Conflict Doctor (v0.3.0)
         if (subPath === '/health') {
           const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
           const health = auditMemoryHealth(db, { workspaceId: wsId });
@@ -481,7 +481,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           return;
         }
 
-        // 1.7. Mem0 Dynamic Reconciliation Playground (v0.2.0)
+        // 1.7. Mem0 Dynamic Reconciliation Playground (v0.3.0)
         if (subPath === '/reconcile' && req.method === 'POST') {
           const body = await readBodyJson(req);
           const rawContent = typeof body.content === 'string' ? body.content.trim() : '';

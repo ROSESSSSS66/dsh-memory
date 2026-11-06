@@ -326,7 +326,7 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
 
   return (
     <div className="dshm-evo-container">
-      {/* 0. Memory Health & Conflict Doctor (v0.2.0) */}
+      {/* 0. Memory Health & Conflict Doctor (v0.3.0) */}
       {health && (
         <GlassCard as="section" variant={variant} interactive={false} className="dshm-evo-panel">
           <div className="dshm-evo-panel-header">
