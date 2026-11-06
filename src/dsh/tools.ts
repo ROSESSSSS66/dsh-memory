@@ -9,7 +9,9 @@ import { budgetTokens } from '../core/tokens.js';
 import { redactSecrets } from '../core/privacy.js';
 import { upsertCandidate, confirmMemory, mergeMemories } from '../core/writer.js';
 import { getCoreMemory, getAllCoreMemories, setCoreMemory, appendCoreMemory, renderCoreMemoryMarkdown } from '../core/core-memory.js';
+import { auditMemoryHealth } from '../core/health.js';
 import { reconcileAndUpsert, reconcileCandidate } from '../evolution/reconciler.js';
+import { enqueueRepairJobIfEligible } from '../evolution/repair.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
 export interface ToolContext {
@@ -261,6 +263,22 @@ export class MemoryTools {
          WHERE session_id = ? AND turn = ? AND memory_id = ? AND content_rev = ?`,
         [r, sessionId, turn, rawId, contentRev]
       );
+
+      if (!params.helpful) {
+        try {
+          enqueueRepairJobIfEligible(
+            this.db,
+            {
+              memoryId: rawId,
+              sessionId,
+              query: params.note || 'Negative tool feedback',
+              turn,
+            },
+            this.cfg,
+            now
+          );
+        } catch {}
+      }
     });
 
     return 'ok';
@@ -469,11 +487,38 @@ export class MemoryTools {
   }
 
   /**
-   * 11. 统一 memory 工具接口 (汲取自 LZMW/dsh-memory 单工具设计，节省提示词上下文)
+   * 11. doctor (记忆库健康度体检与冲突检测)
+   */
+  public doctor(agentCtx: { workspaceId: string }): string {
+    const wsId = workspaceId(agentCtx.workspaceId);
+    const report = auditMemoryHealth(this.db, { workspaceId: wsId });
+    const lines = [
+      `[Memory Health Doctor] Score: ${report.score}/100 (Grade ${report.grade})`,
+      `Counts: active=${report.counts.active}, candidate=${report.counts.candidate}, frozen=${report.counts.frozen}, superseded=${report.counts.superseded}, archived=${report.counts.archived}, pinned=${report.counts.pinned}`,
+      `FTS5 Index: ${report.ftsConsistent ? 'Consistent' : 'Out of sync'} (${report.ftsCount} rows)`,
+      `Near-Duplicates: ${report.duplicatePairs.length} | Active Contradictions: ${report.contradictions.length} | Stale Memories: ${report.staleMemories.length}`,
+    ];
+    if (report.duplicatePairs.length > 0) {
+      lines.push('Duplicate Pairs (can merge via memory_merge):');
+      for (const pair of report.duplicatePairs.slice(0, 5)) {
+        lines.push(`  - ${pair.sourceId} -> ${pair.targetId} (sim=${pair.similarity}, reason=${pair.reason})`);
+      }
+    }
+    if (report.recommendations.length > 0) {
+      lines.push('Recommendations:');
+      for (const rec of report.recommendations) {
+        lines.push(`  * ${rec}`);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * 12. 统一 memory 工具接口 (汲取自 LZMW/dsh-memory 单工具设计，节省提示词上下文)
    */
   public unified(
     params: {
-      action: 'search' | 'expand' | 'note' | 'feedback' | 'confirm' | 'merge' | 'core_read' | 'core_set' | 'core_append' | 'reconcile';
+      action: 'search' | 'expand' | 'note' | 'feedback' | 'confirm' | 'merge' | 'core_read' | 'core_set' | 'core_append' | 'reconcile' | 'doctor';
       query?: string;
       id?: string;
       sourceId?: string;
@@ -525,8 +570,10 @@ export class MemoryTools {
         return this.coreAppend({ block: params.block || 'project', text: params.text || params.content || '' }, agentCtx);
       case 'reconcile':
         return this.reconcile({ content: params.content || '', type: params.kind || 'semantic', slotKey: params.slotKey }, agentCtx);
+      case 'doctor':
+        return this.doctor(agentCtx);
       default:
-        return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile`;
+        return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor`;
     }
   }
 }

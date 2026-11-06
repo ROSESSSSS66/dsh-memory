@@ -27,3 +27,6 @@
 | M6-T1 | 查询触发修复流水线与提案审批 (RIME / repair-v2) | `src/evolution/repair.ts`, `src/dsh/commands.ts`, `test/evolution/repair.test.ts` | 219 tests passed, revise/split/invalidate/keep 全分支验证完毕 | 2026-11-04 |
 | §8.4 & §10 | MVP 全量验收清单、回归门禁与安全备份恢复 | `src/evolution/maintenance.ts`, `src/dsh/commands.ts`, `test/acceptance.test.ts` | 230 tests passed (全量通过，100% 验收达标) | 2026-11-04 |
 | 宿主挂载与端到端实机激活 | DSH Desktop 接入、标准 Schema 协议对齐与冷热重载 | `src/dsh/plugin.ts`, `~/.dsh/profiles/desktop/cordis.patch.yml` | 230 tests passed, DSH 动态热加载成功，`memory.db` 实体初始化成功 | 2026-11-04 |
+| v0.2.0-T1 | 记忆健康体检医生 (`health.ts`) 与本地零依赖混合向量通道 (`vector.ts`) | `src/core/health.ts`, `src/core/vector.ts`, `src/retrieval/channels.ts`, `test/core/health.test.ts`, `test/core/vector.test.ts` | 280+ tests passed | 2026-11-06 |
+| v0.2.0-T2 | 双环闭环增强 (`pre-step` 遥测与活跃策略绑定、RIME 负向自动触发、慢环全处理器挂载) | `src/dsh/pre-step.ts`, `src/evolution/outcome.ts`, `src/dsh/tools.ts`, `src/dsh/plugin.ts`, `src/dsh/commands.ts` | 280+ tests passed | 2026-11-06 |
+| v0.2.0-T3 | Glassmorphism Web UI 控制台升级 (体检冲突去重、Mem0 调和沙盒、双向拓扑关联) | `src/dsh/web.ts`, `src/client/api.ts`, `src/client/types.ts`, `src/client/components/{MemoryHeader,RecallSandboxView,EvolutionView,MemoryDetailModal}.tsx` | 281 tests passed, client.js 构建通过 | 2026-11-06 |

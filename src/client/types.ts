@@ -110,6 +110,7 @@ export interface MemoryDetailResponse {
   relations: Array<{
     to_id: string;
     rel: string;
+    direction?: 'outgoing' | 'incoming';
   }>;
 }
 
@@ -381,6 +382,60 @@ export interface SandboxResponseUI {
   strategyVersion: number;
   recallSimulation: RecallSimulationUI | null;
   recentInjections: InjectionAuditRecordUI[];
+}
+
+export interface MemoryHealthReportUI {
+  score: number;
+  grade: 'A+' | 'A' | 'B' | 'C' | 'D';
+  counts: {
+    total: number;
+    active: number;
+    candidate: number;
+    frozen: number;
+    superseded: number;
+    archived: number;
+    pinned: number;
+  };
+  ftsConsistent: boolean;
+  ftsCount: number;
+  duplicatePairs: Array<{
+    sourceId: string;
+    targetId: string;
+    sourceSummary: string;
+    targetSummary: string;
+    similarity: number;
+    slotKey: string | null;
+    reason: 'same_slot_key' | 'high_lexical_overlap';
+  }>;
+  contradictions: Array<{
+    fromId: string;
+    toId: string;
+    fromSummary: string;
+    toSummary: string;
+  }>;
+  staleMemories: Array<{
+    id: string;
+    type: string;
+    summary: string;
+    utility: number;
+    daysUnused: number;
+  }>;
+  recommendations: string[];
+  checkedAt: number;
+}
+
+export interface ReconcileResponseUI {
+  ok: boolean;
+  dryRun: boolean;
+  decision: {
+    action: 'ADD' | 'UPDATE' | 'DELETE' | 'NOOP';
+    targetId?: string;
+    reason: string;
+    confidence: number;
+  };
+  resultAction?: string;
+  targetMemory?: MemoryRecordUI | null;
+  memory?: MemoryRecordUI | null;
 }
 
 /**

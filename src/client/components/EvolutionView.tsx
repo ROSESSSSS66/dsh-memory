@@ -3,8 +3,9 @@ import type {
   EvolutionDataResponse,
   EvalSuiteReportUI,
   BackfillStatsUI,
+  MemoryHealthReportUI,
 } from '../types.js';
-import { fetchEvolutionData, performAction } from '../api.js';
+import { fetchEvolutionData, fetchMemoryHealth, performAction } from '../api.js';
 import {
   CpuIcon,
   SparklesIcon,
@@ -16,6 +17,8 @@ import {
   HistoryIcon,
   ActivityIcon,
   ZapIcon,
+  GitMergeIcon,
+  ShieldIcon,
 } from './Icons.js';
 import { GlassCard, GlassButton, useGlassVariant } from './GlassUI.js';
 
@@ -48,11 +51,13 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
 }) => {
   const variant = useGlassVariant();
   const [data, setData] = React.useState<EvolutionDataResponse | null>(null);
+  const [health, setHealth] = React.useState<MemoryHealthReportUI | null>(null);
   const [loading, setLoading] = React.useState(true);
 
   // Action states
   const [isEvolving, setIsEvolving] = React.useState(false);
   const [isMaintaining, setIsMaintaining] = React.useState(false);
+  const [isDistilling, setIsDistilling] = React.useState(false);
   const [isBackfilling, setIsBackfilling] = React.useState(false);
   const [backfillResult, setBackfillResult] = React.useState<{
     dryRun: boolean;
@@ -66,8 +71,14 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
   const loadEvolution = React.useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetchEvolutionData();
+      const [res, healthRes] = await Promise.all([
+        fetchEvolutionData(),
+        fetchMemoryHealth().catch(() => null),
+      ]);
       setData(res);
+      if (healthRes?.health) {
+        setHealth(healthRes.health);
+      }
     } catch (err: any) {
       onToast(err?.message || '加载进化实验室数据失败');
     } finally {
@@ -78,6 +89,21 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
   React.useEffect(() => {
     loadEvolution();
   }, [loadEvolution]);
+
+  const handleMergeDuplicatePair = async (sourceId: string, targetId: string) => {
+    try {
+      await performAction('merge', {
+        sourceId,
+        targetId,
+        reason: 'health_doctor_dedup',
+      });
+      onToast(`已将冗余记忆 ${sourceId.slice(0, 10)} 合并至权威记忆 ${targetId.slice(0, 10)}！`);
+      await loadEvolution();
+      onUpdated();
+    } catch (err: any) {
+      onToast(err?.message || '合并去重失败');
+    }
+  };
 
   const handleApproveRepair = async (proposalId: number) => {
     try {
@@ -138,14 +164,37 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
   const handleMaintain = async () => {
     setIsMaintaining(true);
     try {
-      await performAction('maintain');
-      onToast('离线维护完成：冷记忆归档、过期候选清理、自动置顶与 FTS5 索引校验已就绪！');
+      const res = await performAction('maintain');
+      const st = res?.stats;
+      const summary = st
+        ? `归档冷记忆 ${st.archivedCold} 条，自动置顶 ${st.autoPinned} 条${st.ftsRebuilt ? '，已重建 FTS5' : ''}`
+        : '冷记忆归档、过期候选清理、自动置顶与 FTS5 索引校验已就绪';
+      onToast(`离线维护完成：${summary}！`);
       await loadEvolution();
       onUpdated();
     } catch (err: any) {
       onToast(err?.message || '维护执行失败');
     } finally {
       setIsMaintaining(false);
+    }
+  };
+
+  const handleDistillNow = async () => {
+    setIsDistilling(true);
+    try {
+      const res = await performAction('distill');
+      const r = res?.result;
+      if (r?.success) {
+        onToast(`会话蒸馏完成：处理 ${r.eventsProcessed} 条事件，新增 ${r.candidatesInserted} 条记忆！`);
+      } else {
+        onToast(`会话蒸馏提示：${r?.error || '暂无满足蒸馏条件的未处理事件或离线权限未开启'}`);
+      }
+      await loadEvolution();
+      onUpdated();
+    } catch (err: any) {
+      onToast(err?.message || '触发会话蒸馏失败');
+    } finally {
+      setIsDistilling(false);
     }
   };
 
@@ -206,6 +255,129 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
 
   return (
     <div className="dshm-evo-container">
+      {/* 0. Memory Health & Conflict Doctor (v0.2.0) */}
+      {health && (
+        <GlassCard as="section" variant={variant} interactive={false} className="dshm-evo-panel">
+          <div className="dshm-evo-panel-header">
+            <div className="dshm-evo-title-group">
+              <div className="dshm-stat-icon-wrapper dshm-icon-emerald">
+                <ShieldIcon size={16} />
+              </div>
+              <div>
+                <div className="dshm-evo-title-row">
+                  <h3>记忆库健康度体检与冲突医生 (Memory Health Doctor)</h3>
+                  <span
+                    className={`dshm-tag ${
+                      health.score >= 85 ? 'dshm-tag-fact' : 'dshm-tag-failure'
+                    }`}
+                  >
+                    健康分 {health.score} / 100 · 等级 {health.grade}
+                  </span>
+                  <span className="dshm-tag dshm-tag-scope">
+                    FTS5 {health.ftsConsistent ? '索引一致' : '需重建'} ({health.ftsCount})
+                  </span>
+                </div>
+                <p className="dshm-evo-subtitle">
+                  自动巡检同作用域槽位冲突、Jaccard 高相似冗余记忆对、未消解的显式矛盾与陈旧低效用记忆
+                </p>
+              </div>
+            </div>
+            <GlassButton
+              type="button"
+              variant={variant}
+              className="dshm-btn dshm-btn-secondary"
+              onClick={loadEvolution}
+            >
+              <RefreshIcon size={13} />
+              <span>重新体检</span>
+            </GlassButton>
+          </div>
+
+          <div className="dshm-strat-kpis" style={{ marginBottom: 12 }}>
+            <div className="dshm-strat-kpi">
+              <span>活跃 / 冻结记忆</span>
+              <strong>
+                {health.counts.active} / {health.counts.frozen}
+              </strong>
+            </div>
+            <div className="dshm-strat-kpi">
+              <span>近重复 / 槽位冲突</span>
+              <strong>{health.duplicatePairs.length} 对</strong>
+            </div>
+            <div className="dshm-strat-kpi">
+              <span>活跃矛盾 (contradicts)</span>
+              <strong>{health.contradictions.length} 组</strong>
+            </div>
+            <div className="dshm-strat-kpi">
+              <span>低效用陈旧记忆</span>
+              <strong>{health.staleMemories.length} 条</strong>
+            </div>
+          </div>
+
+          {health.recommendations.length > 0 && (
+            <div className="dshm-proposal-reason" style={{ marginBottom: 10 }}>
+              <strong>诊断建议：</strong> {health.recommendations.join(' ')}
+            </div>
+          )}
+
+          {health.duplicatePairs.length > 0 && (
+            <div className="dshm-proposal-list">
+              {health.duplicatePairs.slice(0, 6).map((pair) => (
+                <GlassCard
+                  key={`${pair.sourceId}_${pair.targetId}`}
+                  variant={variant}
+                  className="dshm-proposal-card"
+                >
+                  <div className="dshm-proposal-top">
+                    <div className="dshm-proposal-badges">
+                      <span className="dshm-tag dshm-tag-procedure">
+                        {pair.reason === 'same_slot_key' ? '同槽位冲突' : '高重合冗余'}
+                      </span>
+                      <span className="dshm-tag dshm-tag-slot">
+                        相似度 {(pair.similarity * 100).toFixed(0)}%
+                      </span>
+                      {pair.slotKey && (
+                        <span className="dshm-tag dshm-tag-scope">slot: {pair.slotKey}</span>
+                      )}
+                    </div>
+                    <div className="dshm-proposal-actions">
+                      <GlassButton
+                        type="button"
+                        variant={variant}
+                        intent="primary"
+                        size="sm"
+                        onClick={() => handleMergeDuplicatePair(pair.sourceId, pair.targetId)}
+                      >
+                        <GitMergeIcon size={12} />
+                        <span>一键合并去重</span>
+                      </GlassButton>
+                    </div>
+                  </div>
+                  <div className="dshm-proposal-diff">
+                    <div
+                      className="dshm-diff-box is-old"
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => onInspect(pair.sourceId)}
+                    >
+                      <span className="dshm-diff-label">待合并冗余项 ({pair.sourceId.slice(0, 10)})</span>
+                      <div>{pair.sourceSummary}</div>
+                    </div>
+                    <div
+                      className="dshm-diff-box is-new"
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => onInspect(pair.targetId)}
+                    >
+                      <span className="dshm-diff-label">保留权威项 ({pair.targetId.slice(0, 10)})</span>
+                      <div>{pair.targetSummary}</div>
+                    </div>
+                  </div>
+                </GlassCard>
+              ))}
+            </div>
+          )}
+        </GlassCard>
+      )}
+
       {/* 1. RIME 记忆冲突与修复提案审批台 */}
       <GlassCard as="section" variant={variant} interactive={false} className="dshm-evo-panel">
         <div className="dshm-evo-panel-header">
@@ -613,6 +785,16 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
               type="button"
               variant={variant}
               className="dshm-btn dshm-btn-secondary"
+              disabled={isDistilling}
+              onClick={handleDistillNow}
+            >
+              <span>{isDistilling ? '蒸馏中…' : '🧪 立即蒸馏会话'}</span>
+            </GlassButton>
+
+            <GlassButton
+              type="button"
+              variant={variant}
+              className="dshm-btn dshm-btn-secondary"
               disabled={isMaintaining}
               onClick={handleMaintain}
             >
@@ -664,7 +846,7 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
               <div>
                 <h3>慢环异步任务队列监控</h3>
                 <p className="dshm-evo-subtitle">
-                  后台互斥调度器任务流水 (distill 蒸馏 / reflect 反思 / consolidate 巩固 / repair 修复)
+                  后台互斥调度器任务流水 (distill 蒸馏 / reflect 反思 / consolidate 巩固 / repair 修复 / evolve 进化)
                 </p>
               </div>
             </div>

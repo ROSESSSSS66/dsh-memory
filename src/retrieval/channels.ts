@@ -1,6 +1,7 @@
 import type { Db, QueryPlan, ChannelName } from '../types.js';
 import { scopeFilterSQL } from '../core/scope.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
+import { computeLocalEmbedding, decodeEmbeddingBlob, cosineSimilarity } from '../core/vector.js';
 
 export interface Candidate {
   id: string;
@@ -231,16 +232,68 @@ export function recallPreference(db: Db, plan: QueryPlan, ctx: ChannelContext): 
 }
 
 /**
- * 6. Vector 通道 (离线计算+在线纯内存缓存)
+ * 6. Vector 通道 (离线计算+在线纯内存/本地特征向量余弦检索)
  */
 export function recallVector(
-  _db: Db,
-  _plan: QueryPlan,
-  _ctx: ChannelContext,
-  _cache?: Map<string, Float32Array>
+  db: Db,
+  plan: QueryPlan,
+  ctx: ChannelContext,
+  cache?: Map<string, Float32Array>
 ): Candidate[] {
-  // 默认 provider 为 none，在线不发起外部调用
-  return [];
+  if (!plan.text || ((!plan.tokens || plan.tokens.length === 0) && (!plan.entities || plan.entities.length === 0))) {
+    return [];
+  }
+
+  const scope = scopeFilterSQL({ workspaceId: ctx.workspaceId, sessionId: ctx.sessionId });
+  const minSim = ctx.cfg?.minVectorSimilarity ?? DEFAULTS.minVectorSimilarity;
+
+  try {
+    const rows = cache && cache.size > 0
+      ? db.all<{ id: string; embedding: Uint8Array | Buffer | null }>(
+          `SELECT m.id, m.embedding
+           FROM memories m
+           WHERE m.status IN ('active', 'frozen')
+             AND (${scope.sql})
+           LIMIT 250`,
+          scope.params
+        )
+      : db.all<{ id: string; embedding: Uint8Array | Buffer | null }>(
+          `SELECT m.id, m.embedding
+           FROM memories m
+           WHERE m.status IN ('active', 'frozen')
+             AND m.embedding IS NOT NULL
+             AND (${scope.sql})
+           LIMIT 250`,
+          scope.params
+        );
+
+    if (rows.length === 0) {
+      return [];
+    }
+
+    const queryVec = computeLocalEmbedding(plan.text);
+    const scored: Array<{ id: string; similarity: number }> = [];
+
+    for (const row of rows) {
+      const docVec = cache?.get(row.id) ?? decodeEmbeddingBlob(row.embedding);
+      if (!docVec) continue;
+      const sim = cosineSimilarity(queryVec, docVec);
+      if (sim >= minSim) {
+        scored.push({ id: row.id, similarity: sim });
+      }
+    }
+
+    scored.sort((a, b) => b.similarity - a.similarity);
+
+    return scored.slice(0, 20).map((item, idx) => ({
+      id: item.id,
+      channel: 'vector',
+      rank: idx + 1,
+      similarity: Number(item.similarity.toFixed(4)),
+    }));
+  } catch {
+    return [];
+  }
 }
 
 /**

@@ -20,6 +20,7 @@ import {
 import { redactSecrets } from '../core/privacy.js';
 import { serializeMemoryToMarkdown } from '../core/markdown.js';
 import { estimateTokens, budgetTokens } from '../core/tokens.js';
+import { auditMemoryHealth } from '../core/health.js';
 import { buildQueryPlan } from '../retrieval/query.js';
 import { recall } from '../retrieval/recall.js';
 import { runAllChannels } from '../retrieval/channels.js';
@@ -45,12 +46,14 @@ import {
   rollbackStrategy,
   initDefaultStrategy,
 } from '../evolution/strategy.js';
-import { runStrategyEvolution } from '../evolution/lab.js';
+import { runStrategyEvolution, checkSentinelAndRollback } from '../evolution/lab.js';
 import {
   listRepairProposals,
   approveRepairProposal,
   rejectRepairProposal,
 } from '../evolution/repair.js';
+import { reconcileCandidate, reconcileAndUpsert } from '../evolution/reconciler.js';
+import { distillSession } from '../evolution/extractor.js';
 import { runBackfill } from '../ingest/backfill.js';
 import { generateDataset } from '../eval/gen-dataset.js';
 import { runEvalSuite } from '../eval/runner.js';
@@ -401,7 +404,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 form: it.form,
                 score: Number(it.score.toFixed(4)),
                 tokens: it.tokens,
-                matchedChannels: channelHitMap.get(it.memory.id) || ['fts'],
+                matchedChannels: channelHitMap.get(it.memory.id) || ['lexical'],
               })),
             };
           }
@@ -455,6 +458,68 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const limit = parseInt(reqUrl.searchParams.get('limit') || '80', 10);
           const gData = getGraphData(db, { workspaceId: wsId, limit });
           sendJson(res, 200, { ok: true, graph: gData });
+          return;
+        }
+
+        // 1.6. Memory Health & Conflict Doctor (v0.2.0)
+        if (subPath === '/health') {
+          const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
+          const health = auditMemoryHealth(db, { workspaceId: wsId });
+          sendJson(res, 200, { ok: true, health });
+          return;
+        }
+
+        // 1.7. Mem0 Dynamic Reconciliation Playground (v0.2.0)
+        if (subPath === '/reconcile' && req.method === 'POST') {
+          const body = await readBodyJson(req);
+          const rawContent = typeof body.content === 'string' ? body.content.trim() : '';
+          if (!rawContent || rawContent.length < 4) {
+            sendJson(res, 400, { ok: false, error: '调和内容至少需要 4 个字符' });
+            return;
+          }
+          const clean = redactSecrets(rawContent);
+          const type = normalizeMemoryType(body.type);
+          const scope = (body.scope === 'workspace' ? 'workspace' : 'global') as 'workspace' | 'global';
+          const wsId = body.workspaceId || undefined;
+          const slotKey = typeof body.slot_key === 'string' && body.slot_key.trim() ? body.slot_key.trim() : undefined;
+          const dryRun = body.dryRun !== false;
+
+          const candidateInput = {
+            type,
+            content: clean.text,
+            slot_key: slotKey,
+            scope,
+            workspaceId: scope === 'workspace' ? wsId : undefined,
+            source_kind: 'user' as const,
+            origin_kinds: ['user' as const],
+            confidence: 0.9,
+            importance: typeof body.importance === 'number' ? body.importance : 7,
+            status: 'active' as const,
+            sources: [{ session_id: 'reconcile_sandbox', seq: 1, kind: 'user', excerpt: clean.text.slice(0, 100) }],
+            actor: 'user' as const,
+          };
+
+          if (dryRun) {
+            const decision = reconcileCandidate(db, candidateInput);
+            const targetMemory = decision.targetId ? get(db, decision.targetId) || null : null;
+            sendJson(res, 200, {
+              ok: true,
+              dryRun: true,
+              decision,
+              targetMemory,
+            });
+            return;
+          }
+
+          const resRec = reconcileAndUpsert(db, candidateInput, Date.now());
+          const targetMemory = (resRec as any).id ? get(db, (resRec as any).id) || null : null;
+          sendJson(res, 200, {
+            ok: true,
+            dryRun: false,
+            decision: resRec.decision,
+            resultAction: resRec.action,
+            memory: targetMemory,
+          });
           return;
         }
 
@@ -536,10 +601,18 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
           const srcList = sources(db, mem.id, mem.content_rev);
           const verList = history(db, mem.id);
-          const relations = db.all<{ to_id: string; rel: string }>(
+          const outRels = db.all<{ to_id: string; rel: string }>(
             'SELECT to_id, rel FROM memory_relations WHERE from_id = ?',
             [mem.id]
           );
+          const inRels = db.all<{ from_id: string; rel: string }>(
+            'SELECT from_id, rel FROM memory_relations WHERE to_id = ?',
+            [mem.id]
+          );
+          const relations = [
+            ...outRels.map((r) => ({ to_id: r.to_id, rel: r.rel, direction: 'outgoing' as const })),
+            ...inRels.map((r) => ({ to_id: r.from_id, rel: r.rel, direction: 'incoming' as const })),
+          ];
 
           sendJson(res, 200, {
             ok: true,
@@ -765,12 +838,33 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
 
           if (action === 'maintain') {
-            archiveColdMemories(db, cfg);
-            expireCandidates(db);
-            autoPinMemories(db);
-            checkAndRepairFts(db);
+            const archivedCold = archiveColdMemories(db, cfg);
+            const expired = expireCandidates(db);
+            const autoPinned = autoPinMemories(db);
+            const ftsRes = checkAndRepairFts(db);
             cleanOldTelemetry(db);
-            sendJson(res, 200, { ok: true, message: 'Maintenance completed successfully' });
+            const sentinel = checkSentinelAndRollback(db);
+            sendJson(res, 200, {
+              ok: true,
+              message: 'Maintenance completed successfully',
+              stats: {
+                archivedCold,
+                expiredCandidates: expired.expiredCandidates,
+                expiredProposals: expired.expiredProposals,
+                autoPinned,
+                ftsRebuilt: ftsRes.rebuilt,
+                sentinelRollback: sentinel.rolledBack,
+              },
+            });
+            return;
+          }
+
+          if (action === 'distill') {
+            const resDistill = await distillSession(db, cfg, { isIdle: true });
+            sendJson(res, 200, {
+              ok: true,
+              result: resDistill,
+            });
             return;
           }
 
@@ -880,7 +974,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           sendJson(res, 200, {
             ok: true,
-            version: '0.1.0',
+            version: '0.2.0',
             exportedAt: Date.now(),
             total: items.length,
             memories: items,

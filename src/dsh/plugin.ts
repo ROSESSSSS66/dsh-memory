@@ -16,6 +16,8 @@ import { registerJobHandler } from '../jobs/runner.js';
 import { distillSession } from '../evolution/extractor.js';
 import { runReflectJob } from '../evolution/reflector.js';
 import { findConsolidationClusters, consolidateCluster } from '../evolution/consolidator.js';
+import { executeRepair } from '../evolution/repair.js';
+import { runStrategyEvolution, checkSentinelAndRollback } from '../evolution/lab.js';
 import {
   archiveColdMemories,
   expireCandidates,
@@ -124,6 +126,21 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
       autoPinMemories(currentDb);
       checkAndRepairFts(currentDb);
       cleanOldTelemetry(currentDb);
+      checkSentinelAndRollback(currentDb);
+      return { action: 'done' };
+    });
+
+    registerJobHandler('repair', async (job, signal) => {
+      return executeRepair(
+        currentDb,
+        { id: job.id, key: job.key, payload: job.payload || '{}' },
+        { signal },
+        cfg
+      );
+    });
+
+    registerJobHandler('evolve', async () => {
+      runStrategyEvolution(currentDb, {}, cfg);
       return { action: 'done' };
     });
 
@@ -281,12 +298,12 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
       // tool 7: memory (统一工具，汲取自 LZMW/dsh-memory 单工具设计，极大节省提示词空间)
       ctx.tools.register({
         name: 'memory',
-        description: '长期记忆统一集成工具 (支持 search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile)。',
+        description: '长期记忆统一集成工具 (支持 search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor)。',
         parameters: {
           action: {
             type: 'string',
             required: true,
-            description: '操作类型: search | expand | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile',
+            description: '操作类型: search | expand | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile | doctor',
           },
           query: { type: 'string', description: '搜索关键词 (action=search 时使用)' },
           id: { type: 'string', description: '记忆 ID (action=expand/feedback/confirm 时使用)' },
@@ -345,7 +362,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
       ctx.commands.register({
         name: 'memory',
         description: '长期记忆系统管理与状态检查',
-        input: { hint: 'stats | inspect <id> | list | confirm <id> | merge <src> <tgt> | graph | export-md <path> | import-md <path> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending' },
+        input: { hint: 'stats | doctor | inspect <id> | list | confirm <id> | merge <src> <tgt> | graph | export-md <path> | import-md <path> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending' },
         handler: ({ agent, rawInput }: any) => {
           const cwd = agent?.cwd || process.cwd();
           const sessId = agent?.session?.id || 'default_session';

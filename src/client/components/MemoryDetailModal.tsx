@@ -504,7 +504,9 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
                     onClick={() => loadDetail(rel.to_id)}
                     title="点击跳转查看目标记忆详情"
                   >
-                    <span className="dshm-relation-type">{rel.rel}</span>
+                    <span className="dshm-relation-type">
+                      {rel.direction === 'incoming' ? `← ${rel.rel}` : `→ ${rel.rel}`}
+                    </span>
                     <code>{rel.to_id}</code>
                   </button>
                 ))}

@@ -10,6 +10,8 @@ import type {
   CoreMemoryResponse,
   EvolutionDataResponse,
   SandboxResponseUI,
+  MemoryHealthReportUI,
+  ReconcileResponseUI,
 } from './types.js';
 
 const API_BASE = '/api/dsh-memory';
@@ -32,6 +34,36 @@ export async function fetchGraphData(
     : `${API_BASE}/graph?limit=${limit}`;
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchMemoryHealth(
+  workspaceId?: string
+): Promise<{ ok: boolean; health: MemoryHealthReportUI }> {
+  const url = workspaceId
+    ? `${API_BASE}/health?workspaceId=${encodeURIComponent(workspaceId)}`
+    : `${API_BASE}/health`;
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function runReconcile(params: {
+  content: string;
+  type?: string;
+  slot_key?: string;
+  scope?: 'global' | 'workspace';
+  dryRun?: boolean;
+}): Promise<ReconcileResponseUI> {
+  const res = await fetch(`${API_BASE}/reconcile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || '调和判定失败');
+  }
   return res.json();
 }
 
@@ -122,6 +154,7 @@ export async function performAction(
     | 'approve'
     | 'create'
     | 'maintain'
+    | 'distill'
     | 'confirm'
     | 'restore'
     | 'merge'
