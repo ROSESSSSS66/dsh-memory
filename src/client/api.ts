@@ -166,7 +166,10 @@ export async function performAction(
     | 'evolve-strategy'
     | 'rollback-strategy'
     | 'backfill'
-    | 'eval',
+    | 'eval'
+    | 'heal'
+    | 'consolidate'
+    | 'add-relation',
   payload?: any
 ): Promise<any> {
   const res = await fetch(`${API_BASE}/action`, {

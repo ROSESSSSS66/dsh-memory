@@ -1,12 +1,12 @@
 # 🧠 DSH Self-Evolving Memory System (`dsh-memory`)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.2.0_EvolveMem-indigo?style=flat-square" alt="v0.2.0" />
+  <img src="https://img.shields.io/badge/Version-v0.3.0_GraphRAG_%2B_AutoHeal-indigo?style=flat-square" alt="v0.3.0" />
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
   <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
-  <img src="https://img.shields.io/badge/Tests-281_Passed_(48_Suites)-success?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-284_Passed_(48_Suites)-success?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Recall%40Inject-97.2%25-blueviolet?style=flat-square" alt="Recall Rate" />
   <img src="https://img.shields.io/badge/Online_Latency-p95_0.6ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />
@@ -14,7 +14,7 @@
 
 <p align="center">
   <b>专为 DeepSeek Desktop (DSH) 打造的亚毫秒级、自进化、可解释长期记忆引擎</b><br>
-  融合 <b>Letta (MemGPT) 常驻核心块</b> · <b>Mem0 动态冲突调和</b> · <b>Cline 知识库双向同步</b> · <b>EvolveMem 策略自进化实验舱</b> · <b>RIME 负反馈自愈管线</b>
+  融合 <b>Letta (MemGPT) 常驻核心块</b> · <b>GraphRAG 1-Hop 拓扑激活扩散</b> · <b>Mem0 动态冲突调和</b> · <b>Memory Doctor 一键智能自愈</b> · <b>EvolveMem 策略进化实验舱</b> · <b>RIME 负反馈修复管线</b>
 </p>
 
 <p align="center">
@@ -57,7 +57,7 @@
 
 ### 💡 `dsh-memory` 的破局之道
 
-- ⚡ **亚毫秒级纯本地快环（p95 仅 `0.6ms`）**：在线检索链路坚持 **0 网络请求、0 外部 API 依赖、0 原生 C++ 编译负担**。基于 Node.js 24 原生 `node:sqlite` + FTS5 全文引擎与 **128 维本地确定性特征哈希向量**，六路并发召回在 10,000 条记忆规模下依然保持 `18.67ms` 极速响应。
+- ⚡ **亚毫秒级纯本地七路混合快环（p95 仅 `0.6~1.4ms`）**：在线检索链路坚持 **0 网络请求、0 外部 API 依赖、0 原生 C++ 编译负担**。基于 Node.js 24 原生 `node:sqlite` + FTS5 全文引擎、**128 维本地确定性特征哈希向量（含 4096 容量即时 LRU 内存兜底，新写入 0 秒延迟可召回）** 与 **GraphRAG 1-Hop 拓扑激活扩散（`expandGraphNeighbors`）+ 关系协同增益（`+0.035` Synergy Boost）**，七路并发召回在 10,000 条记忆规模下依然保持 `p50 = 22.5ms / p95 = 33.9ms` 极速响应。
 - 🎯 **规模不变性动态装箱（Token Governor）**：采用“稳定层（System Prompt 常驻偏好 + Letta Core Memory）+ 动态层（`pre-step` 价值密度背包算法）”双层注入。实测记忆库从 1,000 条扩容至 10,000 条时，单轮注入 Token 均值稳定在 **157 tokens**，体积膨胀率仅 **0.28%**。
 - 🧬 **可验证、可回滚的闭环自进化（EvolveMem + RIME）**：后台慢环在严格配额风控下自动完成**会话经验蒸馏**、**失败归因反思**、**负反馈触发式冲突修复（RIME）**，并通过 **EvolveMem 进化实验舱**自动搜寻更优检索权重；一旦在线哨兵检测到新策略引发用户纠偏率上升，**即刻无损自动回滚**。
 
@@ -67,14 +67,14 @@
 
 `dsh-memory` 并非单一的向量检索插件，而是将业界五大前沿 Agent 记忆范式深度融合于纯本地双环引擎之中：
 
-| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.2.0)** |
+| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.3.0)** |
 |---|---|---|---|---|
-| **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **`0.6ms` (p95，纯本地六路混合召回)** |
+| **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **`0.6 ~ 1.4ms` (p95，纯本地七路 GraphRAG + 向量混合召回)** |
 | **Token 成本控制** | 固定 Top-K，易超预算 | 随文档增长线性膨胀，极易爆窗 | 依赖服务端截断策略 | **动态背包算法装箱，1k→10k 仅波动 `0.28%`** |
 | **常驻工作台记忆** | ❌ 不支持 | ✅ 手动维护 Markdown | ⚠️ 需额外定制 | **✅ 内置 Letta 风格三大核心块 (`human`/`persona`/`project`)** |
 | **新旧事实冲突消解** | ❌ 新旧并存，互相污染 | ⚠️ 依赖模型自觉覆盖全文 | ✅ 在线同步调用 LLM 调和 | **✅ 槽位唯一索引 + Mem0 冲突调和器 + `supersedes` 因果链** |
 | **负反馈自愈与策略进化** | ❌ 静态死参数，永不进化 | ❌ 无 | ❌ 黑盒策略，不可调优 | **✅ RIME 负反馈自动修复 + EvolveMem 进化实验舱 + 哨兵回滚** |
-| **记忆库健康度治理** | ❌ 无 | ❌ 无 | ⚠️ 仅基础统计 | **✅ 内置 Memory Doctor (0-100 评分、同义冗余检测、一键去重)** |
+| **记忆库健康度治理** | ❌ 无 | ❌ 无 | ⚠️ 仅基础统计 | **✅ 内置 Memory Doctor (0-100 评分、128D 语义冗余检测、一键智能自愈 `autoHeal`)** |
 | **隐私安全与离线可用** | ⚠️ 文本需外发至 Embedding 端 | ✅ 纯本地文件 | ❌ 核心数据上传第三方云端 | **✅ 在线 100% 离线可用 + 敏感凭据落库前正则脱敏拦截** |
 
 ---
@@ -87,8 +87,8 @@
 flowchart TD
     subgraph Online ["🟢 在线快环 (Online Fast Path · 0 网络 · p95 = 0.6ms)"]
         A["用户当前轮输入 (Prompt / Step)"] --> B["意图解析与混合分词 (query.ts)\n中文 Bigram + 驼峰/路径拆词 + 时间/因果/偏好意图识别"]
-        B --> C["六路并发混合召回引擎 (channels.ts)\n① BM25 全文 · ② 实体图谱 · ③ 类型意图 · ④ 时间衰减 · ⑤ 偏好直通 · ⑥ 本地 128D 特征向量"]
-        C --> D["确定性多路融合打分 (fuse.ts)\n加权相关性 × 置信度 × EMA 效用 × 时效衰减 × 一致性惩罚"]
+        B --> C["七路并发混合召回引擎 (channels.ts)\n① BM25 全文 · ② 实体图谱 · ③ 类型意图 · ④ 时间衰减 · ⑤ 偏好直通 · ⑥ 128D 特征向量 · ⑦ GraphRAG 1-Hop 拓扑扩散"]
+        C --> D["确定性多路融合打分 (fuse.ts)\n加权相关性 × 置信度 × EMA 效用 × 时效衰减 × 一致性惩罚 + GraphRAG 关系协同增益 (+0.035)"]
         D --> E["动态 Token 装箱风控 (governor.ts)\n预算硬熔断 · Slot 槽位去重 · Supersedes 历史去重 · 冲突微调提示"]
         E --> F["双层提示词渲染 (render.ts)\n稳定层 (Core Memory + Pinned) + 动态层 (<dsh_memory> 溯源注入)"]
     end
@@ -116,8 +116,8 @@ flowchart TD
 
 ### 1. 🗂️ 记忆浏览与时间线视图 (`Browse & Timeline`)
 - **多维交叉检索**：支持按记忆类型（`preference` / `procedural` / `semantic` / `episodic` / `goal` / `failure` 等 8 类）、生命周期状态（`active` / `candidate` / `superseded` / `frozen`）、作用域（`workspace` / `user` / `global` / `session`）与置顶状态实时过滤。
-- **三态布局切换**：支持 **卡片网格（Grid）**、**高密度列表（Compact）** 与 **按日分组时间轴（Timeline）** 一键切换，配合顶部批量操作栏（批量确认、归档、冻结）。
-- **深度溯源弹窗**：点击任意记忆即可检视其置信度、EMA 效用值、提取来源会话片段、**双向因果与冲突关系（`→ outgoing` / `← incoming`）** 以及完整的历史修订快照 Diff。
+- **三态布局切换**：支持 **卡片网格（Grid）**、**高密度列表（Compact）** 与 **按日分组时间轴（Timeline）** 一键切换，配合顶部批量操作栏（**批量审批、批量确认**、批量置顶、归档、冻结、导出）。
+- **深度溯源与内联建边弹窗 `[v0.3.0]`**：点击任意记忆即可检视其置信度、EMA 效用值、提取来源会话片段、**双向因果与拓扑关联胶囊（点击直达目标记忆，并支持内联 `+ 建立拓扑关联` 创建 `related / derived_from / supersedes / contradicts` 边）** 以及完整的历史修订快照回滚。
 
 ### 2. 🧬 常驻核心记忆工作台 (`Letta Core Memory`)
 - 对标 **Letta (MemGPT)** 架构，内置 **`human`（用户画像与习惯）**、**`persona`（智能体行为准则）**、**`project`（当前工程核心上下文）** 三大常驻内存块。
@@ -128,12 +128,12 @@ flowchart TD
 - 直观呈现记忆节点与高频实体节点之间的 `supersedes`（版本迭代）、`contradicts`（事实冲突）、`derived_from`（提炼派生）及实体共现网络，支持按关系类型过滤、节点拖拽与点击穿透检视。
 
 ### 4. 🎯 在线召回沙盒与 Mem0 调和器 (`Recall Sandbox & Reconcile Playground`)
-- **六路召回X光透视**：输入任意模拟提问，实时展示意图识别结果、六路召回通道（全文/实体/类型/时间/偏好/本地向量）各自的归一化得分贡献、Token 预算水位条以及最终生成的 `<dsh_memory>` 注入文本。
+- **七路召回 X 光透视 `[v0.3.0]`**：输入任意模拟提问，实时展示意图识别结果、七路召回通道（`BM25 全文` / `Entity 实体` / `Typed 类型` / `Temporal 时间` / `Preference 偏好` / `Vector 向量` / `Graph 拓扑`）各自的命中标签与得分贡献、Token 预算水位条以及最终生成的 `<dsh_memory>` 注入文本。
 - **Mem0 动态冲突调和沙盒 `[v0.2.0]`**：输入新观察到的事实，支持 **Dry-Run 预演模式** 与 **实盘执行模式**，直观查看调和器针对存量记忆做出的 `ADD`（新增）、`UPDATE`（原位修订并建立因果链）、`DELETE`（冲突废弃）或 `NOOP`（幂等跳过）决策。
 
 ### 5. 🧪 自进化实验室与记忆体检医生 (`Evolution Lab & Health Doctor`)
-- **记忆库健康度体检医生 (`Memory Doctor`) `[v0.2.0]`**：一键扫描全库，输出 **0~100 健康度评分与等级（`A+` ~ `D`）**，自动诊断 FTS5 索引同步状态、未解决的 `contradicts` 矛盾链、高相似或同槽位冗余记忆对（支持**一键合并去重**）及长期低效陈旧记忆。
-- **RIME 修复提案审批台**：集中展示由负向反馈或冲突检测触发的 `revise / split / invalidate / keep` 提案，支持人工一键批准或驳回。
+- **记忆库健康度体检医生与一键自愈 (`Memory Doctor & Auto-Heal`) `[v0.3.0]`**：一键扫描全库，输出 **0~100 健康度评分与等级（`A+` ~ `D`）**，诊断 FTS5 索引同步状态、128D 向量覆盖率、未解决的 `contradicts` 矛盾链、**128D 语义余弦 + 词汇高重合冗余记忆对**；支持点击 **「⚡ 一键智能自愈 (Auto-Heal)」** 自动完成 FTS5 重建、向量回填、冗余对合并与非冻结矛盾消解。
+- **慢环主动控制与 RIME 审批台 `[v0.3.0]`**：集中审批由负向反馈触发的 `revise / split / invalidate / keep` 提案，并支持在面板中一键触发 **「🧪 立即蒸馏会话」**、**「🧩 立即聚类巩固 (Consolidate)」** 与 **「执行离线清理与维护」**。
 - **EvolveMem 策略进化舱**：可视化对比历代检索策略参数版本（权重分布、动态 Token 上限、评测集得分）与今日 LLM 配额消耗水位。
 
 ---
@@ -143,7 +143,7 @@ flowchart TD
 | 维度 | 核心能力 | 技术实现与工程指标 |
 |---|---|---|
 | **存储底座** | **零原生 C++ 依赖** | 基于 Node.js 24 原生 `node:sqlite` + 内置 FTS5 全文索引，彻底告别 `node-gyp` 编译报错与跨平台二进制兼容问题 |
-| **混合检索** | **六路确定性并发召回** | 中文 Bigram 预切分 + 驼峰/路径代码分词 + BM25 + 实体图谱 + 类型路由 + 时间衰减 + 偏好直通 + **128 维本地特征哈希向量** |
+| **混合检索** | **七路确定性并发召回** | 中文 Bigram 预切分 + 驼峰/路径代码分词 + BM25 + 实体图谱 + 类型路由 + 时间衰减 + 偏好直通 + **128 维本地向量（含即时 LRU 兜底）** + **GraphRAG 1-Hop 拓扑激活扩散与协同增益** |
 | **预算治理** | **Token 规模不变性** | 动态背包装箱算法（`governor.ts`），硬性锁定稳定层（600t）与动态层（1600t）上限，1k 与 10k 规模注入波动 `< 0.3%` |
 | **冲突自愈** | **Mem0 + RIME 双重治理** | 写入侧通过 `ux_mem_live_slot` 唯一槽位索引与 Mem0 调和器消解同槽冲突；检索侧遇负反馈自动触发 RIME 异步修复 |
 | **策略进化** | **EvolveMem + 哨兵回滚** | 离线在 120+ 基准用例与真实收获用例上变异寻优；上线后若用户纠偏率劣化超过父版本 `+5%`，哨兵机制自动无损回滚 |
@@ -156,7 +156,7 @@ flowchart TD
 
 ```text
 dsh-memory/
-├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.2.0)
+├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.3.0)
 ├─ tsconfig.json           # 严格 ESM TypeScript 编译配置
 ├─ tsup.config.ts          # 构建打包配置 (服务端插件 + 独立评测 CLI)
 ├─ vitest.config.ts        # 自动化单元测试与集成测试配置
@@ -174,19 +174,19 @@ dsh-memory/
 │  │  ├─ scope.ts          # Session / Workspace / User / Global 四级作用域隔离
 │  │  ├─ privacy.ts        # 敏感密钥、Token 与凭据实时脱敏拦截器
 │  │  ├─ writer.ts         # 单一事务写入通道 (槽位冲突取代、版本快照与因果链)
-│  │  ├─ store.ts          # 只读查询、多维统计、拓扑图谱构建与 Mermaid 渲染
+│  │  ├─ store.ts          # 只读查询、多维统计、全局图谱、K-Hop 局部子图 (getSubgraph) 与 Mermaid 渲染
 │  │  ├─ core-memory.ts    # Letta/MemGPT 风格常驻核心记忆块 (human/persona/project)
 │  │  ├─ markdown.ts       # Markdown 双向同步、Cline Memory Bank 与 .trash 回收站
-│  │  ├─ vector.ts         # [v0.2.0] 128 维确定性本地特征哈希嵌入与余弦相似度引擎
-│  │  └─ health.ts         # [v0.2.0] 记忆库健康度评分与冲突/冗余体检医生 (Memory Doctor)
+│  │  ├─ vector.ts         # [v0.3.0] 128 维确定性本地特征向量、4096 容量即时 LRU 缓存与自动回填引擎
+│  │  └─ health.ts         # [v0.3.0] 记忆库健康度评分、128D 语义冗余检测与一键智能自愈 (autoHealMemoryHealth)
 │  ├─ ingest/              # 增量事件摄入与历史回填
 │  │  ├─ rules.ts          # 零延迟本地正则规则抽取器 (高频偏好与指令即时捕获)
 │  │  ├─ queue.ts          # 会话消息事件缓冲与批处理队列
 │  │  └─ backfill.ts       # 历史会话日志回填 (流式 zstd 多帧解压缩)
 │  ├─ retrieval/           # 在线亚毫秒级多路召回与融合引擎
 │  │  ├─ query.ts          # 查询意图解析 (时间/因果/步骤/偏好) 与检索计划生成
-│  │  ├─ channels.ts       # 全文/实体/类型/时间/偏好/本地向量 六路召回通道
-│  │  ├─ fuse.ts           # 确定性多维加权融合打分器
+│  │  ├─ channels.ts       # 全文/实体/类型/时间/偏好/本地向量/GraphRAG 1-Hop 七路召回通道
+│  │  ├─ fuse.ts           # 确定性多维加权融合打分器 (含 GraphRAG 拓扑扩散晋升与 +0.035 关系协同增益)
 │  │  ├─ governor.ts       # 动态 Token 预算调节器 (价值密度背包装箱算法)
 │  │  ├─ render.ts         # 双层提示词 XML/Markdown 渲染与来源溯源格式化
 │  │  └─ recall.ts         # 在线检索主调度器 (含策略版本追踪)
@@ -222,7 +222,7 @@ dsh-memory/
 │     ├─ runner.ts         # 评测套件执行器与规模不变性压测
 │     ├─ metrics.ts        # Recall@Inj、ExclViol、EmptyPrec 核心指标计算
 │     └─ eval-cli.ts       # 独立命令行评测门禁入口
-└─ test/                   # 48 个测试套件，281 个自动化单元测试与端到端验收用例
+└─ test/                   # 48 个测试套件，284 个自动化单元测试与端到端验收用例
 ```
 
 ---
@@ -301,7 +301,8 @@ npm run build
 | 类别 | 交互命令 | 功能说明 |
 |---|---|---|
 | **状态与体检** | `/memory status` (或 `stats`) | 实时查看当前工作区记忆分布、活跃检索策略版本及今日 LLM 配额消耗 |
-| | `/memory doctor` (或 `health`) | **`[v0.2.0]`** 执行记忆库全面体检（0-100 评分、FTS5 同步校验、冗余对与冲突链诊断） |
+| | `/memory doctor [--fix]` | **`[v0.3.0]`** 执行记忆库全面体检（0-100 评分、FTS5 同步校验、128D 向量覆盖率、语义冗余对与冲突诊断；加 `--fix` 自动自愈） |
+| | `/memory heal` | **`[v0.3.0]`** 一键智能自愈：自动修复 FTS5 索引、回填 128D 向量、合并重复记忆对并消解非冻结矛盾 |
 | | `/memory eval` | 原地运行 120 条基准回归评测，即时输出召回率、隔离度与延迟报告 |
 | **前沿范式** | `/memory core [block] [内容]` | **`[Letta]`** 查看或更新常驻 Core Memory 核心块（`human` / `persona` / `project`） |
 | | `/memory reconcile <内容>` | **`[Mem0]`** 对输入事实执行动态冲突调和（自动判定 `ADD/UPDATE/DELETE/NOOP`）并落库 |
@@ -315,7 +316,7 @@ npm run build
 | | `/memory freeze <ID>` / `unfreeze` | 冻结记忆（禁止离线慢环修改或覆盖） / 解除冻结 |
 | | `/memory forget <ID>` | 归档废弃记忆，同时自动生成 Markdown 存根至 `.trash/` 回收站以防误删 |
 | | `/memory restore <ID>` | 从回收站或归档状态一键恢复为活跃记忆 |
-| **图谱与迁移** | `/memory graph [limit]` | 提取核心记忆与实体子图，在聊天流中直接生成 Mermaid 拓扑关系图 |
+| **图谱与迁移** | `/memory graph [ID或limit]` | **`[v0.3.0]`** 提取全局核心图谱或指定记忆 ID 的 **1~2 跳 Ego-Network 局部子图**，直接生成 Mermaid 拓扑图 |
 | | `/memory export-md <目录>` | 将记忆全量导出为带 YAML Frontmatter 的可读 Markdown 知识库目录 |
 | | `/memory import-md <目录>` | 从 Markdown 目录增量同步或恢复记忆 |
 | | `/memory export <文件路径>` | 完整导出 SQLite 数据库快照或结构化 JSON 备份 |
@@ -325,7 +326,7 @@ npm run build
 
 插件向智能体暴露精简高效的工具接口，支持模型在推理过程中按需调用：
 
-- **`memory`（推荐 · 统一聚合工具）**：将全部 11 项原子能力（`search` / `expand` / `note` / `feedback` / `confirm` / `merge` / `core_read` / `core_set` / `core_append` / `reconcile` / `doctor`）收敛至单一 Schema 入口，最大限度节省模型工具定义 Token 开销。
+- **`memory`（推荐 · 统一聚合工具）**：将全部 12 项原子能力（`search` / `expand` / `note` / `feedback` / `confirm` / `merge` / `core_read` / `core_set` / `core_append` / `reconcile` / `doctor` / `heal`）收敛至单一 Schema 入口，最大限度节省模型工具定义 Token 开销。
 - **专用细分工具集**：
   - `memory_search`：当前上下文缺失背景知识时，主动发起六路混合检索。
   - `memory_expand`：按需展开某条摘要记忆的完整正文与原始会话凭据。
@@ -341,7 +342,7 @@ npm run build
 项目内置完整的离线评测生成器（4 大评测套件共 120 条跨领域标准用例 + 20 条关键红线用例）与多级规模压测器：
 
 ```bash
-# 1. 运行 TypeScript 严格类型检查与 48 个测试套件 (281 项测试)
+# 1. 运行 TypeScript 严格类型检查与 48 个测试套件 (284 项测试)
 npm run check
 
 # 2. 构建服务端插件、前端 Glassmorphism 工作台与评测 CLI
@@ -353,13 +354,13 @@ npm run eval
 
 ### 评测门禁达成实测对照表
 
-| 验收核心指标 | 官方规约门槛 | `v0.2.0` 实测表现 | 门禁结论 |
+| 验收核心指标 | 官方规约门槛 | `v0.3.0` 实测表现 | 门禁结论 |
 |---|---:|---:|:---:|
 | **Recall @ Inject (有效注入召回率)** | $\ge 70\%$ | **97.2%** | ✅ **PASS** |
 | **Exclude Violations (跨区/废弃违规注入)** | $= 0$ (绝对零容忍) | **0** | ✅ **PASS** |
 | **Empty Precision (无关提问精准空查率)** | $\ge 80\%$ | **100.0%** | ✅ **PASS** |
 | **Critical 关键红线用例通过率** | $100\%$ (20/20) | **20 / 20 (100%)** | ✅ **PASS** |
-| **在线检索响应延迟 (p95)** | $\le 50\text{ ms}$ | **0.6 ms** (1万条规模: `18.67ms`) | ✅ **PASS** |
+| **在线检索响应延迟 (p95)** | $\le 50\text{ ms}$ | **0.6 ~ 1.4 ms** (1万条规模: `p50=22.5ms, p95=33.9ms`) | ✅ **PASS** |
 | **单轮动态 Token 消耗均值** | $\le 1600\text{ tokens}$ | **157 tokens** | ✅ **PASS** |
 | **1k vs 10k 规模 Token 膨胀率** | $< 10\%$ 波动 | **0.28%** (规模不变性达成) | ✅ **PASS** |
 

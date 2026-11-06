@@ -1,7 +1,12 @@
 import type { Db, QueryPlan, ChannelName } from '../types.js';
 import { scopeFilterSQL } from '../core/scope.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
-import { computeLocalEmbedding, decodeEmbeddingBlob, cosineSimilarity } from '../core/vector.js';
+import {
+  computeLocalEmbedding,
+  decodeEmbeddingBlob,
+  cosineSimilarity,
+  getOrComputeEmbedding,
+} from '../core/vector.js';
 
 export interface Candidate {
   id: string;
@@ -248,24 +253,67 @@ export function recallVector(
   const minSim = ctx.cfg?.minVectorSimilarity ?? DEFAULTS.minVectorSimilarity;
 
   try {
-    const rows = cache && cache.size > 0
-      ? db.all<{ id: string; embedding: Uint8Array | Buffer | null }>(
+    let rows = cache && cache.size > 0
+      ? db.all<{
+          id: string;
+          summary?: string;
+          content?: string;
+          slot_key?: string | null;
+          hash?: string;
+          embedding: Uint8Array | Buffer | null;
+        }>(
           `SELECT m.id, m.embedding
            FROM memories m
            WHERE m.status IN ('active', 'frozen')
+             AND m.type != 'meta'
              AND (${scope.sql})
            LIMIT 250`,
           scope.params
         )
-      : db.all<{ id: string; embedding: Uint8Array | Buffer | null }>(
+      : db.all<{
+          id: string;
+          summary?: string;
+          content?: string;
+          slot_key?: string | null;
+          hash?: string;
+          embedding: Uint8Array | Buffer | null;
+        }>(
           `SELECT m.id, m.embedding
            FROM memories m
            WHERE m.status IN ('active', 'frozen')
+             AND m.type != 'meta'
              AND m.embedding IS NOT NULL
              AND (${scope.sql})
            LIMIT 250`,
           scope.params
         );
+
+    // 若尚未回填 BLOB 嵌入且当前作用域记忆规模适中 (<= 80 条)，自动启用内存 LRU 实时向量计算
+    if (rows.length === 0 && (!cache || cache.size === 0)) {
+      const cntRow = db.get<{ c: number }>(
+        `SELECT COUNT(*) as c FROM memories m WHERE m.status IN ('active', 'frozen') AND m.type != 'meta' AND (${scope.sql})`,
+        scope.params
+      );
+      const totalInScope = Number(cntRow?.c ?? 0);
+      if (totalInScope > 0 && totalInScope <= 80) {
+        rows = db.all<{
+          id: string;
+          summary?: string;
+          content?: string;
+          slot_key?: string | null;
+          hash?: string;
+          embedding: Uint8Array | Buffer | null;
+        }>(
+          `SELECT m.id, m.summary, m.content, m.slot_key, m.hash, m.embedding
+           FROM memories m
+           WHERE m.status IN ('active', 'frozen')
+             AND m.type != 'meta'
+             AND (${scope.sql})
+           LIMIT 80`,
+          scope.params
+        );
+      }
+    }
 
     if (rows.length === 0) {
       return [];
@@ -275,7 +323,10 @@ export function recallVector(
     const scored: Array<{ id: string; similarity: number }> = [];
 
     for (const row of rows) {
-      const docVec = cache?.get(row.id) ?? decodeEmbeddingBlob(row.embedding);
+      const docVec =
+        cache?.get(row.id) ??
+        decodeEmbeddingBlob(row.embedding) ??
+        getOrComputeEmbedding(row, cache);
       if (!docVec) continue;
       const sim = cosineSimilarity(queryVec, docVec);
       if (sim >= minSim) {
@@ -344,4 +395,75 @@ export function runAllChannels(
   results.vector = recallVector(db, plan, ctx);
 
   return results;
+}
+
+export interface AssociativeNeighbor {
+  neighborId: string;
+  seedId: string;
+  rel: 'related' | 'derived_from';
+  seedRank: number;
+}
+
+/**
+ * 7. GraphRAG 一跳关联拓扑扩展 (Spreading Activation over related / derived_from)
+ * 从高优先级种子候选中沿着正向关系边 (related / derived_from) 发现同作用域的关联活跃记忆
+ */
+export function expandGraphNeighbors(
+  db: Db,
+  seedIds: string[],
+  ctx: ChannelContext,
+  maxNeighbors: number = 12
+): AssociativeNeighbor[] {
+  const uniqueSeeds = Array.from(new Set(seedIds)).slice(0, 8);
+  if (uniqueSeeds.length === 0) return [];
+
+  const scope = scopeFilterSQL({ workspaceId: ctx.workspaceId, sessionId: ctx.sessionId });
+  const placeholders = uniqueSeeds.map(() => '?').join(', ');
+
+  try {
+    const rows = db.all<{
+      from_id: string;
+      to_id: string;
+      rel: 'related' | 'derived_from';
+      neighbor_id: string;
+    }>(
+      `SELECT r.from_id, r.to_id, r.rel, m.id as neighbor_id
+       FROM memory_relations r
+       JOIN memories m ON (m.id = CASE WHEN r.from_id IN (${placeholders}) THEN r.to_id ELSE r.from_id END)
+       WHERE r.rel IN ('related', 'derived_from')
+         AND (r.from_id IN (${placeholders}) OR r.to_id IN (${placeholders}))
+         AND m.status IN ('active', 'frozen')
+         AND m.type != 'meta'
+         AND (${scope.sql})
+       LIMIT ?`,
+      [...uniqueSeeds, ...uniqueSeeds, ...uniqueSeeds, ...scope.params, maxNeighbors * 2]
+    );
+
+    const seedRankMap = new Map<string, number>();
+    uniqueSeeds.forEach((id, idx) => seedRankMap.set(id, idx + 1));
+
+    const results: AssociativeNeighbor[] = [];
+    const seen = new Set<string>();
+
+    for (const r of rows) {
+      const seedId = seedRankMap.has(r.from_id) ? r.from_id : r.to_id;
+      const neighborId = r.neighbor_id;
+      if (neighborId === seedId) continue;
+      const pairKey = `${seedId}->${neighborId}`;
+      if (seen.has(pairKey)) continue;
+      seen.add(pairKey);
+
+      results.push({
+        neighborId,
+        seedId,
+        rel: r.rel,
+        seedRank: seedRankMap.get(seedId) ?? 1,
+      });
+      if (results.length >= maxNeighbors) break;
+    }
+
+    return results;
+  } catch {
+    return [];
+  }
 }

@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import type { Db } from '../../src/types.js';
-import { upsertCandidate, mergeMemories } from '../../src/core/writer.js';
-import { getGraphData, renderMermaidGraph } from '../../src/core/store.js';
+import { upsertCandidate, mergeMemories, addRelation } from '../../src/core/writer.js';
+import { getGraphData, getSubgraph, renderMermaidGraph } from '../../src/core/store.js';
+import { workspaceId } from '../../src/core/scope.js';
+import { buildQueryPlan } from '../../src/retrieval/query.js';
+import { recall } from '../../src/retrieval/recall.js';
 
 describe('Knowledge Graph & Topology Visualization (汲取自 qwert702/dsh-memory 与 omdsh-dev/dsh-mnemon)', () => {
   let db: Db;
@@ -70,5 +73,68 @@ describe('Knowledge Graph & Topology Visualization (汲取自 qwert702/dsh-memor
     const mermaid = renderMermaidGraph(graph, 15);
     expect(mermaid).toContain('flowchart TD');
     expect(mermaid).toContain('supersedes');
+  });
+
+  it('extracts K-Hop ego-network subgraph and applies GraphRAG 1-hop associative recall + synergy boost', () => {
+    const resSeed = upsertCandidate(
+      db,
+      {
+        type: 'procedural',
+        content: '网关鉴权中间件位于 src/auth/jwt.ts，默认使用 RS256 公钥校验签名',
+        summary: '网关 JWT 鉴权中间件路径与算法',
+        scope: 'workspace',
+        workspaceId: 'ws_graph',
+        source_kind: 'user',
+        confidence: 0.95,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 1, kind: 'user' }],
+        actor: 'user',
+      },
+      now
+    );
+    const seedId = (resSeed as any).id;
+
+    const resNeighbor = upsertCandidate(
+      db,
+      {
+        type: 'failure',
+        content: '更新 RS256 密钥轮换时若未同步刷新 Redis JWKS 缓存会导致 401 鉴权失败',
+        summary: 'RS256 密钥轮换需刷新 JWKS 缓存',
+        scope: 'workspace',
+        workspaceId: 'ws_graph',
+        source_kind: 'user',
+        confidence: 0.92,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 2, kind: 'user' }],
+        actor: 'user',
+      },
+      now + 100
+    );
+    const neighborId = (resNeighbor as any).id;
+
+    addRelation(db, seedId, neighborId, 'related', now + 200);
+
+    // 1. Test K-hop ego-network extraction (getSubgraph)
+    const sub = getSubgraph(db, seedId.slice(0, 8), { workspaceId: 'ws_graph', hops: 1 });
+    expect(sub).not.toBeNull();
+    expect(sub!.nodes.some((n) => n.id === seedId)).toBe(true);
+    expect(sub!.nodes.some((n) => n.id === neighborId)).toBe(true);
+    expect(sub!.links.some((l) => l.rel === 'related')).toBe(true);
+
+    // 2. Test GraphRAG 1-hop associative recall & relational synergy boost
+    const plan = buildQueryPlan({
+      userText: 'src/auth/jwt.ts 网关鉴权 RS256 签名怎么配置？',
+    });
+    const recRes = recall(db, plan, {
+      workspaceId: workspaceId('ws_graph'),
+      sessionId: 's1',
+      now: now + 500,
+    });
+    const recalledIds = recRes.items.map((it) => it.memory.id);
+    expect(recalledIds).toContain(seedId);
+    expect(recalledIds).toContain(neighborId);
+    // Both linked memories should be tagged with the 'graph' channel in matchedChannels
+    expect(recRes.matchedChannels?.[seedId] || []).toContain('graph');
+    expect(recRes.matchedChannels?.[neighborId] || []).toContain('graph');
   });
 });

@@ -26,6 +26,7 @@ import {
   cleanOldTelemetry,
 } from '../evolution/maintenance.js';
 import { registerWebRoutes } from './web.js';
+import { backfillMissingEmbeddings } from '../core/vector.js';
 import type { Db } from '../types.js';
 
 export const name = 'dsh-memory';
@@ -88,8 +89,11 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
 
     console.log('[dsh-memory] Plugin initialized with database at:', dbPath);
 
-    // 1.1 启动恢复：running 任务恢复为 failed，保留额度一致性
+    // 1.1 启动恢复：running 任务恢复为 failed，保留额度一致性，并补齐本地 128D 特征向量
     recoverJobsOnStartup(currentDb);
+    try {
+      backfillMissingEmbeddings(currentDb, { limit: 200 });
+    } catch {}
 
     // 1.2 初始化离线任务调度器与处理器
     const scheduler = new JobScheduler(currentDb, cfg);
@@ -125,6 +129,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
       expireCandidates(currentDb);
       autoPinMemories(currentDb);
       checkAndRepairFts(currentDb);
+      backfillMissingEmbeddings(currentDb, { limit: 500 });
       cleanOldTelemetry(currentDb);
       checkSentinelAndRollback(currentDb);
       return { action: 'done' };
@@ -298,12 +303,12 @@ export function apply(ctx: any, config?: Partial<PluginConfig>) {
       // tool 7: memory (统一工具，汲取自 LZMW/dsh-memory 单工具设计，极大节省提示词空间)
       ctx.tools.register({
         name: 'memory',
-        description: '长期记忆统一集成工具 (支持 search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor)。',
+        description: '长期记忆统一集成工具 (支持 search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal)。',
         parameters: {
           action: {
             type: 'string',
             required: true,
-            description: '操作类型: search | expand | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile | doctor',
+            description: '操作类型: search | expand | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile | doctor | heal',
           },
           query: { type: 'string', description: '搜索关键词 (action=search 时使用)' },
           id: { type: 'string', description: '记忆 ID (action=expand/feedback/confirm 时使用)' },

@@ -1,5 +1,13 @@
 import * as React from 'react';
-import { PinIcon, SnowflakeIcon, TrashIcon, UndoIcon, DownloadIcon, CloseIcon } from './Icons.js';
+import {
+  PinIcon,
+  SnowflakeIcon,
+  TrashIcon,
+  UndoIcon,
+  DownloadIcon,
+  CloseIcon,
+  CheckIcon,
+} from './Icons.js';
 
 interface BatchBarProps {
   selectedCount: number;
@@ -9,6 +17,8 @@ interface BatchBarProps {
   onBatchFreeze: () => void;
   onBatchForget: () => void;
   onBatchRestore: () => void;
+  onBatchApprove: () => void;
+  onBatchConfirm: () => void;
   onBatchExport: () => void;
 }
 
@@ -20,6 +30,8 @@ export const BatchBar: React.FC<BatchBarProps> = ({
   onBatchFreeze,
   onBatchForget,
   onBatchRestore,
+  onBatchApprove,
+  onBatchConfirm,
   onBatchExport,
 }) => {
   if (selectedCount === 0) return null;
@@ -32,6 +44,26 @@ export const BatchBar: React.FC<BatchBarProps> = ({
       </div>
 
       <div className="dshm-batch-actions">
+        <button
+          type="button"
+          className="dshm-batch-btn"
+          onClick={onBatchApprove}
+          title="将选中的候选记忆批量审批为活跃状态"
+        >
+          <CheckIcon size={13} />
+          <span>批量审批</span>
+        </button>
+
+        <button
+          type="button"
+          className="dshm-batch-btn"
+          onClick={onBatchConfirm}
+          title="批量强化选中记忆的实用度与置信度"
+        >
+          <CheckIcon size={13} />
+          <span>批量确认</span>
+        </button>
+
         <button
           type="button"
           className="dshm-batch-btn"

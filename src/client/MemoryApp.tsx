@@ -206,7 +206,7 @@ export const MemoryApp: React.FC = () => {
   };
 
   const handleBatchAction = async (
-    subAction: 'pin' | 'unpin' | 'freeze' | 'unfreeze' | 'forget' | 'restore'
+    subAction: 'pin' | 'unpin' | 'freeze' | 'unfreeze' | 'forget' | 'restore' | 'approve' | 'confirm'
   ) => {
     if (selectedIds.size === 0) return;
     try {
@@ -305,7 +305,22 @@ export const MemoryApp: React.FC = () => {
         <div className="dshm-container">
           {/* Toast notification */}
           {toast && (
-            <div className="dshm-toast glass-base glass-dark">
+            <div
+              className="dshm-toast glass-base glass-dark"
+              style={{
+                position: 'fixed',
+                top: 'auto',
+                left: 'auto',
+                bottom: 24,
+                right: 24,
+                width: 'fit-content',
+                maxWidth: 'min(520px, calc(100vw - 48px))',
+                height: 'auto',
+                minHeight: 0,
+                transform: 'none',
+                zIndex: 100000,
+              }}
+            >
               <span className="dshm-toast-icon">✨</span>
               <span className="dshm-toast-text">{toast}</span>
             </div>
@@ -456,6 +471,8 @@ export const MemoryApp: React.FC = () => {
               onBatchFreeze={() => handleBatchAction('freeze')}
               onBatchForget={() => handleBatchAction('forget')}
               onBatchRestore={() => handleBatchAction('restore')}
+              onBatchApprove={() => handleBatchAction('approve')}
+              onBatchConfirm={() => handleBatchAction('confirm')}
               onBatchExport={handleBatchExport}
             />
           )}

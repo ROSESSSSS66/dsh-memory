@@ -1,6 +1,6 @@
 import type { Db, QueryPlan, MemoryRecord, StrategyConfig } from '../types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
-import { runAllChannels } from './channels.js';
+import { runAllChannels, expandGraphNeighbors } from './channels.js';
 import { fuseCandidates, DEFAULT_STRATEGY } from './fuse.js';
 import { govern, type SelectedItem } from './governor.js';
 import { render } from './render.js';
@@ -24,6 +24,7 @@ export interface RecallResult {
   latencyMs: number;
   strategyVersion?: number;
   candidatesCount?: number;
+  matchedChannels?: Record<string, string[]>;
 }
 
 /**
@@ -62,9 +63,13 @@ export function recall(
 
   // 2. 收集所有候选 ID
   const allIds = new Set<string>();
-  for (const cands of Object.values(channelResults)) {
+  const matchedChannels: Record<string, string[]> = {};
+  for (const [chName, cands] of Object.entries(channelResults)) {
     for (const c of cands) {
       allIds.add(c.id);
+      const list = matchedChannels[c.id] || [];
+      if (!list.includes(chName)) list.push(chName);
+      matchedChannels[c.id] = list;
     }
   }
 
@@ -75,7 +80,27 @@ export function recall(
       latencyMs: Date.now() - t0,
       strategyVersion,
       candidatesCount: 0,
+      matchedChannels: {},
     };
+  }
+
+  // 2.5 GraphRAG 一跳拓扑关联候选发现 (沿着 related / derived_from 关系扩展)
+  const topSeedIds = [
+    ...channelResults.lexical.slice(0, 4).map((c) => c.id),
+    ...channelResults.entity.slice(0, 4).map((c) => c.id),
+    ...channelResults.vector.slice(0, 3).map((c) => c.id),
+  ];
+  const associativeNeighbors =
+    Date.now() - t0 <= onlineBudget
+      ? expandGraphNeighbors(
+          db,
+          topSeedIds,
+          { workspaceId: ctx.workspaceId, sessionId: ctx.sessionId || '', cfg },
+          12
+        )
+      : [];
+  for (const edge of associativeNeighbors) {
+    allIds.add(edge.neighborId);
   }
 
   // 3. 批量从数据库加载记忆实体与矛盾关系
@@ -125,7 +150,7 @@ export function recall(
     }
   }
 
-  // 4. 融合与打分 (绝对相关性门槛 -> RRF -> 综合评分 -> 相对排名过滤)
+  // 4. 融合与打分 (绝对相关性门槛 -> GraphRAG 一跳协同 -> RRF -> 综合评分 -> 相对排名过滤)
   const scored = fuseCandidates(
     plan,
     channelResults,
@@ -134,8 +159,17 @@ export function recall(
     contradictionsSet,
     strategy,
     cfg,
-    now
+    now,
+    associativeNeighbors
   );
+
+  for (const sc of scored) {
+    if (sc.graphExpanded || sc.synergyBoosted) {
+      const list = matchedChannels[sc.memory.id] || [];
+      if (!list.includes('graph')) list.push('graph');
+      matchedChannels[sc.memory.id] = list;
+    }
+  }
 
   if (scored.length === 0) {
     return {
@@ -144,6 +178,7 @@ export function recall(
       latencyMs: Date.now() - t0,
       strategyVersion,
       candidatesCount: allIds.size,
+      matchedChannels,
     };
   }
 
@@ -174,5 +209,6 @@ export function recall(
     latencyMs: Date.now() - t0,
     strategyVersion,
     candidatesCount: allIds.size,
+    matchedChannels,
   };
 }

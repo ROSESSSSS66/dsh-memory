@@ -345,6 +345,129 @@ export function getGraphData(
 /**
  * 将图谱拓扑数据渲染为 Mermaid 格式 (便于在会话与报告中可视化)
  */
+/**
+ * 提取指定中心记忆节点的 K-Hop (1~2 跳) 局部知识子图 (Ego-Network Subgraph)
+ */
+export function getSubgraph(
+  db: Db,
+  centerIdOrShortId: string,
+  options?: {
+    workspaceId?: string;
+    hops?: 1 | 2;
+    maxNodes?: number;
+    includeEntities?: boolean;
+  }
+): GraphData {
+  const wsId = options?.workspaceId ? workspaceId(options.workspaceId) : undefined;
+  const center = get(db, centerIdOrShortId, { workspaceId: wsId });
+  if (!center) {
+    return {
+      nodes: [],
+      links: [],
+      stats: { totalNodes: 0, memoryNodes: 0, entityNodes: 0, totalLinks: 0 },
+    };
+  }
+
+  const hops = options?.hops === 2 ? 2 : 1;
+  const maxNodes = Math.max(2, Math.min(80, options?.maxNodes ?? 25));
+  const includeEntities = options?.includeEntities ?? true;
+
+  const visitedIds = new Set<string>([center.id]);
+  let frontier = [center.id];
+
+  for (let h = 0; h < hops && frontier.length > 0 && visitedIds.size < maxNodes; h++) {
+    const placeholders = frontier.map(() => '?').join(', ');
+    const rels = db.all<{ from_id: string; to_id: string }>(
+      `SELECT from_id, to_id FROM memory_relations
+       WHERE from_id IN (${placeholders}) OR to_id IN (${placeholders})`,
+      [...frontier, ...frontier]
+    );
+    const nextFrontier: string[] = [];
+    for (const r of rels) {
+      if (!visitedIds.has(r.from_id) && visitedIds.size < maxNodes) {
+        visitedIds.add(r.from_id);
+        nextFrontier.push(r.from_id);
+      }
+      if (!visitedIds.has(r.to_id) && visitedIds.size < maxNodes) {
+        visitedIds.add(r.to_id);
+        nextFrontier.push(r.to_id);
+      }
+    }
+    frontier = nextFrontier;
+  }
+
+  const idArr = Array.from(visitedIds);
+  const placeholders = idArr.map(() => '?').join(', ');
+  const memRows = db.all<MemoryRecord>(
+    `SELECT * FROM memories WHERE id IN (${placeholders})`,
+    idArr
+  );
+
+  const nodes: GraphNode[] = [];
+  const links: GraphLink[] = [];
+  const connectionCounts = new Map<string, number>();
+  const bumpConn = (id: string) => connectionCounts.set(id, (connectionCounts.get(id) || 0) + 1);
+
+  for (const m of memRows) {
+    const shortLabel = (m.summary || m.content).slice(0, 36).replace(/[\r\n]+/g, ' ');
+    nodes.push({
+      id: m.id,
+      label: `[${m.type.toUpperCase()}] ${shortLabel}`,
+      type: 'memory',
+      memoryType: m.type,
+      scope: m.scope,
+      status: m.status,
+      confidence: m.confidence,
+      utility: m.utility,
+      pinned: m.id === center.id ? 1 : m.pinned,
+    });
+  }
+
+  const relRows = db.all<{ from_id: string; to_id: string; rel: string }>(
+    `SELECT from_id, to_id, rel FROM memory_relations
+     WHERE from_id IN (${placeholders}) AND to_id IN (${placeholders})`,
+    [...idArr, ...idArr]
+  );
+  for (const r of relRows) {
+    links.push({ source: r.from_id, target: r.to_id, rel: r.rel });
+    bumpConn(r.from_id);
+    bumpConn(r.to_id);
+  }
+
+  if (includeEntities && memRows.length > 0) {
+    const entRows = db.all<{ memory_id: string; entity: string }>(
+      `SELECT memory_id, entity FROM memory_entities WHERE memory_id IN (${placeholders})`,
+      idArr
+    );
+    const addedEntities = new Set<string>();
+    for (const r of entRows.slice(0, 20)) {
+      const entNodeId = `ent_${r.entity.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+      if (!addedEntities.has(entNodeId)) {
+        addedEntities.add(entNodeId);
+        nodes.push({ id: entNodeId, label: `@${r.entity}`, type: 'entity' });
+      }
+      links.push({ source: r.memory_id, target: entNodeId, rel: 'mentions' });
+      bumpConn(r.memory_id);
+      bumpConn(entNodeId);
+    }
+  }
+
+  for (const n of nodes) {
+    n.connections = connectionCounts.get(n.id) || 0;
+  }
+
+  return {
+    nodes,
+    links,
+    stats: {
+      totalNodes: nodes.length,
+      memoryNodes: memRows.length,
+      entityNodes: nodes.length - memRows.length,
+      totalLinks: links.length,
+    },
+  };
+}
+
 export function renderMermaidGraph(graph: GraphData, maxNodes: number = 25): string {
   if (graph.nodes.length === 0) {
     return '*(记忆库为空，暂无知识图谱拓扑)*';

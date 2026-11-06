@@ -9,7 +9,7 @@ import { budgetTokens } from '../core/tokens.js';
 import { redactSecrets } from '../core/privacy.js';
 import { upsertCandidate, confirmMemory, mergeMemories } from '../core/writer.js';
 import { getCoreMemory, getAllCoreMemories, setCoreMemory, appendCoreMemory, renderCoreMemoryMarkdown } from '../core/core-memory.js';
-import { auditMemoryHealth } from '../core/health.js';
+import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
 import { reconcileAndUpsert, reconcileCandidate } from '../evolution/reconciler.js';
 import { enqueueRepairJobIfEligible } from '../evolution/repair.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
@@ -489,7 +489,10 @@ export class MemoryTools {
   /**
    * 11. doctor (记忆库健康度体检与冲突检测)
    */
-  public doctor(agentCtx: { workspaceId: string }): string {
+  public doctor(agentCtx: { workspaceId: string }, options?: { autoFix?: boolean }): string {
+    if (options?.autoFix) {
+      return this.heal(agentCtx);
+    }
     const wsId = workspaceId(agentCtx.workspaceId);
     const report = auditMemoryHealth(this.db, { workspaceId: wsId });
     const lines = [
@@ -514,11 +517,35 @@ export class MemoryTools {
   }
 
   /**
+   * 11.5 heal (一键智能自愈修复：FTS5 重建 + 本地向量回填 + 冗余去重 + 矛盾消解)
+   */
+  public heal(agentCtx: { workspaceId: string }): string {
+    const wsId = workspaceId(agentCtx.workspaceId);
+    const res = autoHealMemoryHealth(this.db, { workspaceId: wsId });
+    return [
+      `[Memory Auto-Heal Completed] Score: ${res.beforeScore} -> ${res.afterScore}/100 (Grade ${res.afterGrade})`,
+      `Actions: ftsRebuilt=${res.ftsRebuilt}, embeddingsBackfilled=${res.embeddingsBackfilled}, duplicatesMerged=${res.duplicatesMerged}, contradictionsResolved=${res.contradictionsResolved}`,
+    ].join('\n');
+  }
+
+  /**
    * 12. 统一 memory 工具接口 (汲取自 LZMW/dsh-memory 单工具设计，节省提示词上下文)
    */
   public unified(
     params: {
-      action: 'search' | 'expand' | 'note' | 'feedback' | 'confirm' | 'merge' | 'core_read' | 'core_set' | 'core_append' | 'reconcile' | 'doctor';
+      action:
+        | 'search'
+        | 'expand'
+        | 'note'
+        | 'feedback'
+        | 'confirm'
+        | 'merge'
+        | 'core_read'
+        | 'core_set'
+        | 'core_append'
+        | 'reconcile'
+        | 'doctor'
+        | 'heal';
       query?: string;
       id?: string;
       sourceId?: string;
@@ -572,8 +599,10 @@ export class MemoryTools {
         return this.reconcile({ content: params.content || '', type: params.kind || 'semantic', slotKey: params.slotKey }, agentCtx);
       case 'doctor':
         return this.doctor(agentCtx);
+      case 'heal':
+        return this.heal(agentCtx);
       default:
-        return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor`;
+        return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal`;
     }
   }
 }

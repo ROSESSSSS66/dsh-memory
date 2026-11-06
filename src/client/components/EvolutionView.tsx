@@ -57,11 +57,17 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
   // Action states
   const [isEvolving, setIsEvolving] = React.useState(false);
   const [isMaintaining, setIsMaintaining] = React.useState(false);
+  const [isHealing, setIsHealing] = React.useState(false);
+  const [isConsolidating, setIsConsolidating] = React.useState(false);
   const [isDistilling, setIsDistilling] = React.useState(false);
   const [isBackfilling, setIsBackfilling] = React.useState(false);
   const [backfillResult, setBackfillResult] = React.useState<{
     dryRun: boolean;
     stats: BackfillStatsUI;
+  } | null>(null);
+  const [taskFeedback, setTaskFeedback] = React.useState<{
+    tone: 'ok' | 'warn' | 'err';
+    text: string;
   } | null>(null);
 
   const [evalSuiteName, setEvalSuiteName] = React.useState('all');
@@ -167,15 +173,67 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
       const res = await performAction('maintain');
       const st = res?.stats;
       const summary = st
-        ? `归档冷记忆 ${st.archivedCold} 条，自动置顶 ${st.autoPinned} 条${st.ftsRebuilt ? '，已重建 FTS5' : ''}`
+        ? `归档冷记忆 ${st.archivedCold} 条，自动置顶 ${st.autoPinned} 条${
+            st.embeddingsBackfilled ? `，回填向量 ${st.embeddingsBackfilled} 条` : ''
+          }${st.ftsRebuilt ? '，已重建 FTS5' : ''}`
         : '冷记忆归档、过期候选清理、自动置顶与 FTS5 索引校验已就绪';
-      onToast(`离线维护完成：${summary}！`);
+      const msg = `离线维护完成：${summary}！`;
+      setTaskFeedback({ tone: 'ok', text: msg });
+      onToast(msg);
       await loadEvolution();
       onUpdated();
     } catch (err: any) {
-      onToast(err?.message || '维护执行失败');
+      const msg = err?.message || '维护执行失败';
+      setTaskFeedback({ tone: 'err', text: msg });
+      onToast(msg);
     } finally {
       setIsMaintaining(false);
+    }
+  };
+
+  const handleAutoHeal = async () => {
+    setIsHealing(true);
+    try {
+      const res = await performAction('heal');
+      const h = res?.heal;
+      if (h) {
+        if (h.report || h.health) setHealth(h.report || h.health);
+        const msg = `一键自愈完成：合并重复 ${h.duplicatesMerged} 对，消解矛盾 ${h.contradictionsResolved} 组，回填向量 ${h.embeddingsBackfilled} 条 (健康分 ${h.beforeScore} → ${h.afterScore} · ${h.afterGrade})`;
+        setTaskFeedback({ tone: 'ok', text: msg });
+        onToast(msg);
+      } else {
+        setTaskFeedback({ tone: 'ok', text: '记忆库一键自愈已完成！' });
+        onToast('记忆库一键自愈已完成！');
+      }
+      await loadEvolution();
+      onUpdated();
+    } catch (err: any) {
+      const msg = err?.message || '自愈执行失败';
+      setTaskFeedback({ tone: 'err', text: msg });
+      onToast(msg);
+    } finally {
+      setIsHealing(false);
+    }
+  };
+
+  const handleConsolidateNow = async () => {
+    setIsConsolidating(true);
+    try {
+      const res = await performAction('consolidate');
+      const msg =
+        res?.clustersFound > 0
+          ? `记忆聚类巩固完成：发现 ${res.clustersFound} 个高价值簇，提炼 ${res.consolidated} 条程序性规则候选！`
+          : '暂无满足跨 3 个独立会话正反馈条件的记忆簇可巩固';
+      setTaskFeedback({ tone: res?.clustersFound > 0 ? 'ok' : 'warn', text: msg });
+      onToast(msg);
+      await loadEvolution();
+      onUpdated();
+    } catch (err: any) {
+      const msg = err?.message || '聚类巩固执行失败';
+      setTaskFeedback({ tone: 'err', text: msg });
+      onToast(msg);
+    } finally {
+      setIsConsolidating(false);
     }
   };
 
@@ -185,14 +243,20 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
       const res = await performAction('distill');
       const r = res?.result;
       if (r?.success) {
-        onToast(`会话蒸馏完成：处理 ${r.eventsProcessed} 条事件，新增 ${r.candidatesInserted} 条记忆！`);
+        const msg = `会话蒸馏完成：处理 ${r.eventsProcessed} 条事件，新增 ${r.candidatesInserted} 条记忆！`;
+        setTaskFeedback({ tone: 'ok', text: msg });
+        onToast(msg);
       } else {
-        onToast(`会话蒸馏提示：${r?.error || '暂无满足蒸馏条件的未处理事件或离线权限未开启'}`);
+        const msg = `会话蒸馏提示：${r?.error || '暂无满足蒸馏条件的未处理事件或离线权限未开启'}`;
+        setTaskFeedback({ tone: 'warn', text: msg });
+        onToast(msg);
       }
       await loadEvolution();
       onUpdated();
     } catch (err: any) {
-      onToast(err?.message || '触发会话蒸馏失败');
+      const msg = err?.message || '触发会话蒸馏失败';
+      setTaskFeedback({ tone: 'err', text: msg });
+      onToast(msg);
     } finally {
       setIsDistilling(false);
     }
@@ -276,21 +340,41 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
                   <span className="dshm-tag dshm-tag-scope">
                     FTS5 {health.ftsConsistent ? '索引一致' : '需重建'} ({health.ftsCount})
                   </span>
+                  {health.embeddingsReadyCount !== undefined && (
+                    <span className="dshm-tag dshm-tag-preference">
+                      128D 向量已就绪 {health.embeddingsReadyCount}
+                      {health.missingEmbeddingsCount ? ` (待补 ${health.missingEmbeddingsCount})` : ' ✓'}
+                    </span>
+                  )}
                 </div>
                 <p className="dshm-evo-subtitle">
-                  自动巡检同作用域槽位冲突、Jaccard 高相似冗余记忆对、未消解的显式矛盾与陈旧低效用记忆
+                  自动巡检同作用域槽位冲突、128D 语义与词汇高相似冗余对、未消解矛盾与陈旧低效用记忆
                 </p>
               </div>
             </div>
-            <GlassButton
-              type="button"
-              variant={variant}
-              className="dshm-btn dshm-btn-secondary"
-              onClick={loadEvolution}
-            >
-              <RefreshIcon size={13} />
-              <span>重新体检</span>
-            </GlassButton>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <GlassButton
+                type="button"
+                variant={variant}
+                intent="primary"
+                className="dshm-btn dshm-btn-primary"
+                disabled={isHealing}
+                onClick={handleAutoHeal}
+                title="一键修复 FTS5 索引、回填 128D 向量、合并重复记忆对并消解非冻结矛盾"
+              >
+                <ZapIcon size={13} />
+                <span>{isHealing ? '自愈修复中…' : '⚡ 一键智能自愈 (Auto-Heal)'}</span>
+              </GlassButton>
+              <GlassButton
+                type="button"
+                variant={variant}
+                className="dshm-btn dshm-btn-secondary"
+                onClick={loadEvolution}
+              >
+                <RefreshIcon size={13} />
+                <span>重新体检</span>
+              </GlassButton>
+            </div>
           </div>
 
           <div className="dshm-strat-kpis" style={{ marginBottom: 12 }}>
@@ -331,7 +415,11 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
                   <div className="dshm-proposal-top">
                     <div className="dshm-proposal-badges">
                       <span className="dshm-tag dshm-tag-procedure">
-                        {pair.reason === 'same_slot_key' ? '同槽位冲突' : '高重合冗余'}
+                        {pair.reason === 'same_slot_key'
+                          ? '同槽位冲突'
+                          : pair.reason === 'high_semantic_overlap'
+                          ? '128D 语义冗余'
+                          : '高重合冗余'}
                       </span>
                       <span className="dshm-tag dshm-tag-slot">
                         相似度 {(pair.similarity * 100).toFixed(0)}%
@@ -795,6 +883,17 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
               type="button"
               variant={variant}
               className="dshm-btn dshm-btn-secondary"
+              disabled={isConsolidating}
+              onClick={handleConsolidateNow}
+              title="将多次验证成功的相似情景/避坑记忆聚类巩固为程序性规则"
+            >
+              <span>{isConsolidating ? '聚类中…' : '🧩 立即聚类巩固'}</span>
+            </GlassButton>
+
+            <GlassButton
+              type="button"
+              variant={variant}
+              className="dshm-btn dshm-btn-secondary"
               disabled={isMaintaining}
               onClick={handleMaintain}
             >
@@ -802,6 +901,19 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
               <span>{isMaintaining ? '维护中…' : '执行离线清理与维护'}</span>
             </GlassButton>
           </div>
+
+          {taskFeedback && (
+            <div
+              className={`dshm-test-badge ${
+                taskFeedback.tone === 'err'
+                  ? 'dshm-test-badge-err'
+                  : 'dshm-test-badge-ok'
+              }`}
+              style={{ marginTop: 8 }}
+            >
+              <span>{taskFeedback.text}</span>
+            </div>
+          )}
 
           {backfillResult && (
             <div className="dshm-backfill-report">
@@ -859,19 +971,26 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({
           ) : (
             <div className="dshm-jobs-list">
               {recentJobs.slice(0, 6).map((j) => (
-                <div key={j.id} className="dshm-job-row">
-                  <div className="dshm-job-left">
-                    <span className="dshm-tag dshm-tag-slot">{j.kind}</span>
-                    <span className="dshm-job-key" title={j.key}>
-                      {j.key.length > 34 ? j.key.slice(0, 32) + '…' : j.key}
-                    </span>
+                <div key={j.id} className="dshm-job-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <div className="dshm-job-left">
+                      <span className="dshm-tag dshm-tag-slot">{j.kind}</span>
+                      <span className="dshm-job-key" title={j.key}>
+                        {j.key.length > 34 ? j.key.slice(0, 32) + '…' : j.key}
+                      </span>
+                    </div>
+                    <div className="dshm-job-right">
+                      <span className={`dshm-job-status is-${j.status}`}>{j.status}</span>
+                      <span className="dshm-job-time">
+                        {new Date(j.created_at).toLocaleTimeString()}
+                      </span>
+                    </div>
                   </div>
-                  <div className="dshm-job-right">
-                    <span className={`dshm-job-status is-${j.status}`}>{j.status}</span>
-                    <span className="dshm-job-time">
-                      {new Date(j.created_at).toLocaleTimeString()}
-                    </span>
-                  </div>
+                  {j.last_error && (
+                    <div className="dshm-text-danger" style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                      ⚠ 异常原因: {j.last_error}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { Db, MemoryRecord } from '../types.js';
-import { get, list, stats, sources, history, getGraphData, renderMermaidGraph } from '../core/store.js';
+import { get, list, stats, sources, history, getGraphData, getSubgraph, renderMermaidGraph } from '../core/store.js';
 import {
   approveCandidate,
   editContent,
@@ -27,7 +27,7 @@ import {
   renderCoreMemoryMarkdown,
 } from '../core/core-memory.js';
 import { reconcileAndUpsert } from '../evolution/reconciler.js';
-import { auditMemoryHealth } from '../core/health.js';
+import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
 import { workspaceId } from '../core/scope.js';
 import { redactSecrets } from '../core/privacy.js';
 import { runBackfill } from '../ingest/backfill.js';
@@ -99,19 +99,22 @@ export class MemoryCommands {
   }
 
   /**
-   * /memory doctor (记忆库健康度体检与冲突医生)
+   * /memory doctor [--fix] (记忆库健康度体检与冲突医生)
    */
-  public doctor(ctx: CommandContext): string {
+  public doctor(ctx: CommandContext, autoFix: boolean = false): string {
+    if (autoFix) {
+      return this.heal(ctx);
+    }
     const wsId = workspaceId(ctx.workspaceId);
     const report = auditMemoryHealth(this.db, { workspaceId: wsId });
     const lines = [
       `🩺 记忆库健康度体检报告：${report.score}/100 (等级 ${report.grade})`,
       `状态分布：active ${report.counts.active} · candidate ${report.counts.candidate} · frozen ${report.counts.frozen} · superseded ${report.counts.superseded} · archived ${report.counts.archived} (置顶 ${report.counts.pinned})`,
-      `FTS5 索引：${report.ftsConsistent ? '一致 (OK)' : '不一致 (需重建)'} (${report.ftsCount} 行)`,
+      `FTS5 索引：${report.ftsConsistent ? '一致 (OK)' : '不一致 (需重建)'} (${report.ftsCount} 行) | 向量索引：${report.embeddingsReadyCount ?? 0} 已就绪 / ${report.missingEmbeddingsCount ?? 0} 待回填`,
       `冗余/同槽位冲突对：${report.duplicatePairs.length} 对 | 活跃矛盾关系：${report.contradictions.length} 组 | 陈旧低效用记忆：${report.staleMemories.length} 条`,
     ];
     if (report.duplicatePairs.length > 0) {
-      lines.push('待去重记忆对 (可执行 /memory merge <src> <tgt>):');
+      lines.push('待去重记忆对 (可执行 /memory merge <src> <tgt> 或 /memory heal 一键自愈):');
       for (const pair of report.duplicatePairs.slice(0, 5)) {
         lines.push(
           `  - ${pair.sourceId} -> ${pair.targetId} (相似度 ${pair.similarity}, 原因: ${pair.reason})`
@@ -125,6 +128,18 @@ export class MemoryCommands {
       }
     }
     return lines.join('\n');
+  }
+
+  /**
+   * /memory heal (一键智能自愈修复：FTS5 重建 + 本地向量回填 + 冗余去重 + 矛盾消解)
+   */
+  public heal(ctx: CommandContext): string {
+    const wsId = workspaceId(ctx.workspaceId);
+    const res = autoHealMemoryHealth(this.db, { workspaceId: wsId });
+    return [
+      `⚡ 记忆库一键智能自愈完成：健康分 ${res.beforeScore} -> ${res.afterScore}/100 (等级 ${res.afterGrade})`,
+      `修复明细：FTS5 重建=${res.ftsRebuilt ? '是' : '否'} · 本地向量回填=${res.embeddingsBackfilled} 条 · 合并冗余对=${res.duplicatesMerged} 对 · 消解矛盾链=${res.contradictionsResolved} 组`,
+    ].join('\n');
   }
 
   /**
@@ -279,11 +294,24 @@ export class MemoryCommands {
   }
 
   /**
-   * /memory graph [limit] (汲取自 qwert702/dsh-memory Obsidian 拓扑图)
+   * /memory graph [limitOrId] (支持全库拓扑与单节点 K-Hop 局部子图)
    */
-  public graph(limitStr?: string, ctx?: CommandContext): string {
+  public graph(argStr?: string, ctx?: CommandContext): string {
     const wsId = ctx ? workspaceId(ctx.workspaceId) : undefined;
-    const limit = limitStr ? parseInt(limitStr, 10) : 30;
+    const rawArg = (argStr || '').trim();
+    if (rawArg && (rawArg.startsWith('m_') || isNaN(parseInt(rawArg, 10)))) {
+      const subGraph = getSubgraph(this.db, rawArg, { workspaceId: wsId, hops: 2, maxNodes: 25 });
+      if (subGraph.nodes.length === 0) {
+        return `Memory '${rawArg}' not found in current scope.`;
+      }
+      const mermaid = renderMermaidGraph(subGraph, 25);
+      return [
+        `🕸️ 记忆节点 ${rawArg} 的局部拓扑子图 (共 ${subGraph.stats.totalNodes} 节点: ${subGraph.stats.memoryNodes} 记忆 / ${subGraph.stats.entityNodes} 实体，${subGraph.stats.totalLinks} 条关联关系):`,
+        '',
+        mermaid,
+      ].join('\n');
+    }
+    const limit = rawArg ? parseInt(rawArg, 10) : 30;
     const gData = getGraphData(this.db, { workspaceId: wsId, limit: isNaN(limit) ? 30 : limit });
     const mermaid = renderMermaidGraph(gData, 25);
 
@@ -495,7 +523,7 @@ export class MemoryCommands {
     if (!trimmed || trimmed === 'help') {
       return {
         kind: 'success',
-        text: 'Available commands: stats | doctor | inspect <id> | list | confirm <id> | merge <src> <tgt> | restore <id> | graph [limit] | export-md <dir> | import-md <dir> | migrate <format> <path> | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
+        text: 'Available commands: stats | doctor [--fix] | heal | inspect <id> | list | confirm <id> | merge <src> <tgt> | restore <id> | graph [limit|<id>] | export-md <dir> | import-md <dir> | migrate <format> <path> | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
       };
     }
 
@@ -505,10 +533,12 @@ export class MemoryCommands {
 
     try {
       let output = '';
-      if (sub === 'stats') {
+      if (sub === 'stats' || sub === 'status') {
         output = this.stats(ctx);
       } else if (sub === 'doctor' || sub === 'health') {
-        output = this.doctor(ctx);
+        output = this.doctor(ctx, rest.includes('--fix') || rest.includes('fix'));
+      } else if (sub === 'heal') {
+        output = this.heal(ctx);
       } else if (sub === 'inspect') {
         output = this.inspect(rest[0], ctx);
       } else if (sub === 'history') {

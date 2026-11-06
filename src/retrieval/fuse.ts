@@ -5,7 +5,7 @@ import type {
   StrategyConfig,
   MemoryType,
 } from '../types.js';
-import type { Candidate } from './channels.js';
+import type { Candidate, AssociativeNeighbor } from './channels.js';
 import { tokenSet } from '../core/text.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
@@ -48,6 +48,8 @@ export interface ScoredCandidate {
   score: number;
   relevance: number;
   fusedRrf: number;
+  graphExpanded?: boolean;
+  synergyBoosted?: boolean;
 }
 
 /**
@@ -76,7 +78,8 @@ export function fuseCandidates(
   contradictionsSet: Set<string>,
   strategy: StrategyConfig = DEFAULT_STRATEGY,
   cfg: PluginConfig = DEFAULTS,
-  now: number = Date.now()
+  now: number = Date.now(),
+  associativeNeighbors: AssociativeNeighbor[] = []
 ): ScoredCandidate[] {
   // 1. 汇总所有召回的 ID 与各通道排名
   const memoryChannels = new Map<string, Map<ChannelName, number>>();
@@ -192,6 +195,65 @@ export function fuseCandidates(
     return [];
   }
 
+  // 2.5 GraphRAG 一跳关联扩展与关系协同检测 (仅在已有种子通过绝对相关性硬门槛时触发)
+  const gatedSet = new Set(gatedMemoryIds);
+  const graphExpandedIds = new Set<string>();
+  const graphBonusRrf = new Map<string, number>();
+  const synergySet = new Set<string>();
+
+  if (associativeNeighbors.length > 0 && (plan.contentTokens.length > 0 || plan.entities.length > 0)) {
+    for (const edge of associativeNeighbors) {
+      if (!gatedSet.has(edge.seedId)) continue;
+      if (contradictionsSet.has(edge.neighborId)) continue;
+
+      if (gatedSet.has(edge.neighborId)) {
+        // 两条通过硬门槛的候选之间存在 related / derived_from 关系 -> 触发关系协同增益
+        synergySet.add(edge.seedId);
+        synergySet.add(edge.neighborId);
+        continue;
+      }
+
+      if (edge.seedRank > 4) continue;
+      const nMem = memoriesMap.get(edge.neighborId);
+      if (!nMem) continue;
+      if (nMem.status !== 'active' && nMem.status !== 'frozen') continue;
+      if (nMem.type === 'meta') continue;
+
+      // 校验一跳邻居与当前查询存在词汇或实体锚点关联 (防止无关漂移)
+      const nTokens = tokenSet(`${nMem.content} ${nMem.summary}`);
+      let hasTokenOverlap = false;
+      for (const ct of plan.contentTokens) {
+        if (nTokens.has(ct)) {
+          hasTokenOverlap = true;
+          break;
+        }
+      }
+      if (!hasTokenOverlap && plan.entities.length > 0) {
+        const nEnts = memoryEntitiesMap.get(edge.neighborId);
+        for (const ent of plan.entities) {
+          const lowerEnt = ent.toLowerCase().trim();
+          if (nEnts?.has(lowerEnt) || (lowerEnt.length >= 2 && nMem.content.toLowerCase().includes(lowerEnt))) {
+            hasTokenOverlap = true;
+            break;
+          }
+        }
+      }
+
+      if (hasTokenOverlap) {
+        gatedSet.add(edge.neighborId);
+        gatedMemoryIds.push(edge.neighborId);
+        graphExpandedIds.add(edge.neighborId);
+        synergySet.add(edge.seedId);
+        synergySet.add(edge.neighborId);
+        const rrfContrib = 0.65 / (strategy.rrfK + edge.seedRank + 2);
+        graphBonusRrf.set(
+          edge.neighborId,
+          Math.max(graphBonusRrf.get(edge.neighborId) || 0, rrfContrib)
+        );
+      }
+    }
+  }
+
   // 3. 第二步：加权 RRF 融合
   // fused(m) = Σ_c W[c] / (K + rank_c(m))
   const fusedMap = new Map<string, number>();
@@ -199,7 +261,7 @@ export function fuseCandidates(
 
   for (const id of gatedMemoryIds) {
     const chMap = memoryChannels.get(id);
-    let fused = 0;
+    let fused = graphBonusRrf.get(id) || 0;
     if (chMap) {
       for (const [chName, rank] of chMap.entries()) {
         const weight = strategy.channelWeights[chName] ?? 1.0;
@@ -248,20 +310,29 @@ export function fuseCandidates(
     const impWeight = weights.importance ?? 0;
     const importanceScore = ((mem.importance ?? 5) / 10.0);
 
-    const score =
+    // Relational Synergy Boost (同簇知识协同加成)
+    const isSynergy = synergySet.has(id) && !contradictionsSet.has(id);
+    const synergyBonus = isSynergy ? 0.035 : 0;
+
+    const rawScore =
       weights.relevance * relevance +
       weights.confidence * mem.confidence +
       weights.utility * mem.utility +
       weights.freshness * freshness +
       weights.consistency * consistency +
       weights.specificity * specificity +
-      impWeight * importanceScore;
+      impWeight * importanceScore +
+      synergyBonus;
+
+    const score = Math.min(1.0, rawScore);
 
     scoredList.push({
       memory: mem,
       score,
       relevance,
       fusedRrf: fused,
+      graphExpanded: graphExpandedIds.has(id),
+      synergyBoosted: isSynergy,
     });
   }
 

@@ -45,6 +45,11 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
   const [isMerging, setIsMerging] = React.useState(false);
   const [mergeTargetId, setMergeTargetId] = React.useState('');
 
+  // Add relation state
+  const [isAddingRelation, setIsAddingRelation] = React.useState(false);
+  const [relTargetId, setRelTargetId] = React.useState('');
+  const [relType, setRelType] = React.useState<'related' | 'derived_from' | 'supersedes' | 'contradicts'>('related');
+
   const loadDetail = React.useCallback(async (id: string) => {
     setLoading(true);
     setError('');
@@ -128,6 +133,28 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
       onMemoryUpdated?.();
     } catch (err: any) {
       setError(err?.message || '合并记忆失败');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleAddRelation = async () => {
+    if (!mem || !relTargetId.trim()) return;
+    setIsSaving(true);
+    setError('');
+    try {
+      await performAction('add-relation', {
+        fromId: mem.id,
+        toId: relTargetId.trim(),
+        rel: relType,
+      });
+      onToast?.(`已建立拓扑关联：${mem.id.slice(0, 8)} → (${relType}) → ${relTargetId.trim()}`);
+      setIsAddingRelation(false);
+      setRelTargetId('');
+      await loadDetail(mem.id);
+      onMemoryUpdated?.();
+    } catch (err: any) {
+      setError(err?.message || '建立拓扑关联失败');
     } finally {
       setIsSaving(false);
     }
@@ -492,9 +519,48 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
           )}
 
           {/* Relations / Connected Graph Nodes */}
-          {detail.relations && detail.relations.length > 0 && (
-            <div className="dshm-detail-section">
-              <h4>因果与拓扑关联 ({detail.relations.length} 条)</h4>
+          <div className="dshm-detail-section">
+            <div className="dshm-detail-section-header">
+              <h4>因果与拓扑关联 ({detail.relations?.length || 0} 条)</h4>
+              <GlassButton size="sm" onClick={() => setIsAddingRelation(!isAddingRelation)}>
+                <span>+ 建立拓扑关联</span>
+              </GlassButton>
+            </div>
+
+            {isAddingRelation && (
+              <div className="dshm-edit-panel" style={{ marginBottom: 10 }}>
+                <div className="dshm-edit-footer">
+                  <select
+                    className="dshm-form-select"
+                    style={{ maxWidth: 160 }}
+                    value={relType}
+                    onChange={(e) => setRelType(e.target.value as any)}
+                  >
+                    <option value="related">related (关联协同)</option>
+                    <option value="derived_from">derived_from (因果派生)</option>
+                    <option value="supersedes">supersedes (新旧替代)</option>
+                    <option value="contradicts">contradicts (显式矛盾)</option>
+                  </select>
+                  <GlassInput
+                    type="text"
+                    placeholder="输入目标记忆 ID 或短码 (如 mem_xxxx)"
+                    value={relTargetId}
+                    onChange={(e) => setRelTargetId(e.target.value)}
+                  />
+                  <GlassButton onClick={() => setIsAddingRelation(false)}>取消</GlassButton>
+                  <GlassButton
+                    intent="primary"
+                    disabled={!relTargetId.trim() || isSaving}
+                    onClick={handleAddRelation}
+                  >
+                    <CheckIcon size={13} />
+                    <span>保存关联</span>
+                  </GlassButton>
+                </div>
+              </div>
+            )}
+
+            {detail.relations && detail.relations.length > 0 ? (
               <div className="dshm-relation-pills">
                 {detail.relations.map((rel, i) => (
                   <button
@@ -511,8 +577,12 @@ export const MemoryDetailModal: React.FC<MemoryDetailModalProps> = ({
                   </button>
                 ))}
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="dshm-text-muted" style={{ fontSize: 12 }}>
+                暂无拓扑边，点击右上角“+ 建立拓扑关联”可开启 GraphRAG 1-Hop 激活扩散与协同增益。
+              </div>
+            )}
+          </div>
 
           {/* Version History with Rollback */}
           {detail.history && detail.history.length > 0 && (

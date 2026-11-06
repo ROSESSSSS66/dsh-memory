@@ -7,6 +7,8 @@ import {
   decodeEmbeddingBlob,
   cosineSimilarity,
   backfillMissingEmbeddings,
+  getOrComputeEmbedding,
+  clearRuntimeVectorCache,
   DEFAULT_LOCAL_VECTOR_DIM,
 } from '../../src/core/vector.js';
 import { upsertCandidate } from '../../src/core/writer.js';
@@ -75,5 +77,37 @@ describe('Local Feature-Hashing Vector Engine (src/core/vector.ts)', () => {
     expect(hits[0].id).toBe((res1 as any).id);
     expect(hits[0].channel).toBe('vector');
     expect(hits[0].similarity).toBeGreaterThanOrEqual(0.65);
+  });
+
+  it('recalls newly inserted memories immediately via in-memory LRU fallback before SQLite backfill', () => {
+    clearRuntimeVectorCache();
+    const res = upsertCandidate(db, {
+      type: 'procedural',
+      content: '排查 Kubernetes Pod OOMKilled 故障时先执行 kubectl describe pod 查看退出码 137',
+      scope: 'workspace',
+      workspaceId: ws,
+      source_kind: 'user',
+      confidence: 0.95,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's2', seq: 1, kind: 'user' }],
+      actor: 'user',
+    });
+    const id = (res as any).id;
+
+    // Without calling backfillMissingEmbeddings, recallVector should still hit via getOrComputeEmbedding
+    const plan = buildQueryPlan({
+      userText: 'Kubernetes Pod OOMKilled kubectl describe pod 退出码 137',
+    });
+    const hits = recallVector(db, plan, { workspaceId: ws, sessionId: 's2' });
+    expect(hits.some((h) => h.id === id)).toBe(true);
+
+    // And getOrComputeEmbedding should return a cached Float32Array
+    const vec = getOrComputeEmbedding({
+      id,
+      content: '排查 Kubernetes Pod OOMKilled 故障时先执行 kubectl describe pod 查看退出码 137',
+      embedding: null,
+    });
+    expect(vec).not.toBeNull();
+    expect(vec!.length).toBe(DEFAULT_LOCAL_VECTOR_DIM);
   });
 });

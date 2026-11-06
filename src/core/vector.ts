@@ -117,6 +117,50 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return dot / Math.sqrt(normA * normB);
 }
 
+const MAX_RUNTIME_VECTOR_CACHE = 4096;
+const runtimeVectorCache = new Map<string, Float32Array>();
+
+export function clearRuntimeVectorCache(): void {
+  runtimeVectorCache.clear();
+}
+
+/**
+ * 获取或在线计算记忆的 128 维本地向量（支持外部缓存、SQLite BLOB 解码与内存 LRU 即时回退）
+ */
+export function getOrComputeEmbedding(
+  row: {
+    id: string;
+    summary?: string | null;
+    content?: string | null;
+    slot_key?: string | null;
+    hash?: string | null;
+    embedding?: Uint8Array | Buffer | null;
+  },
+  externalCache?: Map<string, Float32Array>,
+  dim: number = DEFAULT_LOCAL_VECTOR_DIM
+): Float32Array | null {
+  const cachedExt = externalCache?.get(row.id);
+  if (cachedExt) return cachedExt;
+
+  const decoded = decodeEmbeddingBlob(row.embedding, dim);
+  if (decoded) return decoded;
+
+  const text = `${row.summary || ''}\n${row.content || ''}${row.slot_key ? `\n${row.slot_key}` : ''}`.trim();
+  if (!text) return null;
+
+  const cacheKey = `${row.id}:${row.hash || text.length}`;
+  const cachedRt = runtimeVectorCache.get(cacheKey);
+  if (cachedRt) return cachedRt;
+
+  const computed = computeLocalEmbedding(text, dim);
+  if (runtimeVectorCache.size >= MAX_RUNTIME_VECTOR_CACHE) {
+    const oldestKey = runtimeVectorCache.keys().next().value;
+    if (oldestKey) runtimeVectorCache.delete(oldestKey);
+  }
+  runtimeVectorCache.set(cacheKey, computed);
+  return computed;
+}
+
 /**
  * 为尚未生成 embedding 的记忆补充本地特征哈希向量
  */
