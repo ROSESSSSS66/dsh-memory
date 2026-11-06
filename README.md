@@ -14,25 +14,24 @@
 > **专为 DeepSeek Desktop (DSH) 打造的轻量级、自进化长期记忆引擎。**  
 > 告别跨会话遗忘与提示词无限膨胀，兼顾极致的在线性能与全自主的离线知识提炼进化。
 
-<p align="center">
-  <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/⚡_推荐_API_中转-DoroDoro_AI-8B5CF6?style=for-the-badge&logo=openai&logoColor=white" alt="DoroDoro AI" />
-    <img src="https://img.shields.io/badge/服务-企业级聚合网关-2563EB?style=for-the-badge" alt="Gateway" />
-    <img src="https://img.shields.io/badge/协议-100%25_OpenAI_兼容-10B981?style=for-the-badge" alt="Compatibility" />
-    <img src="https://img.shields.io/badge/官网-www.dorodoro.xyz-F59E0B?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Website" />
-  </a>
-</p>
+<table align="center" width="100%">
+  <tr>
+    <td align="center" width="26%">
+      <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer">
+        <img src="assets/dorodoro-logo.jpg" width="80" height="80" style="border-radius: 50%;" alt="DoroDoro AI Logo" /><br>
+        <b>DoroDoro AI</b>
+      </a>
+    </td>
+    <td>
+      <b>开发者专属高性能大模型聚合中转服务</b><br>
+      • <b>全品类模型矩阵</b>：聚合全球主流商业与开源旗舰大模型，海量算力一站直达；<br>
+      • <b>稳定可靠接入</b>：支持高并发调度，保障各类工具流畅调用；<br>
+      • <b>零门槛接入</b>：标准 OpenAI 协议平替，完美适配各类 AI 编程工具与智能体离线演化。<br>
+      👉 <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer"><b>[🔗 立即直达官网体验 ↗]</b></a>
+    </td>
+  </tr>
+</table>
 
-> [!TIP]
-> ### <a href="https://www.dorodoro.xyz" target="_blank"><img src="assets/dorodoro-logo.jpg" width="36" height="36" style="border-radius: 50%; vertical-align: middle;" alt="DoroDoro Logo" /></a> 开发者推荐服务商 · [DoroDoro AI 中转站](https://www.dorodoro.xyz) (API Gateway)
-> 
-> **企业级大模型聚合网关，为 AI 智能体与开发者提供极速稳定的算力基座：**
-> 
-> 🌐 **官网直达**：**[www.dorodoro.xyz](https://www.dorodoro.xyz)**
-> 
-> - ⚡ **全品类大模型聚合**：一站式接入全球主流商业与开源旗舰大模型，海量算力即开即用
-> - 🚀 **原生协议 100% 兼容**：标准 OpenAI 格式无缝平替，仅需替换 `Base URL`，零配置驱动各类 AI 客户端及本记忆引擎
-> - 🎁 **开箱即用**：按量计费透明无套路，注册即可畅享极速体验
 
 ---
 
@@ -298,29 +297,6 @@ npm run eval
 1. **零外部服务阻断风险**：在线路径与外部网络彻底解耦。即使第三方 LLM API 故障、网络离线，DSH 的交互流畅度完全不受影响。
 2. **锁竞争与异常自愈**：数据库临时被外部进程占用或异常时，插件启动自动优雅降级，保障 DSH 正常对话，绝不产生非预期闪退。
 3. **因果与事实版本化**：每条记忆的修订严格保持单向因果链（`supersedes`），旧版事实自动沉淀为历史节点，提供完整的时间线可解释性。
-
----
-
-## 🤝 特别赞助与合作伙伴 (Sponsors)
-
-<table align="center" width="100%">
-  <tr>
-    <td align="center" width="28%">
-      <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer">
-        <img src="assets/dorodoro-logo.jpg" width="80" height="80" style="border-radius: 50%;" alt="DoroDoro AI Logo" /><br>
-        <b>DoroDoro AI</b><br>
-        <sub><code>www.dorodoro.xyz</code></sub>
-      </a>
-    </td>
-    <td>
-      <b>开发者专属高性能大模型聚合中转服务</b><br>
-      • <b>全品类模型矩阵</b>：聚合全球主流商业与开源旗舰大模型，海量算力一站直达；<br>
-      • <b>稳定可靠接入</b>：支持高并发调度，保障各类工具流畅调用；<br>
-      • <b>零门槛接入</b>：标准 OpenAI 协议平替，完美适配各类 AI 编程工具与智能体离线演化。<br>
-      👉 <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer"><b>[🔗 立即直达官网体验 ↗]</b></a>
-    </td>
-  </tr>
-</table>
 
 ## 🤝 贡献与分支规范
 
