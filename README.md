@@ -24,7 +24,7 @@
 </p>
 
 > [!TIP]
-> ### 🚀 开发者推荐服务商 · [DoroDoro AI 中转站](https://www.dorodoro.xyz) (API Gateway)
+> ### <a href="https://www.dorodoro.xyz" target="_blank"><img src="assets/dorodoro-logo.jpg" width="36" height="36" style="border-radius: 50%; vertical-align: middle;" alt="DoroDoro Logo" /></a> 开发者推荐服务商 · [DoroDoro AI 中转站](https://www.dorodoro.xyz) (API Gateway)
 > 
 > **企业级大模型聚合网关，为 AI 智能体与开发者提供极速稳定的算力基座：**
 > 
@@ -309,8 +309,9 @@ npm run eval
   <tr>
     <td align="center" width="28%">
       <a href="https://www.dorodoro.xyz" target="_blank" rel="noopener noreferrer">
-        <img src="https://img.shields.io/badge/⚡_DoroDoro_AI-中转API平台-8B5CF6?style=for-the-badge&logo=openai&logoColor=white" alt="DoroDoro AI" /><br><br>
-        <b>www.dorodoro.xyz</b>
+        <img src="assets/dorodoro-logo.jpg" width="80" height="80" style="border-radius: 50%;" alt="DoroDoro AI Logo" /><br>
+        <b>DoroDoro AI</b><br>
+        <sub><code>www.dorodoro.xyz</code></sub>
       </a>
     </td>
     <td>
