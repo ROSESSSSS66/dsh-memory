@@ -28,6 +28,7 @@ export interface MemoryStats {
   byType: Record<string, number>;
   avgConfidence: number;
   avgUtility: number;
+  pinnedCount?: number;
 }
 
 /**
@@ -154,25 +155,35 @@ export function sources(db: Db, id: string, contentRev?: number): MemorySource[]
  * 统计概况
  */
 export function stats(db: Db, workspaceIdFilter?: string): MemoryStats {
-  let baseSql = 'SELECT status, type, confidence, utility FROM memories';
+  let baseSql = 'SELECT status, type, confidence, utility, pinned FROM memories';
   const params: unknown[] = [];
   if (workspaceIdFilter) {
     baseSql += ' WHERE workspace_id = ? OR workspace_id IS NULL';
     params.push(workspaceIdFilter);
   }
 
-  const rows = db.all<{ status: string; type: string; confidence: number; utility: number }>(baseSql, params);
+  const rows = db.all<{
+    status: string;
+    type: string;
+    confidence: number;
+    utility: number;
+    pinned: number;
+  }>(baseSql, params);
 
   const byStatus: Record<string, number> = {};
   const byType: Record<string, number> = {};
   let totalConf = 0;
   let totalUtil = 0;
+  let pinnedCount = 0;
 
   for (const r of rows) {
     byStatus[r.status] = (byStatus[r.status] || 0) + 1;
     byType[r.type] = (byType[r.type] || 0) + 1;
     totalConf += r.confidence;
     totalUtil += r.utility;
+    if (r.pinned && (r.status === 'active' || r.status === 'frozen')) {
+      pinnedCount++;
+    }
   }
 
   const total = rows.length;
@@ -182,6 +193,7 @@ export function stats(db: Db, workspaceIdFilter?: string): MemoryStats {
     byType,
     avgConfidence: total > 0 ? totalConf / total : 0,
     avgUtility: total > 0 ? totalUtil / total : 0,
+    pinnedCount,
   };
 }
 

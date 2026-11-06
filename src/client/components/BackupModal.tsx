@@ -1,6 +1,7 @@
 import * as React from 'react';
-import { CloseIcon, DownloadIcon, UploadIcon, CopyIcon, CheckIcon } from './Icons.js';
+import { DownloadIcon, UploadIcon, CopyIcon } from './Icons.js';
 import { exportMemories, importMemories } from '../api.js';
+import { GlassModal, GlassButton, GlassCard } from './GlassUI.js';
 
 interface BackupModalProps {
   isOpen: boolean;
@@ -16,7 +17,6 @@ export const BackupModal: React.FC<BackupModalProps> = ({
   onSuccess,
 }) => {
   const [tab, setTab] = React.useState<'export' | 'import'>('export');
-  const [exportFormat, setExportFormat] = React.useState<'json' | 'markdown'>('json');
   const [isExporting, setIsExporting] = React.useState(false);
   const [importText, setImportText] = React.useState('');
   const [isImporting, setIsImporting] = React.useState(false);
@@ -79,7 +79,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({
     setError('');
     setIsImporting(true);
     try {
-      let parsed = JSON.parse(importText.trim());
+      const parsed = JSON.parse(importText.trim());
       let items: any[] = [];
       if (Array.isArray(parsed)) {
         items = parsed;
@@ -115,16 +115,11 @@ export const BackupModal: React.FC<BackupModalProps> = ({
   };
 
   return (
-    <div className="dshm-modal-backdrop" onClick={onClose}>
-      <div className="dshm-modal" style={{ maxWidth: 580 }} onClick={(e) => e.stopPropagation()}>
-        <div className="dshm-modal-header">
-          <h2 className="dshm-modal-title">记忆库备份与导入导出</h2>
-          <button type="button" className="dshm-action-btn" onClick={onClose} title="关闭">
-            <CloseIcon size={14} />
-          </button>
-        </div>
-
-        {/* Tab switch */}
+    <GlassModal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="记忆库备份与导入导出"
+      subHeader={
         <div className="dshm-modal-tabs">
           <button
             type="button"
@@ -149,129 +144,99 @@ export const BackupModal: React.FC<BackupModalProps> = ({
             <span>导入恢复</span>
           </button>
         </div>
+      }
+    >
+      {error && <div className="dshm-alert-error">{error}</div>}
 
-        <div className="dshm-modal-body">
-          {error && (
-            <div
-              style={{
-                padding: '10px 14px',
-                borderRadius: 6,
-                background: 'rgba(239, 68, 68, 0.15)',
-                color: '#f87171',
-                fontSize: 13,
-                marginBottom: 12,
-              }}
+      {tab === 'export' ? (
+        <div className="dshm-backup-stack">
+          <p className="dshm-backup-desc">
+            您可以将当前的完整长期记忆库导出为离线文件，便于跨工作区迁移、本地备份或同步至知识管理软件（如 Obsidian / Logseq）。
+          </p>
+
+          <div className="dshm-export-grid">
+            <GlassCard
+              className="dshm-export-card"
+              onClick={() => handleDownload('json')}
             >
-              {error}
-            </div>
-          )}
-
-          {tab === 'export' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              <p style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.5 }}>
-                您可以将当前的完整长期记忆库导出为离线文件，便于跨工作区迁移、本地备份或同步至知识管理软件（如 Obsidian / Logseq）。
-              </p>
-
-              <div className="dshm-export-grid">
-                <div
-                  className="dshm-export-card"
-                  onClick={() => handleDownload('json')}
-                  style={{ cursor: isExporting ? 'wait' : 'pointer' }}
-                >
-                  <div className="dshm-export-card-icon dshm-icon-blue">
-                    <DownloadIcon size={20} />
-                  </div>
-                  <div className="dshm-export-card-info">
-                    <h4>导出 JSON 备份</h4>
-                    <p>包含完整元数据、置信度、版本快照与因果关系图</p>
-                  </div>
-                </div>
-
-                <div
-                  className="dshm-export-card"
-                  onClick={() => handleDownload('markdown')}
-                  style={{ cursor: isExporting ? 'wait' : 'pointer' }}
-                >
-                  <div className="dshm-export-card-icon dshm-icon-emerald">
-                    <DownloadIcon size={20} />
-                  </div>
-                  <div className="dshm-export-card-info">
-                    <h4>导出 Markdown 知识库</h4>
-                    <p>带 YAML Frontmatter，兼容 Obsidian 与 Memory Bank 格式</p>
-                  </div>
-                </div>
+              <div className="dshm-export-card-icon dshm-icon-blue">
+                <DownloadIcon size={20} />
               </div>
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 6 }}>
-                <button
-                  type="button"
-                  className="dshm-btn dshm-btn-secondary"
-                  onClick={handleCopyJson}
-                  disabled={isExporting}
-                >
-                  <CopyIcon size={13} />
-                  <span>复制 JSON 到剪贴板</span>
-                </button>
+              <div className="dshm-export-card-info">
+                <h4>导出 JSON 备份</h4>
+                <p>包含完整元数据、置信度、版本快照与因果关系图</p>
               </div>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <p style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.5 }}>
-                上传先前导出的 JSON 文件，或直接将 JSON 格式记忆列表粘贴至下方文本框进行合并导入。
-              </p>
+            </GlassCard>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <label className="dshm-btn dshm-btn-secondary" style={{ cursor: 'pointer' }}>
-                  <UploadIcon size={13} />
-                  <span>选择本地 JSON 文件</span>
-                  <input
-                    type="file"
-                    accept=".json"
-                    style={{ display: 'none' }}
-                    onChange={handleFileChange}
-                  />
-                </label>
-                {importText && (
-                  <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
-                    已加载 {importText.length} 字符
-                  </span>
-                )}
+            <GlassCard
+              className="dshm-export-card"
+              onClick={() => handleDownload('markdown')}
+            >
+              <div className="dshm-export-card-icon dshm-icon-emerald">
+                <DownloadIcon size={20} />
               </div>
+              <div className="dshm-export-card-info">
+                <h4>导出 Markdown 知识库</h4>
+                <p>带 YAML Frontmatter，兼容 Obsidian 与 Memory Bank 格式</p>
+              </div>
+            </GlassCard>
+          </div>
 
-              <div className="dshm-form-group">
-                <label className="dshm-form-label">粘贴 JSON 数组或对象</label>
-                <textarea
-                  className="dshm-form-textarea"
-                  rows={6}
-                  placeholder='[ { "content": "记忆内容...", "type": "preference" } ]'
-                  value={importText}
-                  onChange={(e) => setImportText(e.target.value)}
-                  style={{ fontFamily: 'monospace', fontSize: 12 }}
-                />
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, paddingTop: 6 }}>
-                <button
-                  type="button"
-                  className="dshm-btn dshm-btn-secondary"
-                  onClick={onClose}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  className="dshm-btn dshm-btn-primary"
-                  onClick={handleImport}
-                  disabled={isImporting || !importText.trim()}
-                >
-                  <UploadIcon size={13} />
-                  <span>{isImporting ? '正在解析导入…' : '确认导入入库'}</span>
-                </button>
-              </div>
-            </div>
-          )}
+          <div className="dshm-backup-footer-right">
+            <GlassButton onClick={handleCopyJson} disabled={isExporting}>
+              <CopyIcon size={13} />
+              <span>复制 JSON 到剪贴板</span>
+            </GlassButton>
+          </div>
         </div>
-      </div>
-    </div>
+      ) : (
+        <div className="dshm-backup-stack">
+          <p className="dshm-backup-desc">
+            上传先前导出的 JSON 文件，或直接将 JSON 格式记忆列表粘贴至下方文本框进行合并导入。
+          </p>
+
+          <div className="dshm-backup-file-row">
+            <label className="dshm-btn dshm-btn-secondary glass-base glass-light glass-light-hover">
+              <UploadIcon size={13} />
+              <span>选择本地 JSON 文件</span>
+              <input
+                type="file"
+                accept=".json"
+                className="dshm-hidden-input"
+                onChange={handleFileChange}
+              />
+            </label>
+            {importText && (
+              <span className="dshm-form-hint">
+                已加载 {importText.length} 字符
+              </span>
+            )}
+          </div>
+
+          <div className="dshm-form-group">
+            <label className="dshm-form-label">粘贴 JSON 数组或对象</label>
+            <textarea
+              className="dshm-form-textarea is-mono"
+              rows={6}
+              placeholder='[ { "content": "记忆内容...", "type": "preference" } ]'
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+            />
+          </div>
+
+          <div className="dshm-backup-footer-right">
+            <GlassButton onClick={onClose}>取消</GlassButton>
+            <GlassButton
+              intent="primary"
+              onClick={handleImport}
+              disabled={isImporting || !importText.trim()}
+            >
+              <UploadIcon size={13} />
+              <span>{isImporting ? '正在解析导入…' : '确认导入入库'}</span>
+            </GlassButton>
+          </div>
+        </div>
+      )}
+    </GlassModal>
   );
 };

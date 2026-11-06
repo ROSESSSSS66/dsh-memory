@@ -470,4 +470,114 @@ describe('Web Server API & Sidebar Backend (web.ts)', () => {
     expect(impJson.ok).toBe(true);
     expect(impJson.imported).toBe(2);
   });
+
+  it('should handle /core-memory GET and POST (set & append) and status=pinned filter', async () => {
+    registerWebRoutes(mockCtx, db, DEFAULTS);
+
+    const sendReq = async (method: string, url: string, body?: any) => {
+      let out = '';
+      const req: any = {
+        method,
+        url,
+        on: (ev: string, cb: any) => {
+          if (ev === 'data' && body !== undefined) {
+            cb(Buffer.from(JSON.stringify(body)));
+          }
+          if (ev === 'end') cb();
+        },
+      };
+      await registeredHandler(req, { writeHead: () => {}, end: (d: string) => { out = d; } });
+      return JSON.parse(out);
+    };
+
+    // 1. Set human core block
+    const setRes = await sendReq('POST', '/api/dsh-memory/core-memory', {
+      block: 'human',
+      content: 'Name: Alice, Role: Principal Architect',
+      mode: 'set',
+    });
+    expect(setRes.ok).toBe(true);
+    expect(setRes.block).toBe('human');
+
+    // 2. Append to human core block
+    const appRes = await sendReq('POST', '/api/dsh-memory/core-memory', {
+      block: 'human',
+      content: 'Timezone: UTC+8',
+      mode: 'append',
+    });
+    expect(appRes.ok).toBe(true);
+
+    // 3. GET /core-memory
+    const getCore = await sendReq('GET', '/api/dsh-memory/core-memory');
+    expect(getCore.ok).toBe(true);
+    expect(Array.isArray(getCore.blocks)).toBe(true);
+    const humanBlock = getCore.blocks.find((b: any) => b.block === 'human');
+    expect(humanBlock).toBeDefined();
+    expect(humanBlock.id).toBeTruthy();
+    expect(humanBlock.content).toContain('Principal Architect');
+    expect(humanBlock.content).toContain('Timezone: UTC+8');
+
+    // 4. Filter by status=pinned on /memories (core memory blocks are pinned by default)
+    const pinnedRes = await sendReq('GET', '/api/dsh-memory/memories?status=pinned');
+    expect(pinnedRes.ok).toBe(true);
+    expect(pinnedRes.total).toBeGreaterThanOrEqual(1);
+    expect(pinnedRes.items.every((m: any) => m.pinned === 1)).toBe(true);
+  });
+
+  it('should handle /evolution endpoint and strategy evolution actions', async () => {
+    registerWebRoutes(mockCtx, db, DEFAULTS);
+
+    const sendReq = async (method: string, url: string, body?: any) => {
+      let out = '';
+      const req: any = {
+        method,
+        url,
+        on: (ev: string, cb: any) => {
+          if (ev === 'data' && body !== undefined) {
+            cb(Buffer.from(JSON.stringify(body)));
+          }
+          if (ev === 'end') cb();
+        },
+      };
+      await registeredHandler(req, { writeHead: () => {}, end: (d: string) => { out = d; } });
+      return JSON.parse(out);
+    };
+
+    const evoRes = await sendReq('GET', '/api/dsh-memory/evolution');
+    expect(evoRes.ok).toBe(true);
+    expect(evoRes.activeStrategy).toBeDefined();
+    expect(Array.isArray(evoRes.strategies)).toBe(true);
+    expect(Array.isArray(evoRes.repairProposals)).toBe(true);
+
+    const evolveRes = await sendReq('POST', '/api/dsh-memory/action', {
+      action: 'evolve-strategy',
+    });
+    expect(evolveRes.ok).toBe(true);
+    expect(evolveRes.result).toBeDefined();
+
+    // Test /sandbox endpoint (Letta ADE Context Inspector & 5-Channel Recall Playground)
+    upsertCandidate(
+      db,
+      {
+        type: 'preference',
+        content: 'Always use TypeScript strict mode and functional components.',
+        scope: 'global',
+        confidence: 0.95,
+        source_kind: 'user',
+        origin_kinds: ['user'],
+        actor: 'user',
+        sources: [{ session_id: 's1', seq: 1, kind: 'user' }],
+      },
+      Date.now()
+    );
+
+    const sandboxRes = await sendReq('POST', '/api/dsh-memory/sandbox', {
+      query: 'TypeScript strict mode 偏好',
+    });
+    expect(sandboxRes.ok).toBe(true);
+    expect(sandboxRes.stableLayer).toBeDefined();
+    expect(sandboxRes.recallSimulation).toBeDefined();
+    expect(sandboxRes.recallSimulation.items.length).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(sandboxRes.recentInjections)).toBe(true);
+  });
 });
