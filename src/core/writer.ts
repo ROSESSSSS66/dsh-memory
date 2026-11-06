@@ -20,6 +20,7 @@ import {
 import { estimateTokens } from './tokens.js';
 import { workspaceId } from './scope.js';
 import { redactSecrets } from './privacy.js';
+import { computeLocalEmbedding, cosineSimilarity, getOrComputeEmbedding } from './vector.js';
 
 function generateId(): string {
   const chars = '0123456789abcdefghjkmnpqrstvwxyz';
@@ -283,22 +284,66 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
       return { action: 'merged', id: existingSame.id };
     }
 
-    // 4. 近似匹配仅供复核 (建立 related 关系)
-    const candidatesInScope = db.all<{ id: string; content: string; hash: string }>(
-      `SELECT id, content, hash FROM memories WHERE type = ? AND scope = ? AND COALESCE(workspace_id, '') = ? AND status IN ('active', 'candidate', 'frozen') LIMIT 5`,
-      [c.type, scope, workspace_id || '']
+    // 4. A-Mem (NeurIPS 2025) Zettelkasten 动态关联织网：结合 128D 本地向量余弦 + 实体共现 + 词汇 Jaccard 建立 related 双链
+    const candidatesInScope = db.all<{
+      id: string;
+      type: string;
+      summary: string;
+      content: string;
+      slot_key: string | null;
+      hash: string;
+      embedding: Uint8Array | Buffer | null;
+    }>(
+      `SELECT id, type, summary, content, slot_key, hash, embedding
+       FROM memories
+       WHERE scope = ?
+         AND COALESCE(workspace_id, '') = ?
+         AND status IN ('active', 'candidate', 'frozen')
+         AND type != 'meta'
+         AND COALESCE(slot_key, '') NOT LIKE 'core:%'
+       ORDER BY (CASE WHEN type = ? THEN 0 ELSE 1 END) ASC, utility DESC, updated_at DESC
+       LIMIT 24`,
+      [scope, workspace_id || '', c.type]
     );
 
     const newTokens = tokenSet(rawContent);
-    const relatedIds: string[] = [];
+    const newVec = computeLocalEmbedding(`${rawSummary}\n${rawContent}${slotKey ? `\n${slotKey}` : ''}`);
+    const newEntList = (c.entities && c.entities.length > 0 ? c.entities : extractEntities(rawContent)).map((e) =>
+      e.toLowerCase().replace(/\\/g, '/')
+    );
+    const newEntSet = new Set(newEntList);
+
+    const scoredRelations: Array<{ id: string; affinity: number }> = [];
     for (const cand of candidatesInScope) {
-      if (cand.hash !== hash) {
-        const sim = jaccard(newTokens, tokenSet(cand.content));
-        if (sim >= DEFAULTS.dupJaccard) {
-          relatedIds.push(cand.id);
+      if (cand.hash === hash) continue;
+      if (slotKey && cand.slot_key && cand.slot_key === slotKey) continue;
+
+      const jaccardSim = jaccard(newTokens, tokenSet(cand.content));
+      const candVec = getOrComputeEmbedding(cand);
+      const vecSim = candVec ? Math.max(0, cosineSimilarity(newVec, candVec)) : 0;
+
+      let sharedEnts = 0;
+      if (newEntSet.size > 0) {
+        const candEnts = extractEntities(cand.content).map((e) => e.toLowerCase().replace(/\\/g, '/'));
+        for (const ce of candEnts) {
+          if (newEntSet.has(ce)) sharedEnts++;
         }
       }
+
+      const entBonus = Math.min(1, sharedEnts / 2);
+      const affinity = 0.45 * vecSim + 0.35 * jaccardSim + 0.2 * entBonus;
+
+      if (
+        jaccardSim >= DEFAULTS.dupJaccard ||
+        affinity >= 0.52 ||
+        (sharedEnts >= 2 && vecSim >= 0.45)
+      ) {
+        scoredRelations.push({ id: cand.id, affinity: Math.max(jaccardSim, affinity) });
+      }
     }
+
+    scoredRelations.sort((a, b) => b.affinity - a.affinity);
+    const relatedIds = scoredRelations.slice(0, 3).map((r) => r.id);
 
     // 5. 插入新记录
     const newId = generateId();

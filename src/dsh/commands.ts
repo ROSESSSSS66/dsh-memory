@@ -28,6 +28,7 @@ import {
 } from '../core/core-memory.js';
 import { reconcileAndUpsert } from '../evolution/reconciler.js';
 import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
+import { autoBootstrapMemory } from '../core/bootstrap.js';
 import { workspaceId } from '../core/scope.js';
 import { redactSecrets } from '../core/privacy.js';
 import { runBackfill } from '../ingest/backfill.js';
@@ -52,6 +53,33 @@ export class MemoryCommands {
   constructor(db: Db, cfg: PluginConfig = DEFAULTS) {
     this.db = db;
     this.cfg = cfg;
+  }
+
+  /**
+   * /memory init [--force] (v0.4.0 安装后与工作区冷启动自动初始化记忆)
+   */
+  public init(ctx: CommandContext, force: boolean = false): string {
+    const wsPath = ctx.workspaceId && fs.existsSync(ctx.workspaceId) ? ctx.workspaceId : process.cwd();
+    const res = autoBootstrapMemory(this.db, {
+      workspacePath: wsPath,
+      cfg: this.cfg,
+      force,
+      includeBackfill: true,
+    });
+    if (res.alreadyInitialized && !force) {
+      return `✅ 当前工作区 (${res.workspaceId}) 已完成冷启动初始化。如需强制重新扫描工程并同步初始化，请运行: /memory init --force`;
+    }
+    return [
+      `🚀 工作区记忆冷启动初始化完成 (${res.workspaceId})：`,
+      `  • Letta 常驻核心块: ${
+        res.coreBlocksInitialized.length > 0
+          ? res.coreBlocksInitialized.join(', ')
+          : 'human, persona, project (已就绪)'
+      }`,
+      `  • 工作区冷启动种子记忆: +${res.workspaceMemoriesSeeded} 条 | Markdown 导入: +${res.markdownMemoriesImported} 条`,
+      `  • 历史 DSH 会话回填: +${res.backfillEventsAdded} 条事件 -> 提炼 +${res.backfillMemoriesCreated} 条规则记忆`,
+      `  • 128D 本地向量回填: ${res.embeddingsBackfilled} 条 | A-Mem 自动双链织网: +${res.linksWeaved} 条关联边`,
+    ].join('\n');
   }
 
   /**
@@ -111,7 +139,7 @@ export class MemoryCommands {
       `🩺 记忆库健康度体检报告：${report.score}/100 (等级 ${report.grade})`,
       `状态分布：active ${report.counts.active} · candidate ${report.counts.candidate} · frozen ${report.counts.frozen} · superseded ${report.counts.superseded} · archived ${report.counts.archived} (置顶 ${report.counts.pinned})`,
       `FTS5 索引：${report.ftsConsistent ? '一致 (OK)' : '不一致 (需重建)'} (${report.ftsCount} 行) | 向量索引：${report.embeddingsReadyCount ?? 0} 已就绪 / ${report.missingEmbeddingsCount ?? 0} 待回填`,
-      `冗余/同槽位冲突对：${report.duplicatePairs.length} 对 | 活跃矛盾关系：${report.contradictions.length} 组 | 陈旧低效用记忆：${report.staleMemories.length} 条`,
+      `冗余/同槽位冲突对：${report.duplicatePairs.length} 对 | 活跃矛盾关系：${report.contradictions.length} 组 | 陈旧低效用记忆：${report.staleMemories.length} 条 | 孤岛节点：${report.orphanMemoriesCount ?? 0} 条`,
     ];
     if (report.duplicatePairs.length > 0) {
       lines.push('待去重记忆对 (可执行 /memory merge <src> <tgt> 或 /memory heal 一键自愈):');
@@ -131,14 +159,14 @@ export class MemoryCommands {
   }
 
   /**
-   * /memory heal (一键智能自愈修复：FTS5 重建 + 本地向量回填 + 冗余去重 + 矛盾消解)
+   * /memory heal (一键智能自愈修复：FTS5 重建 + 本地向量回填 + 冗余去重 + 矛盾消解 + A-Mem 双链织网)
    */
   public heal(ctx: CommandContext): string {
     const wsId = workspaceId(ctx.workspaceId);
     const res = autoHealMemoryHealth(this.db, { workspaceId: wsId });
     return [
       `⚡ 记忆库一键智能自愈完成：健康分 ${res.beforeScore} -> ${res.afterScore}/100 (等级 ${res.afterGrade})`,
-      `修复明细：FTS5 重建=${res.ftsRebuilt ? '是' : '否'} · 本地向量回填=${res.embeddingsBackfilled} 条 · 合并冗余对=${res.duplicatesMerged} 对 · 消解矛盾链=${res.contradictionsResolved} 组`,
+      `修复明细：FTS5 重建=${res.ftsRebuilt ? '是' : '否'} · 本地向量回填=${res.embeddingsBackfilled} 条 · 合并冗余对=${res.duplicatesMerged} 对 · 消解矛盾链=${res.contradictionsResolved} 组 · A-Mem 自动织网=${res.linksWeaved} 条`,
     ].join('\n');
   }
 
@@ -367,7 +395,6 @@ export class MemoryCommands {
     return `Usage: /memory migrate <markdown|json> <path>`;
   }
 
-
   /**
    * /memory pin <id> / unpin <id>
    */
@@ -523,7 +550,7 @@ export class MemoryCommands {
     if (!trimmed || trimmed === 'help') {
       return {
         kind: 'success',
-        text: 'Available commands: stats | doctor [--fix] | heal | inspect <id> | list | confirm <id> | merge <src> <tgt> | restore <id> | graph [limit|<id>] | export-md <dir> | import-md <dir> | migrate <format> <path> | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
+        text: 'Available commands: init [--force] | stats | doctor [--fix] | heal | inspect <id> | list | confirm <id> | merge <src> <tgt> | restore <id> | graph [limit|<id>] | export-md <dir> | import-md <dir> | migrate <format> <path> | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
       };
     }
 
@@ -533,7 +560,9 @@ export class MemoryCommands {
 
     try {
       let output = '';
-      if (sub === 'stats' || sub === 'status') {
+      if (sub === 'init' || sub === 'bootstrap') {
+        output = this.init(ctx, rest.includes('--force') || rest.includes('force'));
+      } else if (sub === 'stats' || sub === 'status') {
         output = this.stats(ctx);
       } else if (sub === 'doctor' || sub === 'health') {
         output = this.doctor(ctx, rest.includes('--fix') || rest.includes('fix'));
