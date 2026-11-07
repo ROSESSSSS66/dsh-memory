@@ -88,10 +88,12 @@ export function runCase(
     const dynamicBudget = strategy?.dynamicBudgetTokens || cfg.dynamicBudgetTokens || 1600;
 
     const startPerf = performance.now();
+    const stableAlreadyInjected = new Set(stableRecords.map((m) => `${m.id}@${m.content_rev}`));
     const recallResult = recall(memDb, plan, {
       workspaceId: wsId,
       sessionId: 'eval_session',
       budget: dynamicBudget,
+      alreadyInjected: stableAlreadyInjected,
       strategy,
       now: fixedNow,
     });

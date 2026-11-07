@@ -219,7 +219,7 @@ export class MemoryTools {
    */
   public expand(
     params: { id: string },
-    agentCtx: { workspaceId: string; sessionId?: string }
+    agentCtx: { workspaceId: string; sessionId?: string; turn?: number }
   ): string {
     const rawId = (params.id || '').trim();
     if (!rawId) return 'Error: memory id is required';
@@ -237,6 +237,16 @@ export class MemoryTools {
     }
     if (mem.status !== 'active' && mem.status !== 'frozen') {
       return `Error: memory '${rawId}' is not active.`;
+    }
+
+    if (agentCtx.sessionId) {
+      const stratVer = getActiveStrategy(this.db, this.cfg).version || this.strategyVersion;
+      this.db.run(
+        `INSERT OR IGNORE INTO injections (
+          session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
+        ) VALUES (?, ?, ?, ?, 'tool', 1, ?, 'content', ?, ?)`,
+        [agentCtx.sessionId, agentCtx.turn ?? 0, mem.id, mem.content_rev, mem.token_cost, stratVer, Date.now()]
+      );
     }
 
     // 提取正文并脱敏
@@ -359,8 +369,8 @@ export class MemoryTools {
       this.db.run(
         `UPDATE injections
          SET outcome = ?, used = 1
-         WHERE session_id = ? AND turn = ? AND memory_id = ? AND content_rev = ?`,
-        [r, sessionId, turn, rawId, contentRev]
+         WHERE session_id = ? AND memory_id = ? AND content_rev = ?`,
+        [r, sessionId, rawId, contentRev]
       );
 
       if (!params.helpful) {
@@ -403,6 +413,10 @@ export class MemoryTools {
     const currentCount = this.noteCallCounts.get(turnKey) || 0;
     if (currentCount >= 3) {
       return 'Error: memory_note call limit reached for this turn (max 3 calls)';
+    }
+    if (this.noteCallCounts.size > 500) {
+      const oldestKey = this.noteCallCounts.keys().next().value;
+      if (oldestKey) this.noteCallCounts.delete(oldestKey);
     }
     this.noteCallCounts.set(turnKey, currentCount + 1);
 

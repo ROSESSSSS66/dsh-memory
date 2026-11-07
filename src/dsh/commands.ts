@@ -492,7 +492,9 @@ export class MemoryCommands {
    */
   public exportToJson(filePath: string, ctx: CommandContext): string {
     const wsId = workspaceId(ctx.workspaceId);
-    const records = list(this.db, { workspaceId: wsId, limit: 10000 });
+    const records = list(this.db, { workspaceId: wsId, limit: 10000 }).map(
+      ({ embedding, ...rest }) => rest
+    );
     fs.writeFileSync(filePath, JSON.stringify(records, null, 2), 'utf8');
     return `Exported ${records.length} memories to ${filePath}`;
   }
@@ -619,7 +621,10 @@ export class MemoryCommands {
       } else if (sub === 'inspect') {
         output = this.inspect(rest[0], ctx);
       } else if (sub === 'history') {
-        const hist = history(this.db, rest[0]);
+        const wsId = workspaceId(ctx.workspaceId);
+        const mem = get(this.db, rest[0], { workspaceId: wsId });
+        const targetId = mem ? mem.id : rest[0];
+        const hist = history(this.db, targetId);
         if (hist.length === 0) {
           output = `No history found for memory '${rest[0]}'.`;
         } else {
@@ -635,8 +640,11 @@ export class MemoryCommands {
         if (isNaN(targetVersion)) {
           output = 'Usage: /memory rollback <id> <version>';
         } else {
-          const res = rollbackVersion(this.db, rest[0], targetVersion, 'user', Date.now());
-          output = `Memory ${rest[0]} rolled back to version ${targetVersion} (new version v${res.version}).`;
+          const wsId = workspaceId(ctx.workspaceId);
+          const mem = get(this.db, rest[0], { workspaceId: wsId });
+          const targetId = mem ? mem.id : rest[0];
+          const res = rollbackVersion(this.db, targetId, targetVersion, 'user', Date.now());
+          output = `Memory ${targetId} rolled back to version ${targetVersion} (new version v${res.version}).`;
         }
       } else if (sub === 'list') {
         output = this.list({}, ctx);

@@ -85,8 +85,8 @@ export function list(db: Db, filter: ListFilter = {}): MemoryRecord[] {
     params.push(filter.scope);
   }
   if (filter.workspaceId) {
-    sql += ' AND workspace_id = ?';
-    params.push(filter.workspaceId);
+    sql += ' AND (workspace_id = ? OR workspace_id IS NULL)';
+    params.push(workspaceId(filter.workspaceId));
   }
   if (filter.sessionId) {
     sql += ' AND session_id = ?';
@@ -210,7 +210,8 @@ export function getGraphData(
     status?: MemoryStatus[];
   }
 ): GraphData {
-  const limit = Math.max(1, Math.min(200, options?.limit ?? 80));
+  const rawLimit = options?.limit ?? 80;
+  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(200, rawLimit)) : 80;
   const includeEntities = options?.includeEntities ?? true;
   const statuses = options?.status || ['active', 'candidate', 'frozen', 'superseded'];
   const statusPlaceholders = statuses.map(() => '?').join(', ');

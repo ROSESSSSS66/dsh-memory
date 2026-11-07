@@ -7,8 +7,10 @@ import { harvestSample } from './lab.js';
 import { getActiveStrategy } from './strategy.js';
 import { enqueueRepairJobIfEligible } from './repair.js';
 
-export const CORRECTION_REGEX = /(不对|错了|不是这样|搞错|不行|没用|还是不行|重来|wrong|incorrect|doesn't work|not what)/i;
-export const CONFIRMATION_REGEX = /(好的|可以|谢谢|完美|成功了|解决了|不错|works|thanks|great|perfect|lgtm)/i;
+export const CORRECTION_REGEX =
+  /(不对|错了|不是这样|搞错|不行|不可以|没用|还是不行|还是不可以|重来|wrong|incorrect|doesn't work|not working|not what)/i;
+export const CONFIRMATION_REGEX =
+  /((?<!不|没)(?:好的|可以|完美|成功了|解决了|不错)|谢谢|(?<!not\s|nothing\s|never\s|hardly\s)\b(?:works|thanks|great|perfect|lgtm)\b)/i;
 
 export interface EvaluateTurnParams {
   sessionId: string;
@@ -41,7 +43,10 @@ export function evaluateTurnOutcome(
   let isCorrection = false;
 
   // 检查是否在下一个 turn 中由用户纠正
-  if (nextUserText && CORRECTION_REGEX.test(nextUserText)) {
+  const isInterrogativeQuestion =
+    /[?？]$/.test(nextUserText) &&
+    !/^(?:不对|错了|不是|不行|不可以|搞错|wrong|incorrect|no\b)/i.test(nextUserText);
+  if (nextUserText && !isInterrogativeQuestion && CORRECTION_REGEX.test(nextUserText)) {
     r = -1.0;
     isCorrection = true;
   } else if (nextUserText && CONFIRMATION_REGEX.test(nextUserText)) {
@@ -145,7 +150,7 @@ export function evaluateTurnOutcome(
       processedMemories.add(inj.memory_id);
 
       const mem = db.get<MemoryRecord>(
-        'SELECT id, content, utility FROM memories WHERE id = ?',
+        'SELECT id, type, content, utility FROM memories WHERE id = ?',
         [inj.memory_id]
       );
       if (!mem) continue;
@@ -207,8 +212,16 @@ export function evaluateTurnOutcome(
             suite: 'harvested',
             critical: false,
             now: new Date(now).toISOString(),
-            workspace: params.cwd || '',
-            setup: [],
+            workspace: params.cwd || '/ws/harvested',
+            setup: [
+              {
+                type: (mem.type as any) || 'semantic',
+                content: mem.content,
+                at: new Date(now - 60000).toISOString(),
+                source_kind: 'user',
+                status: 'active',
+              },
+            ],
             query: userEvent.text,
             expect: {
               include: inc,

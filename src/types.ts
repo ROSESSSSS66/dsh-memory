@@ -106,7 +106,7 @@ export interface CandidateInput {
   valid_to?: number | null;
   importance?: number; // 1..10
   status?: 'candidate' | 'active';
-  actor: 'rule' | 'llm' | 'user' | 'lab' | 'maintenance';
+  actor: 'rule' | 'llm' | 'user' | 'lab' | 'maintenance' | 'system';
 }
 
 export type UpsertResult =

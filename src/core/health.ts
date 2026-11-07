@@ -101,7 +101,7 @@ export function auditMemoryHealth(
     ? db.all<{ status: string; cnt: number; pinned_cnt: number }>(
         `SELECT status, COUNT(*) as cnt, SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END) as pinned_cnt
          FROM memories
-         WHERE workspace_id = ? OR scope = 'global'
+         WHERE workspace_id = ? OR scope IN ('user', 'global')
          GROUP BY status`,
         [wsFilter]
       )
@@ -163,7 +163,7 @@ export function auditMemoryHealth(
         `SELECT id, scope, workspace_id, type, summary, content, slot_key, hash, embedding, utility, confidence, updated_at
          FROM memories
          WHERE status IN ('active', 'frozen')
-           AND (workspace_id = ? OR scope = 'global')
+           AND (workspace_id = ? OR scope IN ('user', 'global'))
          ORDER BY utility DESC, confidence DESC, updated_at DESC
          LIMIT 250`,
         [wsFilter]
@@ -253,21 +253,40 @@ export function auditMemoryHealth(
   }
 
   // 检查仍同时处于 active/frozen 的显式 contradicts 关系
-  const contradictionRows = db.all<{
-    from_id: string;
-    to_id: string;
-    from_summary: string;
-    to_summary: string;
-  }>(
-    `SELECT r.from_id, r.to_id, m1.summary as from_summary, m2.summary as to_summary
-     FROM memory_relations r
-     JOIN memories m1 ON m1.id = r.from_id
-     JOIN memories m2 ON m2.id = r.to_id
-     WHERE r.rel = 'contradicts'
-       AND m1.status IN ('active', 'frozen')
-       AND m2.status IN ('active', 'frozen')
-     LIMIT 20`
-  );
+  const contradictionRows = wsFilter
+    ? db.all<{
+        from_id: string;
+        to_id: string;
+        from_summary: string;
+        to_summary: string;
+      }>(
+        `SELECT r.from_id, r.to_id, m1.summary as from_summary, m2.summary as to_summary
+         FROM memory_relations r
+         JOIN memories m1 ON m1.id = r.from_id
+         JOIN memories m2 ON m2.id = r.to_id
+         WHERE r.rel = 'contradicts'
+           AND m1.status IN ('active', 'frozen')
+           AND m2.status IN ('active', 'frozen')
+           AND (m1.workspace_id = ? OR m1.scope IN ('user', 'global'))
+           AND (m2.workspace_id = ? OR m2.scope IN ('user', 'global'))
+         LIMIT 20`,
+        [wsFilter, wsFilter]
+      )
+    : db.all<{
+        from_id: string;
+        to_id: string;
+        from_summary: string;
+        to_summary: string;
+      }>(
+        `SELECT r.from_id, r.to_id, m1.summary as from_summary, m2.summary as to_summary
+         FROM memory_relations r
+         JOIN memories m1 ON m1.id = r.from_id
+         JOIN memories m2 ON m2.id = r.to_id
+         WHERE r.rel = 'contradicts'
+           AND m1.status IN ('active', 'frozen')
+           AND m2.status IN ('active', 'frozen')
+         LIMIT 20`
+      );
 
   const contradictions: ContradictionItem[] = contradictionRows.map((r) => ({
     fromId: r.from_id,
@@ -290,7 +309,7 @@ export function auditMemoryHealth(
          WHERE status = 'active'
            AND pinned = 0
            AND utility < 0.38
-           AND (workspace_id = ? OR scope = 'global')
+           AND (workspace_id = ? OR scope IN ('user', 'global'))
          ORDER BY utility ASC, ref_time ASC
          LIMIT 15`,
         [wsFilter]
@@ -821,7 +840,7 @@ export function autoHealMemoryHealth(
           `SELECT id FROM memories
            WHERE status = 'candidate'
              AND confidence >= 0.5
-             AND (workspace_id = ? OR scope = 'global')
+             AND (workspace_id = ? OR scope IN ('user', 'global'))
            ORDER BY confidence DESC, utility DESC
            LIMIT 30`,
           [options.workspaceId]

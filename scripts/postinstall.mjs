@@ -11,10 +11,18 @@ const projectRoot = path.resolve(__dirname, '..');
 
 const args = process.argv.slice(2);
 const force = args.includes('--force') || args.includes('-f');
-const quiet = args.includes('--quiet') || process.env.DSH_MEMORY_SKIP_BOOTSTRAP === '1';
+const quiet = args.includes('--quiet') || args.includes('-q');
 
-if (quiet && process.env.DSH_MEMORY_SKIP_BOOTSTRAP === '1') {
+if (process.env.DSH_MEMORY_SKIP_BOOTSTRAP === '1') {
   process.exit(0);
+}
+
+function logInfo(msg) {
+  if (!quiet) console.log(msg);
+}
+
+function logWarn(...msg) {
+  if (!quiet) console.warn(...msg);
 }
 
 const defaultDataDir = path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory');
@@ -74,11 +82,11 @@ async function main() {
         });
 
         if (res.alreadyInitialized && !force) {
-          console.log(
+          logInfo(
             `[dsh-memory] ✅ 记忆库已就绪 (${dbPath}) — 如需强制重新扫描与初始化，请运行: npm run init`
           );
         } else {
-          console.log(
+          logInfo(
             `[dsh-memory] 🚀 安装后自动记忆初始化完成 (${dbPath}):\n` +
               `  • Letta 常驻核心块: ${
                 res.coreBlocksInitialized.length > 0
@@ -110,11 +118,11 @@ async function main() {
         `INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '1'), ('contract_version', '1.1'), ('created_at', '${now}');`
       );
       rawDb.close();
-      console.log(`[dsh-memory] ✅ 数据库基础 Schema 已初始化: ${dbPath}`);
+      logInfo(`[dsh-memory] ✅ 数据库基础 Schema 已初始化: ${dbPath}`);
     }
   } catch (err) {
     // postinstall 绝不阻断 npm install 主流程
-    console.warn('[dsh-memory] Post-install memory bootstrap skipped:', err?.message || err);
+    logWarn('[dsh-memory] Post-install memory bootstrap skipped:', err?.message || err);
   }
 }
 

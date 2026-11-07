@@ -218,12 +218,26 @@ export async function callOfflineLLM(
   }
 
   // 检查目标 endpoint 是否明确授权
-  const baseURL = (cfg.offlineLLM.baseURL || '').trim();
+  let baseURL = (cfg.offlineLLM.baseURL || '').trim();
+  const usingHostFallback = !baseURL && !!cfg.offlineLLM.useDshLlm;
+  if (usingHostFallback) {
+    baseURL = (
+      process.env.DSH_LLM_BASE_URL ||
+      process.env.OPENAI_BASE_URL ||
+      process.env.ANTHROPIC_BASE_URL ||
+      ''
+    ).trim();
+  }
   if (!baseURL) {
     return { ok: false, error: 'missing_base_url' };
   }
 
-  if (!isOfflineEndpointAllowed(baseURL, cfg.privacy.allowedOfflineEndpoints, cfg.privacy.offlineConsent)) {
+  const effectiveAllowedEndpoints =
+    usingHostFallback && (!cfg.privacy.allowedOfflineEndpoints || cfg.privacy.allowedOfflineEndpoints.length === 0)
+      ? [baseURL]
+      : cfg.privacy.allowedOfflineEndpoints;
+
+  if (!isOfflineEndpointAllowed(baseURL, effectiveAllowedEndpoints, cfg.privacy.offlineConsent)) {
     return { ok: false, error: 'endpoint_not_allowed' };
   }
 
@@ -233,10 +247,15 @@ export async function callOfflineLLM(
 
   // 替换绝对工作区路径为 <workspace>
   if (params.cwd) {
-    const escapedCwd = params.cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const cwdRegex = new RegExp(escapedCwd, 'g');
-    sanitizedSystem = sanitizedSystem.replace(cwdRegex, '<workspace>');
-    sanitizedUser = sanitizedUser.replace(cwdRegex, '<workspace>');
+    const variants = Array.from(
+      new Set([params.cwd, params.cwd.replace(/\\/g, '/'), params.cwd.replace(/\//g, '\\')])
+    ).filter((v) => v.length >= 2);
+    for (const v of variants) {
+      const escapedCwd = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const cwdRegex = new RegExp(escapedCwd, 'gi');
+      sanitizedSystem = sanitizedSystem.replace(cwdRegex, '<workspace>');
+      sanitizedUser = sanitizedUser.replace(cwdRegex, '<workspace>');
+    }
   }
 
   // 3. 输入上界计算与校验
@@ -257,6 +276,13 @@ export async function callOfflineLLM(
   let apiKey = cfg.offlineLLM.apiKey || '';
   if (!apiKey && cfg.offlineLLM.apiKeyEnv && process.env[cfg.offlineLLM.apiKeyEnv]) {
     apiKey = process.env[cfg.offlineLLM.apiKeyEnv]!;
+  }
+  if (!apiKey && usingHostFallback) {
+    apiKey =
+      process.env.DSH_LLM_API_KEY ||
+      process.env.OPENAI_API_KEY ||
+      process.env.ANTHROPIC_API_KEY ||
+      '';
   }
 
   // 构造标准端点 URL 与协议负载

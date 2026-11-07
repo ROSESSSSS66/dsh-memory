@@ -2,6 +2,7 @@ import type { Db, MemoryRecord } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import type { EvidenceLedger } from './types.js';
 import { tokenSet, jaccard, extractEntities } from '../core/text.js';
+import { redactSecrets } from '../core/privacy.js';
 import { PROMPT_CONSOLIDATE } from './prompts.js';
 import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
@@ -137,6 +138,17 @@ export function findConsolidationClusters(
       continue;
     }
 
+    // 检查该组记忆是否已全部整合生成过衍生记忆，避免重复整合同一聚类
+    const alreadyDerived = db.get<{ cnt: number }>(
+      `SELECT COUNT(DISTINCT to_id) as cnt
+       FROM memory_relations
+       WHERE rel = 'derived_from' AND to_id IN (${placeholders})`,
+      memIds
+    );
+    if ((alreadyDerived?.cnt ?? 0) >= memIds.length) {
+      continue;
+    }
+
     // 冻结源记录快照
     const snapshots: SourceSnapshot[] = comp.map(r => ({
       id: r.id,
@@ -249,7 +261,16 @@ text: ${m.content}`
     );
 
     for (const src of sources) {
-      const excerpt = src.excerpt || m.summary || m.content.slice(0, 80);
+      const rawExcerpt = src.excerpt || m.summary || m.content.slice(0, 80);
+      const excerpt = redactSecrets(rawExcerpt).text;
+      const originKind =
+        src.kind === 'tool_result' || src.kind === 'tool'
+          ? 'tool'
+          : src.kind === 'web'
+            ? 'web'
+            : src.kind === 'assistant_msg' || src.kind === 'assistant'
+              ? 'assistant'
+              : 'user';
       evidenceLines.push(`[E#${currentSeq}] (${src.session_id}#${src.seq}) ${excerpt}`);
       evidenceLedger.set(currentSeq, {
         seq: currentSeq,
@@ -257,7 +278,7 @@ text: ${m.content}`
         original_seq: src.seq,
         kind: src.kind,
         redacted_text: excerpt,
-        origin_kinds: ['user'],
+        origin_kinds: [originKind],
         time: src.created_at,
       });
       currentSeq++;

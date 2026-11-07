@@ -571,7 +571,8 @@ export function expandGraphNeighbors(
         });
       }
 
-      if (results.length >= maxNeighbors) break;
+      const hop1Cap = maxNeighbors >= 6 ? maxNeighbors - 2 : maxNeighbors;
+      if (results.length >= hop1Cap) break;
     }
 
     // 二跳阻尼扩散 (HippoRAG 2 / SYNAPSE 2-Hop Damped Spreading Activation, gamma = 0.45)

@@ -6,6 +6,7 @@ export interface OverviewStatsData {
     superseded: number;
     archived: number;
     frozen?: number;
+    byStatus?: Record<string, number>;
     byType: Record<string, number>;
   };
   dynamicBudgetTokens: number;

@@ -159,10 +159,20 @@ export function LLMConfigModal({
     dirty,
   };
 
+  const initializedForOpenRef = useRef(false);
+
   useEffect(() => {
-    if (config && open) {
-      setUseDshLlm(Boolean(config.offlineLLM.useDshLlm));
-      setBaseURL(config.offlineLLM.baseURL || 'https://api.deepseek.com/v1');
+    if (!open) {
+      initializedForOpenRef.current = false;
+      return;
+    }
+    if (config && !initializedForOpenRef.current) {
+      initializedForOpenRef.current = true;
+      const isDsh = Boolean(config.offlineLLM.useDshLlm);
+      setUseDshLlm(isDsh);
+      setBaseURL(
+        config.offlineLLM.baseURL || (isDsh ? '' : 'https://api.deepseek.com/v1')
+      );
       setModel(config.offlineLLM.model || 'deepseek-chat');
       setProtocol(config.offlineLLM.protocol || 'chat/completions');
       setApiKeyEnv(config.offlineLLM.apiKeyEnv ?? 'DEEPSEEK_API_KEY');
@@ -269,10 +279,8 @@ export function LLMConfigModal({
     const found = PRESETS.find((p) => p.key === key);
     if (!found) return;
     setUseDshLlm(Boolean(found.useDshLlm));
-    if (!found.useDshLlm) {
-      setBaseURL(found.baseURL);
-      setApiKeyEnv(found.apiKeyEnv);
-    }
+    setBaseURL(found.baseURL);
+    setApiKeyEnv(found.apiKeyEnv);
     setModel(found.model);
     setProtocol(found.protocol);
     setDirty(true);
@@ -343,7 +351,6 @@ export function LLMConfigModal({
                 <input
                   className="dshm-field-input dshm-field-input--mono"
                   value={baseURL}
-                  disabled={useDshLlm}
                   onChange={(e) => {
                     setUseDshLlm(false);
                     setBaseURL(e.target.value);
@@ -351,7 +358,7 @@ export function LLMConfigModal({
                   }}
                   placeholder={
                     useDshLlm
-                      ? '当前使用 DSH 宿主内置 LLM 通道'
+                      ? '当前使用 DSH 宿主内置 LLM 通道（输入地址可切换为自定义接口）'
                       : 'https://api.deepseek.com/v1'
                   }
                 />
