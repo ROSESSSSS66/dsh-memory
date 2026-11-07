@@ -492,4 +492,53 @@ describe('Evolution LLM Client (M3-T1)', () => {
     expect(res.ok).toBe(true);
     expect((res as any).content).toBe('{"items":[]}');
   });
+
+  it('expands reserved_tokens when retrying after missing_choice_content without triggering CONTRACT_BREACH', async () => {
+    let attempt = 0;
+    const mockFetch: typeof fetch = async () => {
+      attempt++;
+      if (attempt === 1) {
+        return new Response(
+          JSON.stringify({
+            status: 'incomplete',
+            output: [{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'long thinking...' }] }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          status: 'completed',
+          output: [{ type: 'message', content: [{ type: 'output_text', text: '{"items":[]}' }] }],
+          usage: { input_tokens: 2500, output_tokens: 3200 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const res = await callOfflineLLM(
+      db,
+      {
+        jobKind: 'distill',
+        promptVersion: 'distill-v2',
+        systemPrompt: 'Sys',
+        userPrompt: 'Usr',
+        maxOutputTokens: 2000,
+        cwd: '/ws/demo',
+        workspaceId: 'ws1',
+        fetchFn: mockFetch,
+      },
+      baseCfg
+    );
+
+    expect(res.ok).toBe(true);
+    expect(attempt).toBe(2);
+
+    const row = db.get<{ reserved_tokens: number; note: string | null }>(
+      'SELECT reserved_tokens, note FROM llm_ledger WHERE id = ?',
+      [(res as any).ledgerId]
+    );
+    expect(row?.reserved_tokens).toBeGreaterThanOrEqual(8192);
+    expect(row?.note).toBeNull();
+  });
 });

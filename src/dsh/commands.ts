@@ -10,7 +10,19 @@ import {
   confirmMemory,
   mergeMemories,
   restoreMemory,
+  forget as writerForget,
+  pin as writerPin,
+  unpin as writerUnpin,
+  freeze as writerFreeze,
+  unfreeze as writerUnfreeze,
 } from '../core/writer.js';
+import { ftsText, contentHash, extractEntities } from '../core/text.js';
+import { estimateTokens } from '../core/tokens.js';
+import {
+  computeLocalEmbedding,
+  encodeEmbeddingBlob,
+  primeRuntimeVectorCache,
+} from '../core/vector.js';
 import {
   exportToMarkdown,
   importFromMarkdown,
@@ -27,7 +39,7 @@ import {
   renderCoreMemoryMarkdown,
 } from '../core/core-memory.js';
 import { reconcileAndUpsert } from '../evolution/reconciler.js';
-import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
+import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
 import { workspaceId } from '../core/scope.js';
 import { redactSecrets } from '../core/privacy.js';
@@ -266,10 +278,7 @@ export class MemoryCommands {
       trashMemory(this.db, mem.id, trashDir);
     } catch {}
 
-    this.db.run(
-      `UPDATE memories SET status = 'archived', updated_at = ? WHERE id = ?`,
-      [Date.now(), mem.id]
-    );
+    writerForget(this.db, mem.id, 'user', Date.now());
     return `Memory ${mem.id} archived.`;
   }
 
@@ -403,11 +412,11 @@ export class MemoryCommands {
     const mem = get(this.db, idOrShortId, { workspaceId: wsId });
     if (!mem) return `Memory '${idOrShortId}' not found.`;
 
-    this.db.run(`UPDATE memories SET pinned = ?, updated_at = ? WHERE id = ?`, [
-      pinned ? 1 : 0,
-      Date.now(),
-      mem.id,
-    ]);
+    if (pinned) {
+      writerPin(this.db, mem.id, 'user', Date.now());
+    } else {
+      writerUnpin(this.db, mem.id, 'user', Date.now());
+    }
     return `Memory ${mem.id} ${pinned ? 'pinned' : 'unpinned'}.`;
   }
 
@@ -420,11 +429,11 @@ export class MemoryCommands {
     if (!mem) return `Memory '${idOrShortId}' not found.`;
 
     const targetStatus = freeze ? 'frozen' : 'active';
-    this.db.run(`UPDATE memories SET status = ?, updated_at = ? WHERE id = ?`, [
-      targetStatus,
-      Date.now(),
-      mem.id,
-    ]);
+    if (freeze) {
+      writerFreeze(this.db, mem.id, 'user', Date.now());
+    } else {
+      writerUnfreeze(this.db, mem.id, 'user', Date.now());
+    }
     return `Memory ${mem.id} status changed to ${targetStatus}.`;
   }
 
@@ -501,20 +510,32 @@ export class MemoryCommands {
     const now = Date.now();
     this.db.transaction(() => {
       for (const it of items) {
-        if (!it.id || !it.content) continue;
-        this.db.run(
+        if (!it.id || !it.content || typeof it.content !== 'string') continue;
+        const priv = redactSecrets(it.content);
+        if (priv.hasSensitive || it.content.includes('[REDACTED:')) continue;
+
+        const cleanContent = priv.text.trim();
+        const rawSummary = typeof it.summary === 'string' && it.summary.trim() ? it.summary.trim() : cleanContent.slice(0, 60);
+        const cleanSummary = redactSecrets(rawSummary).text;
+        const memType = it.type || 'semantic';
+        const slotKey = it.slot_key || null;
+        const hash = it.hash && it.hash !== 'imported' ? it.hash : contentHash(memType, cleanContent);
+        const vec = computeLocalEmbedding(`${cleanSummary}\n${cleanContent}${slotKey ? `\n${slotKey}` : ''}`);
+
+        const res = this.db.run(
           `INSERT OR IGNORE INTO memories (
             id, type, status, content, summary, slot_key, scope, workspace_id, session_id,
             origin_kinds, source_kind, confidence, utility, use_count, success_count, fail_count,
-            token_cost, summary_cost, hash, version, content_rev, pinned, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            token_cost, summary_cost, hash, version, content_rev, pinned, created_at, updated_at,
+            importance, embedding
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             it.id,
-            it.type || 'semantic',
+            memType,
             it.status || 'active',
-            it.content,
-            it.summary || it.content.slice(0, 60),
-            it.slot_key || null,
+            cleanContent,
+            cleanSummary,
+            slotKey,
             it.scope || 'workspace',
             it.workspace_id || workspaceId(ctx.workspaceId),
             it.session_id || null,
@@ -525,19 +546,46 @@ export class MemoryCommands {
             it.use_count ?? 0,
             it.success_count ?? 0,
             it.fail_count ?? 0,
-            it.token_cost ?? 30,
-            it.summary_cost ?? 15,
-            it.hash || 'imported',
+            it.token_cost ?? estimateTokens(cleanContent),
+            it.summary_cost ?? estimateTokens(cleanSummary),
+            hash,
             it.version ?? 1,
             it.content_rev ?? 1,
             it.pinned ?? 0,
             it.created_at || now,
             it.updated_at || now,
+            Math.max(1, Math.min(10, Number(it.importance) || 5)),
+            encodeEmbeddingBlob(vec),
           ]
         );
-        imported++;
+        if (Number(res.changes) > 0) {
+          const rowid = Number(res.lastInsertRowid);
+          this.db.run(`DELETE FROM memory_fts WHERE rowid = ?`, [rowid]);
+          this.db.run(`INSERT INTO memory_fts(rowid, fts_text) VALUES (?, ?)`, [
+            rowid,
+            ftsText(cleanContent + ' ' + cleanSummary),
+          ]);
+          const entities = extractEntities(`${cleanSummary} ${cleanContent}`);
+          for (const ent of entities) {
+            const normEnt = ent.toLowerCase().replace(/\\/g, '/').trim();
+            if (normEnt) {
+              this.db.run(`INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`, [
+                it.id,
+                normEnt,
+              ]);
+            }
+          }
+          primeRuntimeVectorCache(it.id, hash, vec);
+          imported++;
+        }
       }
     });
+
+    if (imported > 0) {
+      try {
+        weaveZettelkastenLinks(this.db, { workspaceId: workspaceId(ctx.workspaceId), now });
+      } catch {}
+    }
 
     return `Imported ${imported} records from ${filePath}`;
   }
@@ -705,7 +753,7 @@ export class MemoryCommands {
           ].join('\n');
         }
       } else if (sub === 'budget') {
-        const usage = getLedgerUsage(this.db);
+        const usage = getLedgerUsage(this.db, undefined, this.cfg);
         output = [
           `今日离线 LLM 用量（${usage.day}）：`,
           `调用次数: ${usage.callsCount} / ${usage.callsLimit}`,

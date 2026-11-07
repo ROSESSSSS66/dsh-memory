@@ -329,10 +329,14 @@ export function auditMemoryHealth(
     connectedIdSet.add(rel.to_id);
   }
   let orphanMemoriesCount = 0;
-  for (const r of activeRows) {
-    if (r.slot_key?.startsWith('core:')) continue;
-    if (!connectedIdSet.has(r.id)) {
-      orphanMemoriesCount++;
+  const nonCoreActiveRows = activeRows.filter(
+    (r) => !r.slot_key?.startsWith('core:') && r.type !== 'meta'
+  );
+  if (activeRows.length >= 2) {
+    for (const r of nonCoreActiveRows) {
+      if (!connectedIdSet.has(r.id)) {
+        orphanMemoriesCount++;
+      }
     }
   }
 
@@ -406,17 +410,55 @@ export function auditMemoryHealth(
   };
 }
 
+function computeSlotKeyAffinity(slotA?: string | null, slotB?: string | null): number {
+  if (!slotA || !slotB) return 0;
+  const sa = slotA.toLowerCase().trim();
+  const sb = slotB.toLowerCase().trim();
+  if (!sa || !sb) return 0;
+  if (sa === sb) return 0.35;
+  const partsA = sa.split('.');
+  const partsB = sb.split('.');
+  if (partsA.length >= 2 && partsB.length >= 2 && partsA[0] === partsB[0] && partsA[1] === partsB[1]) {
+    return 0.28;
+  }
+  if (partsA[0] === partsB[0]) {
+    return 0.2;
+  }
+  return 0;
+}
+
+function areScopesCompatibleForWeaving(
+  a: { scope: string; workspace_id: string | null },
+  b: { scope: string; workspace_id: string | null }
+): boolean {
+  if (a.workspace_id && b.workspace_id && a.workspace_id === b.workspace_id) {
+    return true;
+  }
+  if (
+    (a.scope === 'global' || a.scope === 'user') &&
+    (b.scope === 'global' || b.scope === 'user')
+  ) {
+    return true;
+  }
+  if (a.scope === b.scope && a.scope !== 'workspace') {
+    return true;
+  }
+  return false;
+}
+
 /**
  * A-Mem (NeurIPS 2025, arXiv:2502.12110) Zettelkasten 自动双链织网引擎
- * 扫描同作用域内的活跃记忆，基于 128D 本地向量余弦 + 实体共现 + 词汇 Jaccard 为孤岛/弱连通节点自动编织 related 边
+ * 扫描同作用域内的活跃记忆，基于 128D 本地向量余弦 + 实体共现 + 词汇 Jaccard + 槽位命名空间亲和度
+ * 为孤岛/弱连通节点自动编织 related 边，并通过 Phase 2 最近邻/核心锚点桥接彻底消除孤岛记忆
  */
 export function weaveZettelkastenLinks(
   db: Db,
-  options: { workspaceId?: string; maxNewLinks?: number; now?: number } = {}
+  options: { workspaceId?: string; maxNewLinks?: number; now?: number } | string = {}
 ): number {
-  const now = options.now ?? Date.now();
-  const maxNewLinks = options.maxNewLinks ?? 30;
-  const wsFilter = options.workspaceId;
+  const opts = typeof options === 'string' ? { workspaceId: options } : options;
+  const now = opts.now ?? Date.now();
+  const maxNewLinks = opts.maxNewLinks ?? 60;
+  const wsFilter = opts.workspaceId;
 
   const activeRows = wsFilter
     ? db.all<{
@@ -435,9 +477,9 @@ export function weaveZettelkastenLinks(
          WHERE status IN ('active', 'frozen')
            AND type != 'meta'
            AND COALESCE(slot_key, '') NOT LIKE 'core:%'
-           AND (workspace_id = ? OR scope = 'global')
+           AND (workspace_id = ? OR scope IN ('user', 'global'))
          ORDER BY utility DESC, confidence DESC, updated_at DESC
-         LIMIT 120`,
+         LIMIT 250`,
         [wsFilter]
       )
     : db.all<{
@@ -457,18 +499,21 @@ export function weaveZettelkastenLinks(
            AND type != 'meta'
            AND COALESCE(slot_key, '') NOT LIKE 'core:%'
          ORDER BY utility DESC, confidence DESC, updated_at DESC
-         LIMIT 120`
+         LIMIT 250`
       );
 
-  if (activeRows.length < 2) return 0;
+  if (activeRows.length === 0) return 0;
 
   const existingPairs = new Set<string>();
+  const connectedIds = new Set<string>();
   const relRows = db.all<{ from_id: string; to_id: string }>(
-    `SELECT from_id, to_id FROM memory_relations`
+    `SELECT from_id, to_id FROM memory_relations WHERE rel IN ('related', 'derived_from', 'supersedes')`
   );
   for (const r of relRows) {
     existingPairs.add(`${r.from_id}->${r.to_id}`);
     existingPairs.add(`${r.to_id}->${r.from_id}`);
+    connectedIds.add(r.from_id);
+    connectedIds.add(r.to_id);
   }
 
   const tokenCache = new Map<string, Set<string>>();
@@ -480,45 +525,75 @@ export function weaveZettelkastenLinks(
     entCache.set(
       r.id,
       new Set(
-        extractEntities(`${r.summary} ${r.content}`).map((e) => e.toLowerCase().replace(/\\/g, '/'))
+        extractEntities(`${r.summary} ${r.content}`, 12).map((e) =>
+          e.toLowerCase().replace(/\\/g, '/').trim()
+        )
       )
     );
     vecCache.set(r.id, getOrComputeEmbedding(r));
   }
 
+  // Merge indexed entities from memory_entities table
+  if (activeRows.length > 0) {
+    const placeholders = activeRows.map(() => '?').join(', ');
+    const dbEntRows = db.all<{ memory_id: string; entity: string }>(
+      `SELECT memory_id, entity FROM memory_entities WHERE memory_id IN (${placeholders})`,
+      activeRows.map((r) => r.id)
+    );
+    for (const row of dbEntRows) {
+      const s = entCache.get(row.memory_id);
+      if (s && row.entity) {
+        s.add(row.entity.toLowerCase().replace(/\\/g, '/').trim());
+      }
+    }
+  }
+
+  const computePairAffinity = (
+    a: (typeof activeRows)[0],
+    b: (typeof activeRows)[0]
+  ): { affinity: number; jaccardSim: number; vecSim: number; sharedEnts: number; slotBonus: number } => {
+    const setA = tokenCache.get(a.id)!;
+    const setB = tokenCache.get(b.id)!;
+    const jaccardSim = jaccard(setA, setB);
+
+    const vecA = vecCache.get(a.id);
+    const vecB = vecCache.get(b.id);
+    const vecSim = vecA && vecB ? Math.max(0, cosineSimilarity(vecA, vecB)) : 0;
+
+    const entA = entCache.get(a.id)!;
+    const entB = entCache.get(b.id)!;
+    let sharedEnts = 0;
+    for (const e of entA) {
+      if (entB.has(e)) sharedEnts++;
+    }
+
+    const entBonus = Math.min(1, sharedEnts / 2);
+    const slotBonus = computeSlotKeyAffinity(a.slot_key, b.slot_key);
+    const typeBonus = a.type === b.type ? 0.05 : 0;
+    const affinity = 0.45 * vecSim + 0.3 * jaccardSim + 0.15 * entBonus + slotBonus + typeBonus;
+
+    return { affinity, jaccardSim, vecSim, sharedEnts, slotBonus };
+  };
+
   const candidateEdges: Array<{ fromId: string; toId: string; affinity: number }> = [];
 
   for (let i = 0; i < activeRows.length; i++) {
     const a = activeRows[i];
-    const setA = tokenCache.get(a.id)!;
-    const entA = entCache.get(a.id)!;
-    const vecA = vecCache.get(a.id);
-
     for (let j = i + 1; j < activeRows.length; j++) {
       const b = activeRows[j];
-      const sameScope =
-        a.scope === b.scope && (a.scope === 'global' || a.workspace_id === b.workspace_id);
-      if (!sameScope) continue;
+      if (!areScopesCompatibleForWeaving(a, b)) continue;
       if (existingPairs.has(`${a.id}->${b.id}`)) continue;
 
-      const setB = tokenCache.get(b.id)!;
-      const jaccardSim = jaccard(setA, setB);
-      // Avoid linking pairs that are actually duplicates (>= 0.65) which should be merged instead
+      const { affinity, jaccardSim, vecSim, sharedEnts, slotBonus } = computePairAffinity(a, b);
+      // Avoid linking pairs that are near-identical duplicates (>= 0.65) which should be merged instead
       if (jaccardSim >= 0.65) continue;
 
-      const vecB = vecCache.get(b.id);
-      const vecSim = vecA && vecB ? Math.max(0, cosineSimilarity(vecA, vecB)) : 0;
-
-      const entB = entCache.get(b.id)!;
-      let sharedEnts = 0;
-      for (const e of entA) {
-        if (entB.has(e)) sharedEnts++;
-      }
-
-      const entBonus = Math.min(1, sharedEnts / 2);
-      const affinity = 0.45 * vecSim + 0.35 * jaccardSim + 0.2 * entBonus;
-
-      if (affinity >= 0.46 || (sharedEnts >= 1 && vecSim >= 0.4) || jaccardSim >= 0.35) {
+      if (
+        affinity >= 0.26 ||
+        (sharedEnts >= 1 && vecSim >= 0.22) ||
+        jaccardSim >= 0.18 ||
+        slotBonus >= 0.2
+      ) {
         candidateEdges.push({ fromId: a.id, toId: b.id, affinity });
       }
     }
@@ -529,7 +604,20 @@ export function weaveZettelkastenLinks(
   let weaved = 0;
   const degreeAdded = new Map<string, number>();
 
+  const coreHubRows = db.all<{
+    id: string;
+    slot_key: string | null;
+    scope: string;
+    workspace_id: string | null;
+  }>(
+    `SELECT id, slot_key, scope, workspace_id
+     FROM memories
+     WHERE status IN ('active', 'frozen')
+       AND slot_key LIKE 'core:%'`
+  );
+
   db.transaction(() => {
+    // Phase 1: 高亲和度多边双链织网
     for (const edge of candidateEdges) {
       if (weaved >= maxNewLinks) break;
       const degA = degreeAdded.get(edge.fromId) || 0;
@@ -539,9 +627,78 @@ export function weaveZettelkastenLinks(
       addRelation(db, edge.fromId, edge.toId, 'related', now);
       existingPairs.add(`${edge.fromId}->${edge.toId}`);
       existingPairs.add(`${edge.toId}->${edge.fromId}`);
+      connectedIds.add(edge.fromId);
+      connectedIds.add(edge.toId);
       degreeAdded.set(edge.fromId, degA + 1);
       degreeAdded.set(edge.toId, degB + 1);
       weaved++;
+    }
+
+    // Phase 2: 孤岛节点最近邻与核心锚点桥接 (Nearest-Neighbor & Core-Hub Orphan Bridging)
+    for (const orphan of activeRows) {
+      if (connectedIds.has(orphan.id)) continue;
+
+      let bestPeerId: string | null = null;
+      let bestScore = -1;
+
+      // 优先在兼容作用域/同工作区的活跃记忆中寻找最高亲和度邻居
+      for (const peer of activeRows) {
+        if (peer.id === orphan.id) continue;
+        if (existingPairs.has(`${orphan.id}->${peer.id}`)) continue;
+        if (!areScopesCompatibleForWeaving(orphan, peer)) continue;
+
+        const { affinity, jaccardSim } = computePairAffinity(orphan, peer);
+        if (jaccardSim >= 0.65) continue;
+        const sameWsBonus =
+          orphan.workspace_id && orphan.workspace_id === peer.workspace_id ? 0.12 : 0;
+        const score = affinity + sameWsBonus;
+        if (score > bestScore) {
+          bestScore = score;
+          bestPeerId = peer.id;
+        }
+      }
+
+      // 若该工作区/作用域仅有此单条孤立记忆，尝试挂载至对应 Core Memory 锚点或全局最佳节点
+      if (!bestPeerId && coreHubRows.length > 0) {
+        const preferredSlot =
+          orphan.scope === 'user' || orphan.type === 'preference'
+            ? 'core:human'
+            : orphan.type === 'procedural' || orphan.type === 'belief'
+              ? 'core:persona'
+              : 'core:project';
+        const matchedCore =
+          coreHubRows.find(
+            (c) =>
+              c.slot_key === preferredSlot &&
+              (!c.workspace_id || !orphan.workspace_id || c.workspace_id === orphan.workspace_id)
+          ) ||
+          coreHubRows.find((c) => c.slot_key === 'core:human' || c.slot_key === 'core:persona') ||
+          coreHubRows[0];
+        if (matchedCore && matchedCore.id !== orphan.id) {
+          bestPeerId = matchedCore.id;
+        }
+      }
+
+      if (!bestPeerId && activeRows.length >= 2) {
+        for (const peer of activeRows) {
+          if (peer.id === orphan.id) continue;
+          if (existingPairs.has(`${orphan.id}->${peer.id}`)) continue;
+          const { affinity } = computePairAffinity(orphan, peer);
+          if (affinity > bestScore) {
+            bestScore = affinity;
+            bestPeerId = peer.id;
+          }
+        }
+      }
+
+      if (bestPeerId) {
+        addRelation(db, orphan.id, bestPeerId, 'related', now);
+        existingPairs.add(`${orphan.id}->${bestPeerId}`);
+        existingPairs.add(`${bestPeerId}->${orphan.id}`);
+        connectedIds.add(orphan.id);
+        connectedIds.add(bestPeerId);
+        weaved++;
+      }
     }
   });
 
@@ -686,16 +843,16 @@ export function autoHealMemoryHealth(
     // 忽略异常确保自愈流水线幂等继续
   }
 
-  // 7. A-Mem Zettelkasten 孤岛节点自动双链织网
-  const linksWeaved = weaveZettelkastenLinks(db, {
+  // 7. 全自动同步已验证高效用规则至 Letta Core Memory 暂存区 (Autonomous Core Memory Sync)
+  const coreBlocksSynced = syncAutonomousCoreMemory(db, {
     workspaceId: options.workspaceId,
-    maxNewLinks: 30,
     now,
   });
 
-  // 8. 全自动同步已验证高效用规则至 Letta Core Memory 暂存区 (Autonomous Core Memory Sync)
-  const coreBlocksSynced = syncAutonomousCoreMemory(db, {
+  // 8. A-Mem Zettelkasten 孤岛节点自动双链织网
+  const linksWeaved = weaveZettelkastenLinks(db, {
     workspaceId: options.workspaceId,
+    maxNewLinks: 60,
     now,
   });
 

@@ -491,7 +491,8 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
                 });
               }
 
-              // 每 10 分钟时间桶自动排队一次后台自愈与维护
+              // 每 10 分钟时间桶自动排队一次后台自愈与维护，并即时为当前工作区新增记忆执行 A-Mem 双链织网
+              weaveZettelkastenLinks(currentDb, { workspaceId: wsId, maxNewLinks: 15, now });
               const bucket10m = Math.floor(now / 600_000);
               scheduler.enqueue('maintain', `auto_maintain:${bucket10m}`, { auto: true });
 
@@ -514,7 +515,18 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
           unlistenPreStep();
           scheduler.stop();
           promptSections?.disposeAll();
-          db?.close();
+          if (queue) {
+            queue
+              .close()
+              .catch(() => {})
+              .finally(() => {
+                try {
+                  db?.close();
+                } catch {}
+              });
+          } else {
+            db?.close();
+          }
           console.log('[dsh-memory] Plugin disposed cleanly');
         } catch {}
       });
