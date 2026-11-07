@@ -246,12 +246,13 @@ export class MemoryCommands {
   /**
    * /memory list [type] [status]
    */
-  public list(filter: { type?: any; status?: any; limit?: number }, ctx: CommandContext): string {
+  public list(filter: { type?: any; status?: any; limit?: number; offset?: number }, ctx: CommandContext): string {
     const wsId = workspaceId(ctx.workspaceId);
     const records = list(this.db, {
       ...filter,
       workspaceId: wsId,
       limit: filter.limit || 20,
+      offset: filter.offset || 0,
     });
 
     if (records.length === 0) return 'No memories found.';
@@ -539,8 +540,10 @@ export class MemoryCommands {
             cleanSummary,
             slotKey,
             it.scope || 'workspace',
-            it.workspace_id || workspaceId(ctx.workspaceId),
-            it.session_id || null,
+            (it.scope === 'global' || it.scope === 'user') ? null : (it.workspace_id ? workspaceId(it.workspace_id) : workspaceId(ctx.workspaceId)),
+            it.scope === 'session' ? (it.session_id || ctx.sessionId || 'default_session') : null,
+            // replaced by scope-aware workspace_id above
+            // replaced by scope-aware session_id above
             typeof it.origin_kinds === 'string' ? it.origin_kinds : JSON.stringify(it.origin_kinds || ['user']),
             it.source_kind || 'user',
             it.confidence ?? 0.8,
@@ -647,7 +650,21 @@ export class MemoryCommands {
           output = `Memory ${targetId} rolled back to version ${targetVersion} (new version v${res.version}).`;
         }
       } else if (sub === 'list') {
-        output = this.list({}, ctx);
+        const listFilter: { type?: any; status?: any; limit?: number; offset?: number } = {};
+        const validStatuses = new Set(['active', 'candidate', 'frozen', 'superseded', 'archived']);
+        const validTypes = new Set(['semantic', 'preference', 'procedural', 'episodic', 'belief', 'goal', 'failure', 'meta']);
+        for (const arg of rest) {
+          const low = arg.toLowerCase();
+          const num = parseInt(low, 10);
+          if (!isNaN(num) && num >= 1) {
+            listFilter.offset = (num - 1) * 20;
+          } else if (validStatuses.has(low)) {
+            listFilter.status = low;
+          } else if (validTypes.has(low)) {
+            listFilter.type = low;
+          }
+        }
+        output = this.list(listFilter, ctx);
       } else if (sub === 'forget') {
         output = this.forget(rest[0], ctx);
       } else if (sub === 'pin') {

@@ -1,5 +1,6 @@
 import type { Db } from '../types.js';
 import { segment, extractEntities, stemToken } from './text.js';
+import { workspaceId } from './scope.js';
 
 export const DEFAULT_LOCAL_VECTOR_DIM = 128;
 
@@ -212,7 +213,7 @@ export function getOrComputeEmbedding(
   const text = `${row.summary || ''}\n${row.content || ''}${row.slot_key ? `\n${row.slot_key}` : ''}`.trim();
   if (!text) return null;
 
-  const cacheKey = `${row.id}:${row.hash || text.length}`;
+  const cacheKey = dim === DEFAULT_LOCAL_VECTOR_DIM ? `${row.id}:${row.hash || text.length}` : `${row.id}:${row.hash || text.length}:${dim}`;
   const cachedRt = runtimeVectorCache.get(cacheKey);
   if (cachedRt) return cachedRt;
 
@@ -234,8 +235,9 @@ export function backfillMissingEmbeddings(
 ): number {
   const limit = options.limit ?? 200;
   const dim = options.dim ?? DEFAULT_LOCAL_VECTOR_DIM;
+  const wsFilter = options.workspaceId ? workspaceId(options.workspaceId) : undefined;
 
-  const rows = options.workspaceId
+  const rows = wsFilter
     ? db.all<{
         id: string;
         summary: string;
@@ -248,7 +250,7 @@ export function backfillMissingEmbeddings(
            AND (workspace_id = ? OR scope IN ('user', 'global'))
            AND embedding IS NULL
          LIMIT ?`,
-        [options.workspaceId, limit]
+        [wsFilter, limit]
       )
     : db.all<{
         id: string;

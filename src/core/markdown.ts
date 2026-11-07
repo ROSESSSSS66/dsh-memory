@@ -88,7 +88,11 @@ export function parseMemoryMarkdown(markdownText: string): {
     if (!trimmed || trimmed.startsWith('#')) continue;
 
     if (currentArrayKey && trimmed.startsWith('- ')) {
-      const val = trimmed.slice(2).trim().replace(/^["']|["']$/g, '');
+      const rawItem = trimmed.slice(2).trim();
+      let val = rawItem.replace(/^["']|["']$/g, '');
+      if (rawItem.startsWith('"') && rawItem.endsWith('"')) {
+        try { val = JSON.parse(rawItem); } catch {}
+      }
       fm[currentArrayKey].push(val);
       continue;
     }
@@ -110,7 +114,11 @@ export function parseMemoryMarkdown(markdownText: string): {
         } else if (/^-?\d+(\.\d+)?$/.test(rawVal)) {
           parsedVal = Number(rawVal);
         } else {
-          parsedVal = rawVal.replace(/^["']|["']$/g, '');
+          if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
+            try { parsedVal = JSON.parse(rawVal); } catch { parsedVal = rawVal.slice(1, -1); }
+          } else {
+            parsedVal = rawVal.replace(/^["']|["']$/g, '');
+          }
         }
         fm[key] = parsedVal;
       }
@@ -158,7 +166,7 @@ export function exportToMarkdown(
   }
   if (options?.workspaceId) {
     sql += ' AND (workspace_id = ? OR workspace_id IS NULL)';
-    params.push(options.workspaceId);
+    params.push(resolveWorkspaceId(options.workspaceId));
   }
 
   sql += ' ORDER BY pinned DESC, updated_at DESC';
@@ -248,8 +256,8 @@ export function importFromMarkdown(
           summary: memSummary,
           slot_key: fm.slot_key || null,
           scope: memScope,
-          workspaceId: fm.workspace_id || options?.workspaceId,
-          sessionId: fm.session_id || options?.sessionId || 'import_session',
+          workspaceId: memScope === 'user' || memScope === 'global' ? undefined : (fm.workspace_id || options?.workspaceId),
+          sessionId: memScope === 'session' ? (fm.session_id || options?.sessionId || 'import_session') : undefined,
           source_kind: 'system',
           origin_kinds: ['system'],
           confidence: typeof fm.confidence === 'number' ? fm.confidence : 0.9,
@@ -295,7 +303,8 @@ export function trashMemory(
   const entities = entRows.map((r) => r.entity);
   const md = serializeMemoryToMarkdown(memory, entities);
 
-  const trashPath = path.join(trashDir, `${id}.md`);
+  const safeId = path.basename(id).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const trashPath = path.join(trashDir, `${safeId}.md`);
   fs.writeFileSync(trashPath, md, 'utf8');
 
   return { trashed: true, path: trashPath };
@@ -318,7 +327,8 @@ export function restoreFromTrash(
 
   // 2. 如果 DB 中彻底不存在但 trashDir 中有 md 文件，则重新导入
   if (trashDir) {
-    const trashFile = path.join(trashDir, `${id}.md`);
+    const safeId = path.basename(id).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const trashFile = path.join(trashDir, `${safeId}.md`);
     if (fs.existsSync(trashFile)) {
       const content = fs.readFileSync(trashFile, 'utf8');
       const parsed = parseMemoryMarkdown(content);

@@ -126,11 +126,35 @@ export function getSanitizedConfig(cfg: PluginConfig) {
   };
 }
 
+function isTrustedOrigin(originHeader?: string): boolean {
+  if (!originHeader) return true;
+  const trimmed = originHeader.trim();
+  if (trimmed === 'null' || trimmed.startsWith('file://') || trimmed.startsWith('app://') || trimmed.startsWith('dsh://')) {
+    return true;
+  }
+  try {
+    const u = new URL(trimmed);
+    const h = u.hostname.toLowerCase();
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+function isSameOriginUrl(urlA?: string, urlB?: string): boolean {
+  if (!urlA || !urlB) return false;
+  try {
+    return new URL(urlA.trim()).origin === new URL(urlB.trim()).origin;
+  } catch {
+    return urlA.trim() === urlB.trim();
+  }
+}
+
 function sendJson(res: ServerResponse, statusCode: number, data: unknown) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store, no-cache, must-revalidate',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': (res as any).__trustedOrigin || 'http://127.0.0.1',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   });
@@ -198,9 +222,18 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
     kind: 'prefix',
     path: API_PREFIX,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
+      const reqOrigin = typeof req?.headers?.origin === 'string' ? req.headers.origin : undefined;
+      if (reqOrigin && !isTrustedOrigin(reqOrigin)) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: 'Cross-origin request denied' }));
+        return;
+      }
+      if (reqOrigin) {
+        (res as any).__trustedOrigin = reqOrigin;
+      }
       if (req.method === 'OPTIONS') {
         res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': (res as any).__trustedOrigin || 'http://127.0.0.1',
           'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
           'Access-Control-Allow-Headers': 'Content-Type',
         });
@@ -820,6 +853,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               const now = Date.now();
               const resEdit = editContent(db, id, content.trim(), summary, 'user', now);
               if (resEdit.ok) {
+                const currentMem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
                 const updates: string[] = [];
                 const uParams: unknown[] = [];
                 if (type && typeof type === 'string') {
@@ -828,6 +862,20 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 }
                 if (scope && (scope === 'global' || scope === 'workspace' || scope === 'user' || scope === 'session')) {
                   updates.push('scope = ?');
+                  if (scope === 'global' || scope === 'user') {
+                    updates.push('workspace_id = NULL', 'session_id = NULL');
+                  } else if (scope === 'workspace') {
+                    updates.push('workspace_id = ?', 'session_id = NULL');
+                    uParams.push(scope, currentMem?.workspace_id || (body.workspaceId ? workspaceId(body.workspaceId) : workspaceId(process.cwd())));
+                  } else if (scope === 'session') {
+                    updates.push('workspace_id = ?', 'session_id = ?');
+                    uParams.push(
+                      scope,
+                      currentMem?.workspace_id || (body.workspaceId ? workspaceId(body.workspaceId) : workspaceId(process.cwd())),
+                      currentMem?.session_id || 'manual_ui_session'
+                    );
+                  }
+                  if (scope === 'global' || scope === 'user')
                   uParams.push(scope);
                 }
                 if (slot_key !== undefined) {
@@ -839,6 +887,21 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                   uParams.push(Math.round(importance));
                 }
                 if (updates.length > 0) {
+                  if (currentMem && (currentMem.status === 'active' || currentMem.status === 'frozen')) {
+                    const effScope = (scope && ['global', 'workspace', 'user', 'session'].includes(scope)) ? scope : currentMem.scope;
+                    const effWsId = (effScope === 'global' || effScope === 'user') ? null : (currentMem.workspace_id || (body.workspaceId ? workspaceId(body.workspaceId) : workspaceId(process.cwd())));
+                    const effSessId = effScope === 'session' ? (currentMem.session_id || 'manual_ui_session') : null;
+                    const effSlot = slot_key !== undefined ? (slot_key ? String(slot_key).trim() : null) : currentMem.slot_key;
+                    if (effSlot) {
+                      const conflict = db.get<{ id: string }>(
+                        `SELECT id FROM memories WHERE id != ? AND status IN ('active', 'frozen') AND scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ?`,
+                        [id, effScope, effWsId || '', effSessId || '', effSlot]
+                      );
+                      if (conflict) {
+                        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, updated_at = ?, version = version + 1 WHERE id = ?`, [now, now, conflict.id]);
+                      }
+                    }
+                  }
                   uParams.push(id);
                   db.run(`UPDATE memories SET ${updates.join(', ')} WHERE id = ?`, uParams);
                   if (type !== undefined || slot_key !== undefined) {
@@ -1175,7 +1238,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             res.writeHead(200, {
               'Content-Type': 'text/markdown; charset=utf-8',
               'Content-Disposition': 'attachment; filename="dsh-memories.md"',
-              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Origin': (res as any).__trustedOrigin || 'http://127.0.0.1',
             });
             res.end(fullMd);
             return;
@@ -1218,7 +1281,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 db,
                 {
                   type: normalizeMemoryType(item.type),
-                  scope: item.scope || 'global',
+                  scope: item.scope || (item.workspace_id || body.workspaceId ? 'workspace' : undefined),
                   workspaceId: item.workspace_id || body.workspaceId || undefined,
                   sessionId: item.session_id || undefined,
                   content: clean.text,
@@ -1278,7 +1341,11 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 patch.offlineLLM.useDshLlm = body.offlineLLM.useDshLlm;
               }
               if (typeof body.offlineLLM.baseURL === 'string') {
+                const prevBaseUrl = cfg.offlineLLM.baseURL || '';
                 patch.offlineLLM.baseURL = body.offlineLLM.baseURL.trim();
+                if (prevBaseUrl && patch.offlineLLM.baseURL && !isSameOriginUrl(prevBaseUrl, patch.offlineLLM.baseURL)) {
+                  patch.offlineLLM.apiKey = '';
+                }
                 if (patch.offlineLLM.baseURL && typeof body.offlineLLM.useDshLlm !== 'boolean') {
                   patch.offlineLLM.useDshLlm = false;
                 }
@@ -1398,7 +1465,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const isSameConfiguredEndpoint =
             !body.baseURL ||
             body.baseURL.trim() === (cfg.offlineLLM.baseURL || '').trim() ||
-            isOfflineEndpointAllowed(baseURL, cfg.privacy.allowedOfflineEndpoints, true);
+            isSameOriginUrl(baseURL, cfg.offlineLLM.baseURL);
 
           let apiKey = '';
           if (
@@ -1414,7 +1481,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const envName = (body.apiKeyEnv || cfg.offlineLLM.apiKeyEnv || '').trim();
           const isSafeEnvName =
             envName === cfg.offlineLLM.apiKeyEnv ||
-            /^[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET)[A-Z0-9_]*$/i.test(envName);
+            ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DASHSCOPE_API_KEY', 'DSH_MEMORY_API_KEY'].includes(envName.toUpperCase());
           if (!apiKey && envName && isSafeEnvName && isSameConfiguredEndpoint && process.env[envName]) {
             apiKey = process.env[envName]!;
           }

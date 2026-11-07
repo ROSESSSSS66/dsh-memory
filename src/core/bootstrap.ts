@@ -4,6 +4,7 @@ import os from 'node:os';
 import type { Db } from '../types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { workspaceId } from './scope.js';
+import { isWorkspaceExcluded } from './privacy.js';
 import { getCoreMemory, setCoreMemory } from './core-memory.js';
 import { upsertCandidate } from './writer.js';
 import { importFromMarkdown, importMemoryBank } from './markdown.js';
@@ -129,6 +130,20 @@ export function autoBootstrapMemory(
     strategyInitialized = true;
   }
 
+  if (isWorkspaceExcluded(wsPath, cfg.excludeWorkspaces)) {
+    return {
+      alreadyInitialized: false,
+      workspaceId: wsId,
+      strategyInitialized,
+      coreBlocksInitialized: [],
+      workspaceMemoriesSeeded: 0,
+      markdownMemoriesImported: 0,
+      backfillMemoriesCreated: 0,
+      backfillEventsAdded: 0,
+      embeddingsBackfilled: 0,
+      linksWeaved: 0,
+    };
+  }
   const existingMeta = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [metaKey]);
   if (existingMeta && !options.force) {
     return {

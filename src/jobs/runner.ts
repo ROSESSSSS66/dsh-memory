@@ -5,6 +5,21 @@ import { redactSecrets } from '../core/privacy.js';
 
 const jobHandlers = new Map<string, JobHandler>();
 let isJobRunning = false;
+let activeJobController: AbortController | null = null;
+let activeJobPromise: Promise<boolean> | null = null;
+
+export function abortRunningJob(): void {
+  if (activeJobController) {
+    try { activeJobController.abort(); } catch {}
+  }
+}
+
+export async function abortAndAwaitRunningJob(): Promise<void> {
+  abortRunningJob();
+  if (activeJobPromise) {
+    try { await activeJobPromise; } catch {}
+  }
+}
 
 export function registerJobHandler(kind: string, handler: JobHandler): void {
   jobHandlers.set(kind, handler);
@@ -45,7 +60,7 @@ export async function runNextJob(
   }
 
   isJobRunning = true;
-
+  const runInternal = async (): Promise<boolean> => {
   try {
     // 查找下一个就绪任务 (queued 且 next_eligible_at <= now，或 skipped 且到了次日恢复时间)
     const job = db.get<JobRecord>(
@@ -81,6 +96,7 @@ export async function runNextJob(
     // 设置执行超时 (默认 120s)
     const timeoutMs = cfg.jobTimeoutMs || 120_000;
     const controller = new AbortController();
+    activeJobController = controller;
     let isTimedOut = false;
     const timer = setTimeout(() => {
       isTimedOut = true;
@@ -106,6 +122,7 @@ export async function runNextJob(
       }
     } finally {
       clearTimeout(timer);
+      if (activeJobController === controller) activeJobController = null;
     }
 
     if (isTimedOut || controller.signal.aborted) {
@@ -162,5 +179,9 @@ export async function runNextJob(
     return true;
   } finally {
     isJobRunning = false;
+    activeJobPromise = null;
   }
+  };
+  activeJobPromise = runInternal();
+  return activeJobPromise;
 }

@@ -230,7 +230,7 @@ dsh-memory/
 │     ├─ runner.ts         # 评测套件执行器与规模不变性压测
 │     ├─ metrics.ts        # Recall@Inj、ExclViol、EmptyPrec 核心指标计算
 │     └─ eval-cli.ts       # 独立命令行评测门禁入口
-└─ test/                   # 50 个测试套件，302 个自动化单元测试与端到端验收用例
+└─ test/                   # 51 个测试套件，322 个自动化单元测试与端到端验收用例
 ```
 
 ---

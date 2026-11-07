@@ -31,6 +31,7 @@ export interface LLMConfigModalProps {
       model: string;
       apiKeyEnv: string;
       apiKey?: string;
+      clearApiKey?: boolean;
       protocol: LLMProtocolType;
     };
     privacy: {
@@ -128,6 +129,7 @@ export function LLMConfigModal({
   const [model, setModel] = useState('deepseek-chat');
   const [protocol, setProtocol] = useState<LLMProtocolType>('chat/completions');
   const [apiKey, setApiKey] = useState('');
+  const [clearKeyRequested, setClearKeyRequested] = useState(false);
   const [apiKeyEnv, setApiKeyEnv] = useState('DEEPSEEK_API_KEY');
   const [dailyCalls, setDailyCalls] = useState(40);
   const [dailyTokens, setDailyTokens] = useState(200000);
@@ -142,6 +144,7 @@ export function LLMConfigModal({
     model,
     protocol,
     apiKey,
+    clearKeyRequested,
     apiKeyEnv,
     dailyCalls,
     dailyTokens,
@@ -153,6 +156,7 @@ export function LLMConfigModal({
     model,
     protocol,
     apiKey,
+    clearKeyRequested,
     apiKeyEnv,
     dailyCalls,
     dailyTokens,
@@ -177,6 +181,7 @@ export function LLMConfigModal({
       setProtocol(config.offlineLLM.protocol || 'chat/completions');
       setApiKeyEnv(config.offlineLLM.apiKeyEnv ?? 'DEEPSEEK_API_KEY');
       setApiKey('');
+      setClearKeyRequested(false);
       setDailyCalls(config.dailyLLMCalls || 40);
       setDailyTokens(config.dailyLLMTokens || 200000);
       setDirty(false);
@@ -200,6 +205,7 @@ export function LLMConfigModal({
             model: cur.model.trim() || 'deepseek-chat',
             apiKeyEnv: cur.apiKeyEnv.trim(),
             apiKey: cur.apiKey.trim() !== '' ? cur.apiKey.trim() : undefined,
+            clearApiKey: cur.clearKeyRequested && cur.apiKey.trim() === '' ? true : undefined,
             protocol: cur.protocol,
           },
           privacy: {
@@ -237,6 +243,7 @@ export function LLMConfigModal({
         );
         setStatusTone('ok');
       } catch {
+        setDirty(true);
         setStatusText('保存失败，请检查网络连接');
         setStatusTone('err');
       }
@@ -333,7 +340,7 @@ export function LLMConfigModal({
             </div>
             <select
               className="dshm-field-select"
-              defaultValue=""
+              value=""
               onChange={(e) => handlePresetSelect(e.target.value)}
             >
               <option value="" disabled>
@@ -427,14 +434,14 @@ export function LLMConfigModal({
                 <div className="dshm-settings-label-row">
                   <label className="dshm-settings-label">API Key</label>
                   {config?.offlineLLM.hasApiKey && (
-                    <span
+                    <span onClick={() => { setClearKeyRequested(true); setApiKey(''); setDirty(true); }} title="点击清空已保存的密钥"
                       style={{
                         fontSize: 11,
                         fontFamily: 'var(--dshm-font-code)',
                         color: 'var(--dshm-valley-green)',
                       }}
                     >
-                      已保存 ({config.offlineLLM.apiKeyMasked})
+                      {clearKeyRequested ? '待清空已存密钥' : `已保存 (${config.offlineLLM.apiKeyMasked})`}
                     </span>
                   )}
                 </div>
@@ -443,6 +450,7 @@ export function LLMConfigModal({
                   className="dshm-field-input dshm-field-input--mono"
                   value={apiKey}
                   onChange={(e) => {
+                    setClearKeyRequested(false);
                     setApiKey(e.target.value);
                     setDirty(true);
                   }}

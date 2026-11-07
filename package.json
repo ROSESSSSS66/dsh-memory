@@ -27,6 +27,13 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src/core/migrations",
+    "scripts/postinstall.mjs",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

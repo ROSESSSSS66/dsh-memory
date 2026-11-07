@@ -53,7 +53,7 @@ export function get(
 
   if (scopeCtx?.workspaceId) {
     sql += ' AND (workspace_id = ? OR workspace_id IS NULL)';
-    params.push(scopeCtx.workspaceId);
+    params.push(workspaceId(scopeCtx.workspaceId));
   }
 
   const matches = db.all<MemoryRecord>(sql, params);
@@ -159,7 +159,7 @@ export function stats(db: Db, workspaceIdFilter?: string): MemoryStats {
   const params: unknown[] = [];
   if (workspaceIdFilter) {
     baseSql += ' WHERE workspace_id = ? OR workspace_id IS NULL';
-    params.push(workspaceIdFilter);
+    params.push(workspaceId(workspaceIdFilter));
   }
 
   const rows = db.all<{
@@ -234,6 +234,7 @@ export function getGraphData(
 
   const memRows = db.all<MemoryRecord>(memSql, params);
   const memIds = new Set(memRows.map((m) => m.id));
+  const validNodeIdSet = memIds;
 
   const nodes: GraphNode[] = [];
   const links: GraphLink[] = [];
@@ -269,6 +270,7 @@ export function getGraphData(
     );
 
     for (const r of relRows) {
+    if (!validNodeIdSet.has(r.from_id) || !validNodeIdSet.has(r.to_id)) continue;
       if (memIds.has(r.from_id) && memIds.has(r.to_id)) {
         links.push({
           source: r.from_id,
@@ -402,6 +404,10 @@ export function getSubgraph(
   const memRows = db.all<MemoryRecord>(
     `SELECT * FROM memories WHERE id IN (${placeholders})`,
     idArr
+  ).filter((m) => !wsId || m.id === center.id || !m.workspace_id || m.workspace_id === wsId);
+  const validNodeIdSet = new Set(memRows.map((m) => m.id));
+  void (
+    idArr
   );
 
   const nodes: GraphNode[] = [];
@@ -430,6 +436,7 @@ export function getSubgraph(
     [...idArr, ...idArr]
   );
   for (const r of relRows) {
+    if (!validNodeIdSet.has(r.from_id) || !validNodeIdSet.has(r.to_id)) continue;
     links.push({ source: r.from_id, target: r.to_id, rel: r.rel });
     bumpConn(r.from_id);
     bumpConn(r.to_id);
@@ -441,7 +448,7 @@ export function getSubgraph(
       idArr
     );
     const addedEntities = new Set<string>();
-    for (const r of entRows.slice(0, 20)) {
+    for (const r of entRows.filter((er) => validNodeIdSet.has(er.memory_id)).slice(0, 20)) {
       const entNodeId = `ent_${r.entity.replace(/[^a-zA-Z0-9_]/g, '_')}`;
       if (!addedEntities.has(entNodeId)) {
         addedEntities.add(entNodeId);

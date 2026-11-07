@@ -322,7 +322,25 @@ export async function distillSession(
               item.origin_kinds.includes('user') &&
               !item.origin_kinds.includes('web')
             ) {
-              db.run(
+              let canActivate = true;
+              const newMemRow = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [upsertRes.id]);
+              if (newMemRow?.slot_key) {
+                const slotConflict = db.get<MemoryRecord>(
+                  `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id != ?`,
+                  [newMemRow.scope, newMemRow.workspace_id || '', newMemRow.session_id || '', newMemRow.slot_key, newMemRow.id]
+                );
+                if (slotConflict) {
+                  if (slotConflict.status === 'frozen') {
+                    canActivate = false;
+                  } else {
+                    saveVersionSnapshot(db, slotConflict, 'llm_auto_supersede_slot', 'llm', now);
+                    db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ? WHERE id = ?`, [now, now, now, slotConflict.id]);
+                    removeCachedRuntimeEmbedding(slotConflict.id);
+                    addRelation(db, upsertRes.id, slotConflict.id, 'supersedes', now);
+                  }
+                }
+              }
+              if (canActivate) db.run(
                 `UPDATE memories
                  SET status = 'active', approved_at = ?, approved_by = 'llm-auto-update', updated_at = ?
                  WHERE id = ?`,

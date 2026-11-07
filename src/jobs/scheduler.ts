@@ -1,6 +1,6 @@
 import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import { runNextJob } from './runner.js';
+import { runNextJob, abortRunningJob, abortAndAwaitRunningJob } from './runner.js';
 import { recoverReservedToUnknown } from '../evolution/ledger.js';
 
 export interface EnqueueJobParams {
@@ -20,7 +20,14 @@ export function enqueueJob(db: Db, params: EnqueueJobParams): boolean {
   const res = db.run(
     `INSERT INTO jobs (kind, key, payload, status, attempts, created_at, next_eligible_at)
      VALUES (?, ?, ?, 'queued', 0, ?, 0)
-     ON CONFLICT(kind, key) DO NOTHING`,
+     ON CONFLICT(kind, key) DO UPDATE SET
+       status = 'queued',
+       attempts = 0,
+       payload = excluded.payload,
+       created_at = excluded.created_at,
+       next_eligible_at = 0,
+       error = NULL
+     WHERE jobs.status IN ('done', 'failed')`,
     [params.kind, params.key, payloadStr, now]
   );
 
@@ -86,10 +93,18 @@ export class JobScheduler {
    */
   scheduleTurnStopping(): void {
     if (this.isStopped) return;
+    if (this.isStopped) return;
+    for (const t of this.timers) {
+      clearTimeout(t);
+    }
+    this.timers.clear();
     const timer = setTimeout(async () => {
       this.timers.delete(timer);
       await this.triggerNow();
     }, 30_000);
+    if (typeof (timer as any).unref === 'function') {
+      (timer as any).unref();
+    }
     this.timers.add(timer);
   }
 
@@ -98,9 +113,15 @@ export class JobScheduler {
    */
   stop(): void {
     this.isStopped = true;
+    abortRunningJob();
     for (const t of this.timers) {
       clearTimeout(t);
     }
     this.timers.clear();
+  }
+
+  async stopAndWait(): Promise<void> {
+    this.stop();
+    await abortAndAwaitRunningJob();
   }
 }

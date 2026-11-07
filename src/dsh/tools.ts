@@ -8,7 +8,7 @@ import { fuseCandidates } from '../retrieval/fuse.js';
 import { getActiveStrategy } from '../evolution/strategy.js';
 import { TAG_MAP } from '../retrieval/render.js';
 import { budgetTokens } from '../core/tokens.js';
-import { redactSecrets } from '../core/privacy.js';
+import { redactSecrets, isWorkspaceExcluded } from '../core/privacy.js';
 import { upsertCandidate, confirmMemory, mergeMemories } from '../core/writer.js';
 import {
   getCoreMemory,
@@ -49,6 +49,7 @@ export class MemoryTools {
     params: { query: string; limit?: number; types?: string[] },
     agentCtx: { workspaceId: string; sessionId: string; turn?: number }
   ): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const rawQuery = (params.query || '').trim();
     if (!rawQuery) return 'Error: query is required';
     if (rawQuery.length > 500) return 'Error: query exceeds 500 characters';
@@ -221,6 +222,7 @@ export class MemoryTools {
     params: { id: string },
     agentCtx: { workspaceId: string; sessionId?: string; turn?: number }
   ): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const rawId = (params.id || '').trim();
     if (!rawId) return 'Error: memory id is required';
 
@@ -313,8 +315,9 @@ export class MemoryTools {
    */
   public feedback(
     params: { id: string; contentRev: number; helpful: boolean; note?: string },
-    agentCtx: { sessionId: string; turn?: number }
+    agentCtx: { workspaceId?: string; sessionId: string; turn?: number }
   ): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const rawId = (params.id || '').trim();
     const contentRev = Number(params.contentRev);
     if (!rawId || !Number.isInteger(contentRev) || contentRev < 1) {
@@ -400,6 +403,7 @@ export class MemoryTools {
     params: { content: string; kind: 'fact' | 'preference' | 'procedure' },
     agentCtx: { workspaceId: string; sessionId: string; turn?: number }
   ): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const rawContent = (params.content || '').trim();
     if (rawContent.length < 8 || rawContent.length > 400) {
       return 'Error: content length must be between 8 and 400 characters';
@@ -462,6 +466,7 @@ export class MemoryTools {
     params: { id: string },
     agentCtx: { workspaceId: string }
   ): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const rawId = (params.id || '').trim();
     if (!rawId) return 'Error: memory id is required';
 
@@ -487,6 +492,7 @@ export class MemoryTools {
     params: { sourceId: string; targetId: string; reason?: string },
     agentCtx: { workspaceId: string }
   ): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const srcId = (params.sourceId || '').trim();
     const tgtId = (params.targetId || '').trim();
     if (!srcId || !tgtId) return 'Error: sourceId and targetId are required';
@@ -517,11 +523,13 @@ export class MemoryTools {
     agentCtx: { workspaceId: string }
   ): string {
     const wsId = workspaceId(agentCtx.workspaceId);
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     if (params.block) {
       const entry = getCoreMemory(this.db, params.block, { workspaceId: wsId });
       if (!entry) return `Core memory block '${params.block}' is empty.`;
       return `[CORE MEMORY: ${entry.block.toUpperCase()}] (v${entry.version})\n${entry.content}`;
     }
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const all = getAllCoreMemories(this.db, { workspaceId: wsId });
     if (all.length === 0) return 'No core memory blocks configured.';
     return renderCoreMemoryMarkdown(all);
@@ -535,6 +543,7 @@ export class MemoryTools {
     agentCtx: { workspaceId: string }
   ): string {
     const wsId = workspaceId(agentCtx.workspaceId);
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     if (!params.block || !params.content) {
       return 'Error: both block and content are required';
     }
@@ -554,6 +563,7 @@ export class MemoryTools {
     agentCtx: { workspaceId: string }
   ): string {
     const wsId = workspaceId(agentCtx.workspaceId);
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     if (!params.block || !params.text) {
       return 'Error: both block and text are required';
     }
@@ -572,6 +582,7 @@ export class MemoryTools {
     params: { content: string; type?: string; slotKey?: string },
     agentCtx: { workspaceId: string; sessionId: string }
   ): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const rawContent = (params.content || '').trim();
     if (!rawContent) return 'Error: content is required for reconciliation';
 
@@ -607,6 +618,7 @@ export class MemoryTools {
       return this.heal(agentCtx);
     }
     const wsId = workspaceId(agentCtx.workspaceId);
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const report = auditMemoryHealth(this.db, { workspaceId: wsId });
     const lines = [
       `[Memory Health Doctor] Score: ${report.score}/100 (Grade ${report.grade})`,
@@ -634,6 +646,7 @@ export class MemoryTools {
    */
   public heal(agentCtx: { workspaceId: string }): string {
     const wsId = workspaceId(agentCtx.workspaceId);
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const res = autoHealMemoryHealth(this.db, { workspaceId: wsId });
     return [
       `[Memory Auto-Heal Completed] Score: ${res.beforeScore} -> ${res.afterScore}/100 (Grade ${res.afterGrade})`,
@@ -649,6 +662,7 @@ export class MemoryTools {
       agentCtx.workspaceId && fs.existsSync(agentCtx.workspaceId)
         ? agentCtx.workspaceId
         : process.cwd();
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const res = autoBootstrapMemory(this.db, {
       workspacePath: wsPath,
       cfg: this.cfg,

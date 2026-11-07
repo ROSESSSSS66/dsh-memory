@@ -76,7 +76,7 @@ async function main() {
       const db = mod.openDb(dbPath);
       try {
         const res = mod.autoBootstrapMemory(db, {
-          workspacePath: projectRoot,
+          workspacePath: (process.env.INIT_CWD && !process.env.INIT_CWD.includes('node_modules')) ? process.env.INIT_CWD : projectRoot,
           force,
           includeBackfill: true,
         });
@@ -115,7 +115,7 @@ async function main() {
       rawDb.exec(fs.readFileSync(sqlPath, 'utf8'));
       const now = Date.now().toString();
       rawDb.exec(
-        `INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '1'), ('contract_version', '1.1'), ('created_at', '${now}');`
+        `INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '1'), ('contract_version', '1.1'); INSERT OR IGNORE INTO meta(key, value) VALUES ('created_at', '${now}');`
       );
       rawDb.close();
       logInfo(`[dsh-memory] ✅ 数据库基础 Schema 已初始化: ${dbPath}`);

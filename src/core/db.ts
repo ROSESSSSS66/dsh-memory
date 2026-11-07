@@ -74,8 +74,9 @@ export function openDb(dbPath: string = ':memory:'): Db {
         }
       } else {
         // 嵌套事务使用 SAVEPOINT
-        const sp = `sp_${savepointDepth++}`;
+        const sp = `sp_${savepointDepth}`;
         rawDb.exec(`SAVEPOINT ${sp};`);
+        savepointDepth++;
         try {
           const result = fn();
           rawDb.exec(`RELEASE SAVEPOINT ${sp};`);

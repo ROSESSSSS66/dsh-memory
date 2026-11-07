@@ -1,6 +1,7 @@
 import type { Db, MemoryRecord } from '../types.js';
 import { tokenSet, jaccard, extractEntities } from './text.js';
 import { estimateTokens } from './tokens.js';
+import { workspaceId } from './scope.js';
 import { getCoreMemory, setCoreMemory } from './core-memory.js';
 import {
   getOrComputeEmbedding,
@@ -95,8 +96,9 @@ export function auditMemoryHealth(
   options: { workspaceId?: string; now?: number; maxDuplicates?: number } = {}
 ): MemoryHealthReport {
   const now = options.now ?? Date.now();
+  if (options.workspaceId) options = { ...options, workspaceId: workspaceId(options.workspaceId) };
   const maxDuplicates = options.maxDuplicates ?? 15;
-  const wsFilter = options.workspaceId;
+  const wsFilter = options.workspaceId ? workspaceId(options.workspaceId) : undefined;
 
   const statusRows = wsFilter
     ? db.all<{ status: string; cnt: number; pinned_cnt: number }>(
@@ -223,6 +225,12 @@ export function auditMemoryHealth(
         a.slot_key && b.slot_key && normSlot(a.slot_key) === normSlot(b.slot_key)
       );
       const setB = tokenCache.get(b.id)!;
+      if (a.slot_key && b.slot_key && !sameSlot) continue;
+      if (!sameSlot) {
+        const numsA = (a.content.match(/\d+(?:\.\d+)?/g) || []).join(',');
+        const numsB = (b.content.match(/\d+(?:\.\d+)?/g) || []).join(',');
+        if (numsA && numsB && numsA !== numsB) continue;
+      }
       const sim = jaccard(setA, setB);
 
       const vecB = vecCache.get(b.id);
@@ -451,6 +459,14 @@ function areScopesCompatibleForWeaving(
   a: { scope: string; workspace_id: string | null },
   b: { scope: string; workspace_id: string | null }
 ): boolean {
+  if (a.scope === 'session' || b.scope === 'session') {
+    return (
+      a.scope === 'session' &&
+      b.scope === 'session' &&
+      (a.workspace_id || '') === (b.workspace_id || '') &&
+      ((a as any).session_id || '') === ((b as any).session_id || '')
+    );
+  }
   if (a.workspace_id && b.workspace_id && a.workspace_id === b.workspace_id) {
     return true;
   }
@@ -478,7 +494,7 @@ export function weaveZettelkastenLinks(
   const opts = typeof options === 'string' ? { workspaceId: options } : options;
   const now = opts.now ?? Date.now();
   const maxNewLinks = opts.maxNewLinks ?? 60;
-  const wsFilter = opts.workspaceId;
+  const wsFilter = opts.workspaceId ? workspaceId(opts.workspaceId) : undefined;
 
   const activeRows = wsFilter
     ? db.all<{
@@ -703,6 +719,7 @@ export function weaveZettelkastenLinks(
         for (const peer of activeRows) {
           if (peer.id === orphan.id) continue;
           if (existingPairs.has(`${orphan.id}->${peer.id}`)) continue;
+          if (orphan.workspace_id && peer.workspace_id && orphan.workspace_id !== peer.workspace_id) continue;
           const { affinity } = computePairAffinity(orphan, peer);
           if (affinity > bestScore) {
             bestScore = affinity;
@@ -738,6 +755,7 @@ export function autoHealMemoryHealth(
   options: { workspaceId?: string; now?: number } = {}
 ): AutoHealResult {
   const now = options.now ?? Date.now();
+  if (options.workspaceId) options = { ...options, workspaceId: workspaceId(options.workspaceId) };
   const beforeReport = auditMemoryHealth(db, { workspaceId: options.workspaceId, now });
 
   // 1. 修复 FTS5 倒排索引
@@ -921,6 +939,7 @@ export function syncAutonomousCoreMemory(
   options: { workspaceId?: string; maxBlockTokens?: number; now?: number } = {}
 ): number {
   const maxBlockTokens = options.maxBlockTokens ?? 220;
+  if (options.workspaceId) options = { ...options, workspaceId: workspaceId(options.workspaceId) };
   let blocksUpdated = 0;
 
   const trySyncBlock = (

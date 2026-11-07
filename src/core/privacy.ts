@@ -73,7 +73,7 @@ export function redactSecrets(input: string): RedactResult {
   }
 
   // 6. 显式敏感字段赋值 (例如 api_key = "...", password: "...")
-  const keyValRegex = /\b(api[_-]?key|secret|password|passwd|access[_-]?token|auth[_-]?token|private[_-]?key)\s*([:=])\s*(['"]?)([^\s'"]{8,})\3/gi;
+  const keyValRegex = /\b([a-z0-9_]*?(?:api[_-]?key|secret|password|passwd|access[_-]?token|auth[_-]?token|private[_-]?key))(['"]?\s*[:=]\s*)(['"]?)([^\s'"`,;}{]{8,})\3/gi;
   if (keyValRegex.test(text)) {
     detectedKinds.push('SECRET_KEY');
     keyValRegex.lastIndex = 0;
