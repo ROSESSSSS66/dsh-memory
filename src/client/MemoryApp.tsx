@@ -1,11 +1,14 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { MEMORY_STYLES } from './styles.js';
 import { MemoryHeader } from './components/MemoryHeader.js';
 import { LLMConfigModal, type LLMConfigData } from './components/LLMConfigModal.js';
-import type { OverviewStatsData } from './components/StatCards.js';
-import type { MemoryItem } from './components/MemoryCard.js';
-import type { CoreMemoryBlock } from './components/CoreMemoryView.js';
-import type { JobLogItem, MemoryHealthReportData } from './components/EvolutionView.js';
+import type {
+  OverviewStatsData,
+  MemoryItem,
+  CoreMemoryBlock,
+  JobLogItem,
+  MemoryHealthReportData,
+} from './types.js';
 
 const API_PREFIX = '/api/dsh-memory';
 
@@ -26,6 +29,13 @@ const TYPE_SHORT: Record<string, string> = {
   meta: '元认知',
 };
 
+const SCOPE_LABELS: Record<string, string> = {
+  global: '全局',
+  user: '用户',
+  workspace: '工作区',
+  session: '会话',
+};
+
 function formatRelativeTime(ts?: number | null): string {
   if (!ts) return '—';
   const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
@@ -42,7 +52,9 @@ export function MemoryApp() {
   const [healthData, setHealthData] = useState<MemoryHealthReportData | null>(null);
   const [coreBlocks, setCoreBlocks] = useState<CoreMemoryBlock[]>([]);
   const [coreTokens, setCoreTokens] = useState(0);
+  const [stableLayerTokens, setStableLayerTokens] = useState(0);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [filterQuery, setFilterQuery] = useState('');
   const [recentJobs, setRecentJobs] = useState<JobLogItem[]>([]);
   const [llmConfig, setLlmConfig] = useState<LLMConfigData | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
@@ -52,14 +64,19 @@ export function MemoryApp() {
       const [stRes, hlRes, crRes, memRes, evoRes] = await Promise.all([
         fetch(`${API_PREFIX}/stats`),
         fetch(`${API_PREFIX}/health`),
-        fetch(`${API_PREFIX}/core`),
-        fetch(`${API_PREFIX}/memories?status=active&limit=40`),
+        fetch(`${API_PREFIX}/core-memory`),
+        fetch(`${API_PREFIX}/memories?status=live&excludeCore=1&limit=60`),
         fetch(`${API_PREFIX}/evolution`),
       ]);
 
       if (stRes.ok) {
         const j = await stRes.json();
-        if (j.ok) setStatsData(j);
+        if (j.ok) {
+          setStatsData(j);
+          if (typeof j.stableLayerTokens === 'number') {
+            setStableLayerTokens(j.stableLayerTokens);
+          }
+        }
       }
       if (hlRes.ok) {
         const j = await hlRes.json();
@@ -70,6 +87,9 @@ export function MemoryApp() {
         if (j.ok) {
           setCoreBlocks(j.blocks || []);
           setCoreTokens(j.totalTokens || 0);
+          if (typeof j.stableLayerTokens === 'number') {
+            setStableLayerTokens(j.stableLayerTokens);
+          }
         }
       }
       if (memRes.ok) {
@@ -142,7 +162,23 @@ export function MemoryApp() {
         llmConfig?.offlineLLM?.baseURL)
   );
 
-  const activeCount = statsData?.stats.active ?? 0;
+  const filteredMemories = useMemo(() => {
+    const q = filterQuery.trim().toLowerCase();
+    if (!q) return memories;
+    return memories.filter((m) => {
+      const typeLabel = TYPE_SHORT[m.type] || m.type;
+      return (
+        m.summary?.toLowerCase().includes(q) ||
+        m.content?.toLowerCase().includes(q) ||
+        (m.slot_key && m.slot_key.toLowerCase().includes(q)) ||
+        m.type.toLowerCase().includes(q) ||
+        typeLabel.toLowerCase().includes(q) ||
+        m.id.toLowerCase().includes(q)
+      );
+    });
+  }, [memories, filterQuery]);
+
+  const activeCount = (statsData?.stats.active ?? 0) + (statsData?.stats.frozen ?? 0);
   const totalCount = statsData?.stats.total ?? 0;
   const candidateCount = statsData?.stats.candidate ?? 0;
 
@@ -150,6 +186,7 @@ export function MemoryApp() {
   const dynamicBudget = statsData?.dynamicBudgetTokens ?? 1600;
   const stableBudget = statsData?.stableBudgetTokens ?? 600;
   const hardBudget = statsData?.hardBudgetTokens ?? 3200;
+  const effectiveStableTokens = stableLayerTokens > 0 ? stableLayerTokens : coreTokens;
 
   const correctionRate = statsData?.recentTelemetry.correctionRate ?? 0;
   const signalAccuracy = Number(Math.max(0, 100 - correctionRate).toFixed(1));
@@ -159,11 +196,13 @@ export function MemoryApp() {
   const maxDailyCalls = statsData?.ledger.maxDailyCalls ?? 40;
   const tokensToday = statsData?.ledger.tokensToday ?? 0;
 
-  const stableShare = Math.min(100, (coreTokens / Math.max(1, hardBudget)) * 100);
+  const stableShare = Math.min(100, (effectiveStableTokens / Math.max(1, hardBudget)) * 100);
   const dynamicShare = Math.min(
     100 - stableShare,
     (avgTokens / Math.max(1, hardBudget)) * 100
   );
+
+  const primaryRecommendation = healthData?.recommendations?.[0] || '';
 
   return (
     <div className="dshm-root">
@@ -189,13 +228,13 @@ export function MemoryApp() {
           <div className="dshm-usage-head">
             <span className="dshm-usage-head-title">Overview</span>
             <span className="dshm-usage-head-caption">
-              本地七路混合快环 &lt; 1ms · 每 8s 自动同步
+              本地七路混合快环 &lt; 1ms · 128D 内联向量 · 每 8s 自动同步
             </span>
           </div>
 
           <div className="dshm-stat-grid">
             <div className="dshm-stat-tile">
-              <span className="dshm-stat-tile-label">活跃记忆</span>
+              <span className="dshm-stat-tile-label">生效记忆</span>
               <div className="dshm-stat-tile-value-row">
                 <span className="dshm-stat-tile-value">{activeCount}</span>
                 <span className="dshm-stat-tile-sub">
@@ -211,7 +250,7 @@ export function MemoryApp() {
                   {healthData ? `${healthData.grade} · ${healthData.score}` : 'A+ · 100'}
                 </span>
                 <span className="dshm-stat-tile-sub">
-                  {healthData?.ftsConsistent === false ? '自愈同步中' : 'FTS5 同步'}
+                  {healthData?.ftsConsistent === false ? '自愈同步中' : 'FTS5 · 向量同步'}
                 </span>
               </div>
             </div>
@@ -227,7 +266,7 @@ export function MemoryApp() {
             <div className="dshm-stat-tile">
               <span className="dshm-stat-tile-label">常驻稳定层</span>
               <div className="dshm-stat-tile-value-row">
-                <span className="dshm-stat-tile-value">{coreTokens} tok</span>
+                <span className="dshm-stat-tile-value">{effectiveStableTokens} tok</span>
                 <span className="dshm-stat-tile-sub">/ {stableBudget} 预算</span>
               </div>
             </div>
@@ -267,11 +306,15 @@ export function MemoryApp() {
             </div>
             <div className="dshm-yardstick-legend">
               <span>
-                常驻稳定层 {coreTokens}t · 动态检索层 {avgTokens}t
+                常驻稳定层 {effectiveStableTokens}t (Core {coreTokens}t) · 动态检索层 {avgTokens}t
               </span>
               <span>总上下文硬上限 {hardBudget} tok</span>
             </div>
           </div>
+
+          {primaryRecommendation && (
+            <div className="dshm-doctor-note">{primaryRecommendation}</div>
+          )}
         </section>
 
         {/* 3. Core Memory (System Prompt Stable Layer) */}
@@ -279,7 +322,7 @@ export function MemoryApp() {
           <section className="dshm-section" aria-label="常驻核心记忆">
             <div className="dshm-section-head">
               <span className="dshm-section-label">常驻核心记忆 · Core Memory</span>
-              <span className="dshm-section-sub">智能体对话中自动演进同步</span>
+              <span className="dshm-section-sub">智能体对话与高效用规则自动演进同步</span>
             </div>
 
             <div className="dshm-core-grid">
@@ -304,18 +347,35 @@ export function MemoryApp() {
         <section className="dshm-section" aria-label="活跃记忆流">
           <div className="dshm-section-head">
             <span className="dshm-section-label">活跃记忆流 · Active Memories</span>
-            <span className="dshm-section-sub">
-              {memories.length} 条生效中 · 点击任意行展开详情
-            </span>
+            <div className="dshm-section-head-right">
+              {memories.length > 0 && (
+                <input
+                  type="search"
+                  className="dshm-filter-input"
+                  value={filterQuery}
+                  onChange={(e) => setFilterQuery(e.target.value)}
+                  placeholder="筛选槽位 / 内容 / 类型..."
+                  aria-label="筛选记忆"
+                />
+              )}
+              <span className="dshm-section-sub">
+                {filterQuery.trim()
+                  ? `${filteredMemories.length} / ${memories.length} 条`
+                  : `${memories.length} 条生效中`}{' '}
+                · 点击行展开
+              </span>
+            </div>
           </div>
 
-          {memories.length === 0 ? (
+          {filteredMemories.length === 0 ? (
             <div className="dshm-empty-box">
-              全自动记忆引擎已就绪。在对话过程中，系统将自动捕获事实、开发偏好与排错经验，并在后台完成冲突消解与沉淀。
+              {memories.length === 0
+                ? '全自动记忆引擎已就绪。在对话过程中，系统将自动捕获事实、开发偏好与排错经验，并在后台完成冲突消解与沉淀。'
+                : '未匹配到符合当前筛选词的记忆。清空搜索框即可查看全部生效记忆。'}
             </div>
           ) : (
             <div className="dshm-process-card">
-              {memories.map((m) => (
+              {filteredMemories.map((m) => (
                 <details key={m.id} className="dshm-process-item">
                   <summary className="dshm-process-summary">
                     <div className="dshm-process-left">
@@ -323,7 +383,7 @@ export function MemoryApp() {
                         className="dshm-process-kind"
                         data-pinned={m.pinned ? '1' : '0'}
                       >
-                        {m.pinned ? '★ ' : ''}
+                        {m.status === 'frozen' ? '❄ ' : m.pinned ? '★ ' : ''}
                         {TYPE_SHORT[m.type] || m.type}
                       </span>
                       <span className="dshm-process-title">
@@ -349,10 +409,14 @@ export function MemoryApp() {
                       <span>ID: {m.id.slice(-8)}</span>
                       <span>版本: v{m.version}</span>
                       <span>
-                        作用域: {m.scope === 'global' ? '全局' : '工作区'}
+                        作用域: {SCOPE_LABELS[m.scope] || m.scope}
                       </span>
                       <span>置信度: {Math.round((m.confidence ?? 0.8) * 100)}%</span>
-                      <span>累计召回: {m.use_count} 次</span>
+                      <span>重要度: {m.importance ?? 5}/10</span>
+                      <span>
+                        召回: {m.use_count} 次
+                        {m.success_count ? ` (正反馈 ${m.success_count})` : ''}
+                      </span>
                       <span>开销: {m.token_cost} tok</span>
                     </div>
                   </div>
@@ -367,7 +431,7 @@ export function MemoryApp() {
           <section className="dshm-section" aria-label="后台自治流水">
             <div className="dshm-section-head">
               <span className="dshm-section-label">后台自治流水 · Slow-Loop Jobs</span>
-              <span className="dshm-section-sub">对话间隙自动调度</span>
+              <span className="dshm-section-sub">水位线无死锁闭环调度</span>
             </div>
 
             <div className="dshm-process-card">

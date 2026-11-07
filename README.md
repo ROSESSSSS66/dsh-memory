@@ -1,27 +1,27 @@
 # 🧠 DSH Self-Evolving Memory System (`dsh-memory`)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.5.0_HippoRAG_2_%2B_SYNAPSE_%2B_LightMem_MMR-indigo?style=flat-square" alt="v0.5.0" />
+  <img src="https://img.shields.io/badge/Version-v0.7.0_Hybrid_MMR_%26_Autonomous_Core_Sync-indigo?style=flat-square" alt="v0.7.0" />
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
   <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
-  <img src="https://img.shields.io/badge/Tests-295_Passed_(49_Suites)-success?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-302_Passed_(50_Suites)-success?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Recall%40Inject-100.0%25_(120%2F120)-blueviolet?style=flat-square" alt="Recall Rate" />
-  <img src="https://img.shields.io/badge/Online_Latency-p95_0.8ms-red?style=flat-square" alt="Latency" />
+  <img src="https://img.shields.io/badge/Online_Latency-p95_0.9ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />
 </p>
 
 <p align="center">
-  <b>专为 DeepSeek Desktop (DSH) 打造的亚毫秒级、自进化、可解释长期记忆引擎</b><br>
-  融合 <b>HippoRAG 2 多源汇聚 PPR 激活</b> · <b>SYNAPSE 扇出衰减多跳扩散</b> · <b>LightMem 次模 MMR 边际去重装箱</b> · <b>A-Mem (NeurIPS 2025) 卡片盒双链织网</b> · <b>ACT-R 频次强化半衰期</b> · <b>安装即自动初始化记忆</b> · <b>Letta 常驻核心块</b> · <b>Zep/Mem0 混合冲突调和</b>
+  <b>专为 DeepSeek Desktop (DSH) 打造的亚毫秒级、零干预自进化、可解释长期记忆引擎</b><br>
+  融合 <b>写入期同步 128D 语义向量持久化</b> · <b>HippoRAG 2 多源汇聚 PPR 激活</b> · <b>SYNAPSE 扇出衰减多跳扩散</b> · <b>LightMem 词法-语义混合次模 MMR 装箱</b> · <b>A-Mem 卡片盒双链织网</b> · <b>Letta 核心块自主晋升同步</b> · <b>蒸馏-Mem0 调和闭环</b> · <b>Claude Studio 单按钮极简控制台</b>
 </p>
 
 <p align="center">
   <a href="#-为什么选择-dsh-memory">核心优势</a> •
   <a href="#-主流记忆方案横向对比">范式对比</a> •
   <a href="#️-快慢双环架构设计">双环架构</a> •
-  <a href="#-glassmorphism-可视化工作台">可视化工作台</a> •
+  <a href="#-claude-studio-极简自治控制台">自治控制台</a> •
   <a href="#-快速上手与挂载">快速上手</a> •
   <a href="#-交互指南与工具矩阵">交互指南</a> •
   <a href="#-权威评测与性能基准">评测基准</a>
@@ -57,21 +57,21 @@
 
 ### 💡 `dsh-memory` 的破局之道
 
-- ⚡ **亚毫秒级纯本地七路混合快环（p95 仅 `0.6~1.4ms`）**：在线检索链路坚持 **0 网络请求、0 外部 API 依赖、0 原生 C++ 编译负担**。基于 Node.js 24 原生 `node:sqlite` + FTS5 全文引擎、**128 维本地确定性特征哈希向量（含 4096 容量即时 LRU 内存兜底，新写入 0 秒延迟可召回）** 与 **SYNAPSE (Jan 2026) / HippoRAG 2 扇出衰减 1~2 跳激活扩散（`computeFanAttenuation` + `expandGraphNeighbors`）+ A-Mem (NeurIPS 2025) 自动卡片盒双链织网**，七路并发召回在 10,000 条记忆规模下依然保持 `p50 = 19.8ms / p95 = 22.1ms` 极速响应。
-- 🌱 **安装即用 · 全自动工作区记忆冷启动初始化 (`Auto-Bootstrap`) `[v0.4.0]`**：在执行 `npm install`（通过 `postinstall` 钩子）或插件首次挂载启动时，自动扫描当前操作系统与工作区 `package.json` / `tsconfig.json` / `src/` 架构，幂等初始化 **Letta 三大常驻核心块 (`human` / `persona` / `project`)**、导入 `.dsh/memory-bank` 笔记、沉淀工程架构与构建命令种子记忆、流式回填历史 DSH 会话日志，并自动补齐 128D 向量与编织 A-Mem 图谱关联边，彻底消除新项目“空库冷启动”问题。
-- 🎯 **规模不变性动态装箱（Token Governor）**：采用“稳定层（System Prompt 常驻偏好 + Letta Core Memory）+ 动态层（`pre-step` 价值密度背包算法）”双层注入。实测记忆库从 1,000 条扩容至 10,000 条时，单轮注入 Token 均值稳定在 **157 tokens**，体积膨胀率仅 **0.28%**。
-- 🧬 **可验证、可回滚的闭环自进化（ACT-R + EvolveMem + RIME）**：融合 **ACT-R / Ebbinghaus 间隔重复基础激活模型（`computeActRBaseActivation`）**，高频命中与正向确认的记忆自动拉长有效半衰期；后台慢环在严格配额风控下自动完成**会话经验蒸馏**、**失败归因反思**、**负反馈触发式冲突修复（RIME）**，并通过 **EvolveMem 进化实验舱**自动搜寻更优检索权重。
+- ⚡ **亚毫秒级纯本地七路混合快环（p95 仅 `0.6~1.4ms`）**：在线检索链路坚持 **0 网络请求、0 外部 API 依赖、0 原生 C++ 编译负担**。基于 Node.js 24 原生 `node:sqlite` + FTS5 全文引擎、**写入期事务内同步持久化的 128 维确定性语义特征向量（融合路径层级目录前缀 `dir:`、中文 3-gram 亚词特征与 Top-400 效用优先扫描，消除 >150 条冷启动盲区）** 与 **SYNAPSE (Jan 2026) / HippoRAG 2 扇出衰减 1~2 跳激活扩散（`computeFanAttenuation` + `expandGraphNeighbors`）+ A-Mem (NeurIPS 2025) 自动卡片盒双链织网**，七路并发召回在 10,000 条记忆规模下依然保持极速响应。
+- 🌱 **安装即用 · 全自动工作区记忆冷启动与核心块自主演进 (`Auto-Bootstrap & Autonomous Core Sync`) `[v0.7.0]`**：在执行 `npm install`（通过 `postinstall` 钩子）或插件首次挂载启动时，自动扫描当前工程架构并幂等初始化 **Letta 三大常驻核心块 (`human` / `persona` / `project`)**；随着日常高频协作，记忆自愈引擎（`syncAutonomousCoreMemory`）还会自动将跨轮验证过的高效用偏好与工程规范幂等晋升同步至 Core Memory，无需手动维护。
+- 🎯 **词法-语义混合次模装箱（Hybrid MMR Token Governor）`[v0.7.0]`**：采用“稳定层（System Prompt 常驻偏好 + Letta Core Memory）+ 动态层（`pre-step` 词法 Jaccard + 128D 余弦混合次模 MMR 背包算法）”双层注入，精准抑制同义不同词的近似复述挤占窗口。实测记忆库从 1,000 条扩容至 10,000 条时，单轮注入 Token 均值稳定在 **~170 tokens**，体积膨胀率仅 **0.28%**。
+- 🧬 **零人工干预的闭环自进化（水位线连续蒸馏 + Mem0 调和 + RIME 自愈 + EvolveMem）`[v0.7.0]`**：多轮长会话采用水位线序列键（`${sessionId}:seq:${minSeq}`）连续增量蒸馏，蒸馏产物在落盘前自动经由 **Mem0 混合冲突调和器** 执行去重与 `contradicts` / `supersedes` 因果挂接；后台自动应用已验证 RIME 修复提案、晋升高置信度候选记忆，并通过 **EvolveMem 进化实验舱** 搜寻更优检索权重。
 
-### 📚 v0.5.0 核心算法学术论文底座 (2025–2026 前沿研究落地)
+### 📚 v0.7.0 核心算法学术论文底座 (2025–2026 前沿研究落地)
 
-| 论文 / 范式来源 | 核心机制 | 在 `dsh-memory` v0.5.0 中的工程落地 |
+| 论文 / 范式来源 | 核心机制 | 在 `dsh-memory` v0.7.0 中的工程落地 |
 |---|---|---|
 | **HippoRAG 2** (*From RAG to Memory: Non-Parametric Continual Learning*, ICML 2025, arXiv:2502.14802) | **多源汇聚 PPR 激活累加 & 多跳阻尼传播** | `expandGraphNeighbors` 与 `fuseCandidates` 支持 1~2 跳阻尼传播（$\gamma = 0.45$），当多个硬门槛种子节点汇聚激活同一关联邻居时，累加 RRF 能量并授予多源协同增益（`convergentSeeds`） |
 | **SYNAPSE** (*Empowering LLM Agents with Episodic-Semantic Memory via Spreading Activation*, Jan 2026, arXiv:2601.02744) | **ACT-R 扇出注意力稀释 (Fan Effect)** 与间隔重复 | 实现 `computeFanAttenuation(degree)`：高连接度 Hub 种子节点度数越高，单条边激活权重按 $1 / (1 + 0.25 \ln d)$ 自动衰减；结合 `computeActRBaseActivation` 频次强化半衰期 |
-| **LightMem** (*Submodular Context Packing & Memory Compression*, 2025) | **次模 MMR 边际信息密度背包 (`MMR-VPT`)** | `governor.ts` 实现 `computeMmrMarginalScore`：在锚定最高分记忆后，对与已选集合词法重叠 $\ge 0.58$ 的近似复述候选施加次模边际折损，最大化有限 Token 预算下的正交信息熵 |
+| **LightMem** (*Submodular Context Packing & Memory Compression*, 2025) | **词法-语义混合次模 MMR 背包 (`Hybrid MMR-VPT`)** | `governor.ts` 实现 `computeHybridOverlap` + `computeMmrMarginalScore`：同时融合词法 Jaccard 与 128D 向量余弦相似度（同类型余弦 $\ge 0.58$ 即识别语义复述），最大化有限 Token 预算下的正交信息熵 |
 | **A-Mem** (*Agentic Memory for LLM Agents*, NeurIPS 2025, arXiv:2502.12110) | **Zettelkasten 卡片盒动态双链织网** | 写入新记忆 (`upsertCandidate`) 与健康自愈 (`weaveZettelkastenLinks`) 时，基于 `0.45 * 128D余弦 + 0.35 * 词法Jaccard + 0.20 * 实体共现` 自动为孤立记忆建立 Top-3 双向 `related` 关联边 |
-| **Zep / Graphiti & Mem0** (arXiv:2501.13956, 2025) | **双时态规范槽位推演与向量-词法混合调和** | `reconciler.ts` 自动结合 `resolveFixedSlot` 规范槽位推演与 `0.55 * Jaccard + 0.45 * 128D Cosine` 混合相似度，精准决断 `ADD / UPDATE / DELETE / NOOP` |
-| **MemRL / AgeMem / EvolveMem** (2025–2026) | **效用价值学习与高饱和帕累托策略进化** | 在线追踪引用反馈 (`outcome.ts`) 动态绑定当前活跃策略版本，并在策略实验室 (`lab.ts`) 支持高召回饱和区（$\ge 98.5\%$）下的 Token 降本帕累托晋升 |
+| **Zep / Graphiti & Mem0** (arXiv:2501.13956, 2025) | **蒸馏-调和全闭环与规范槽位推演** | `extractor.ts` 与 `reconciler.ts` 深度打通：慢环蒸馏产物自动归一化工作区哈希并结合规范槽位与混合相似度决断 `ADD / UPDATE / DELETE / NOOP`，自动编织新旧技术栈演进因果边 |
+| **Letta / MemGPT + MemRL / EvolveMem** (2025–2026) | **常驻核心记忆自主同步与帕累托策略进化** | `syncAutonomousCoreMemory` 将经实战检验的高置信偏好/规范幂等同步至 `human` / `project` 核心块；`lab.ts` 基于真实收获样本（`eval_cases`）执行策略变异寻优与哨兵自动回滚 |
 
 ---
 
@@ -79,7 +79,7 @@
 
 `dsh-memory` 并非单一的向量检索插件，而是将业界五大前沿 Agent 记忆范式深度融合于纯本地双环引擎之中：
 
-| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.5.0)** |
+| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.7.0)** |
 |---|---|---|---|---|
 | **安装后冷启动** | ❌ 空白库，需手动逐条喂入 | ❌ 需手动编写多份 Markdown | ❌ 空白库，需业务侧自行灌库 | **✅ `npm install` 后 `postinstall` 与首次启动全自动扫描工程并初始化记忆** |
 | **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **`0.6 ~ 1.4ms` (p95，纯本地七路 SYNAPSE + A-Mem + 向量混合召回)** |
@@ -123,31 +123,24 @@ flowchart TD
 
 ---
 
-## 🎨 Glassmorphism 可视化工作台
+## 🎨 Claude Studio 极简自治控制台
 
-`dsh-memory` 内置一套深度定制的 **Light / Dark 双色自适应毛玻璃（Glassmorphism）侧栏工作台**，无需敲击命令行即可全盘掌控智能体的大脑状态。工作台涵盖 **五大交互视图**：
+`dsh-memory` 内置对齐 **`Nwflower/dsh-claude-style`** 视觉体系的 **Claude Desktop Studio 极简自治侧栏控制台**，直连 `--dsw-alias-*` 与 `--dsh-claude-*` 原生设计令牌，奉行 **“系统全自治运行、界面零手工按钮负担”** 的设计哲学：
 
-### 1. 🗂️ 记忆浏览与时间线视图 (`Browse & Timeline`)
-- **多维交叉检索**：支持按记忆类型（`preference` / `procedural` / `semantic` / `episodic` / `goal` / `failure` 等 8 类）、生命周期状态（`active` / `candidate` / `superseded` / `frozen`）、作用域（`workspace` / `user` / `global` / `session`）与置顶状态实时过滤。
-- **三态布局切换**：支持 **卡片网格（Grid）**、**高密度列表（Compact）** 与 **按日分组时间轴（Timeline）** 一键切换，配合顶部批量操作栏（**批量审批、批量确认**、批量置顶、归档、冻结、导出）。
-- **深度溯源与内联建边弹窗 `[v0.3.0]`**：点击任意记忆即可检视其置信度、EMA 效用值、提取来源会话片段、**双向因果与拓扑关联胶囊（点击直达目标记忆，并支持内联 `+ 建立拓扑关联` 创建 `related / derived_from / supersedes / contradicts` 边）** 以及完整的历史修订快照回滚。
+### 1. 🔘 全局唯一交互按钮：模型配置热保存浮层 (`LLMConfigModal`)
+- 整个侧栏控制台严格仅保留右上角唯一的 **「模型配置」** 按钮（由自动化单元测试强约束校验）。
+- 支持选择 **`DSH 宿主内置模型`**（复用宿主环境凭据）或主流 OpenAI / Anthropic 兼容中转服务；修改配置后经 **550ms 防抖自动热落盘**、自动检测端点连通性并自动开启后台慢环进化授权，无需任何“保存 / 测试 / 确认”按钮。
 
-### 2. 🧬 常驻核心记忆工作台 (`Letta Core Memory`)
-- 对标 **Letta (MemGPT)** 架构，内置 **`human`（用户画像与习惯）**、**`persona`（智能体行为准则）**、**`project`（当前工程核心上下文）** 三大常驻内存块。
-- 实时显示各块字符水位线与编译后注入 System Prompt 的真实 XML 载荷预览；同时支持一键导入/导出 **Cline 风格标准化 Memory Bank**（`activeContext.md`、`systemPatterns.md`、`productContext.md`、`progress.md`）。
+### 2. 📊 3×2 全自治遥测仪表盘 (`Autonomous Telemetry Grid`)
+- 实时轮询呈现 **活跃记忆水位**、**Memory Doctor 健康分与等级（`A+` ~ `D`）**、**活跃检索策略版本（EvolveMem）**、**常驻稳定层真实 Token 预算占用（`stableLayerTokens / stableBudgetTokens`）**、**128D 向量覆盖率** 与 **今日慢环 LLM 配额水位**。
+- 每轮对话结束（`turn-stopping`）与后台心跳周期自动编排 `autoHeal`、`distill`、`consolidate`、`maintain` 与 `evolve`，用户无需点击任何手动运维开关。
 
-### 3. 🕸️ 交互式知识拓扑图谱 (`Force-Directed Graph`)
-- 基于纯原生 SVG 物理力导向引擎渲染，零第三方重型图表库依赖。
-- 直观呈现记忆节点与高频实体节点之间的 `supersedes`（版本迭代）、`contradicts`（事实冲突）、`derived_from`（提炼派生）及实体共现网络，支持按关系类型过滤、节点拖拽与点击穿透检视。
+### 3. 🧬 常驻核心记忆透视 (`Letta Core Memory Blocks`)
+- 直观展示 **`human`（用户画像与偏好）**、**`persona`（智能体行为准则）**、**`project`（工程架构与约定）** 三大常驻块及其字符水位，随 `syncAutonomousCoreMemory` 自动演进更新。
 
-### 4. 🎯 在线召回沙盒与 Mem0 调和器 (`Recall Sandbox & Reconcile Playground`)
-- **七路召回 X 光透视 `[v0.3.0]`**：输入任意模拟提问，实时展示意图识别结果、七路召回通道（`BM25 全文` / `Entity 实体` / `Typed 类型` / `Temporal 时间` / `Preference 偏好` / `Vector 向量` / `Graph 拓扑`）各自的命中标签与得分贡献、Token 预算水位条以及最终生成的 `<dsh_memory>` 注入文本。
-- **Mem0 动态冲突调和沙盒 `[v0.2.0]`**：输入新观察到的事实，支持 **Dry-Run 预演模式** 与 **实盘执行模式**，直观查看调和器针对存量记忆做出的 `ADD`（新增）、`UPDATE`（原位修订并建立因果链）、`DELETE`（冲突废弃）或 `NOOP`（幂等跳过）决策。
-
-### 5. 🧪 自进化实验室与记忆体检医生 (`Evolution Lab & Health Doctor`)
-- **记忆库健康度体检医生与一键自愈 (`Memory Doctor & Auto-Heal`) `[v0.3.0]`**：一键扫描全库，输出 **0~100 健康度评分与等级（`A+` ~ `D`）**，诊断 FTS5 索引同步状态、128D 向量覆盖率、未解决的 `contradicts` 矛盾链、**128D 语义余弦 + 词汇高重合冗余记忆对**；支持点击 **「⚡ 一键智能自愈 (Auto-Heal)」** 自动完成 FTS5 重建、向量回填、冗余对合并与非冻结矛盾消解。
-- **慢环主动控制与 RIME 审批台 `[v0.3.0]`**：集中审批由负向反馈触发的 `revise / split / invalidate / keep` 提案，并支持在面板中一键触发 **「🧪 立即蒸馏会话」**、**「🧩 立即聚类巩固 (Consolidate)」** 与 **「执行离线清理与维护」**。
-- **EvolveMem 策略进化舱**：可视化对比历代检索策略参数版本（权重分布、动态 Token 上限、评测集得分）与今日 LLM 配额消耗水位。
+### 4. 📜 Process-Column 折叠记忆流与即时检索 (`Live Memory Stream`)
+- 内置零按钮原生 `<input type="search">` 即时过滤框，支持按内容、摘要、类型、槽位键（`slot_key`）或短码 ID 毫秒级筛选活跃记忆。
+- 采用 Claude Code 风格 `<details>` 折叠流呈现每条记忆的 **类型徽标、置顶/冻结护栏标记、EMA 效用、置信度、正负向反馈计数** 与完整修订时间。
 
 ---
 
@@ -156,10 +149,10 @@ flowchart TD
 | 维度 | 核心能力 | 技术实现与工程指标 |
 |---|---|---|
 | **存储底座** | **零原生 C++ 依赖** | 基于 Node.js 24 原生 `node:sqlite` + 内置 FTS5 全文索引，彻底告别 `node-gyp` 编译报错与跨平台二进制兼容问题 |
-| **混合检索** | **七路确定性并发召回** | 中文 Bigram 预切分 + 驼峰/路径代码分词 + BM25 + 实体图谱 + 类型路由 + 时间衰减 + 偏好直通 + **128 维本地向量（含即时 LRU 兜底）** + **GraphRAG 1-Hop 拓扑激活扩散与协同增益** |
-| **预算治理** | **Token 规模不变性** | 动态背包装箱算法（`governor.ts`），硬性锁定稳定层（600t）与动态层（1600t）上限，1k 与 10k 规模注入波动 `< 0.3%` |
-| **冲突自愈** | **Mem0 + RIME 双重治理** | 写入侧通过 `ux_mem_live_slot` 唯一槽位索引与 Mem0 调和器消解同槽冲突；检索侧遇负反馈自动触发 RIME 异步修复 |
-| **策略进化** | **EvolveMem + 哨兵回滚** | 离线在 120+ 基准用例与真实收获用例上变异寻优；上线后若用户纠偏率劣化超过父版本 `+5%`，哨兵机制自动无损回滚 |
+| **混合检索** | **七路确定性并发召回** | 中文 Bigram/3-gram + 层级路径前缀 + BM25 + 实体图谱 + 类型路由 + 时间衰减 + 偏好直通 + **写入期同步落盘 128D 语义向量** + **SYNAPSE / HippoRAG 2 多跳激活扩散** |
+| **预算治理** | **混合次模 MMR 规模不变性** | 词法-语义混合次模背包装箱（`governor.ts`），硬性锁定稳定层（600t）与动态层（1600t）上限，1k 与 10k 规模注入波动 `< 0.3%` |
+| **冲突自愈** | **蒸馏-Mem0-RIME 全闭环** | 慢环蒸馏产物自动经 Mem0 混合调和消解冲突并挂接因果边；检索侧遇负反馈自动触发 RIME 异步修复并在自愈周期自动应用 |
+| **策略进化** | **EvolveMem + 哨兵回滚** | 离线在 120+ 基准用例与真实收获用例（`eval_cases`）上变异寻优；上线后若用户纠偏率劣化超过父版本 `+5%`，哨兵机制自动无损回滚 |
 | **隐私安全** | **敏感凭据零落盘** | 内置多层正则隐私守卫（`privacy.ts`），自动拦截 API Key、Bearer Token、私钥、连接串与密码，绝不落库、绝不外发 |
 | **成本风控** | **原子级配额账本** | `ledger.ts` 采用先预留后扣减的事务机制，严格执行每日 **≤ 40 次调用 / ≤ 200,000 Tokens** 硬上限，杜绝后台死循环账单 |
 
@@ -169,7 +162,7 @@ flowchart TD
 
 ```text
 dsh-memory/
-├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.3.0)
+├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.7.0)
 ├─ tsconfig.json           # 严格 ESM TypeScript 编译配置
 ├─ tsup.config.ts          # 构建打包配置 (服务端插件 + 独立评测 CLI)
 ├─ vitest.config.ts        # 自动化单元测试与集成测试配置
@@ -182,51 +175,53 @@ dsh-memory/
 │  ├─ types.ts             # 核心领域模型 (MemoryRecord, Strategy, GraphData 等)
 │  ├─ core/                # 底层独立存储与计算核心 (零宿主耦合)
 │  │  ├─ db.ts             # SQLite 封装 (node:sqlite 原生驱动 + WAL + FTS5 虚拟表)
-│  │  ├─ text.ts           # 混合分词器 (中文 Bigram + 驼峰/下划线代码标识符拆解)
+│  │  ├─ text.ts           # 混合分词器 (中文 Bigram + 词干还原 + 代码标识符拆解)
 │  │  ├─ tokens.ts         # 离线 Token 估算器与安全边界截断
-│  │  ├─ scope.ts          # Session / Workspace / User / Global 四级作用域隔离
+│  │  ├─ scope.ts          # Session / Workspace / User / Global 四级作用域哈希隔离
 │  │  ├─ privacy.ts        # 敏感密钥、Token 与凭据实时脱敏拦截器
-│  │  ├─ writer.ts         # 单一事务写入通道 (槽位冲突取代、版本快照与因果链)
-│  │  ├─ store.ts          # 只读查询、多维统计、全局图谱、K-Hop 局部子图 (getSubgraph) 与 Mermaid 渲染
+│  │  ├─ writer.ts         # 单一事务写入通道 (同步落盘 128D 向量、槽位取代、A-Mem 织网与版本快照)
+│  │  ├─ store.ts          # 只读查询、多维统计、全局图谱、K-Hop 局部子图与 Mermaid 渲染
 │  │  ├─ core-memory.ts    # Letta/MemGPT 风格常驻核心记忆块 (human/persona/project)
+│  │  ├─ bootstrap.ts      # 安装后与首次启动全自动工作区记忆冷启动初始化引擎
 │  │  ├─ markdown.ts       # Markdown 双向同步、Cline Memory Bank 与 .trash 回收站
-│  │  ├─ vector.ts         # [v0.3.0] 128 维确定性本地特征向量、4096 容量即时 LRU 缓存与自动回填引擎
-│  │  └─ health.ts         # [v0.3.0] 记忆库健康度评分、128D 语义冗余检测与一键智能自愈 (autoHealMemoryHealth)
+│  │  ├─ vector.ts         # [v0.7.0] 128 维确定性语义特征向量 (含路径前缀/中文 3-gram) 与 4096 容量 LRU 缓存
+│  │  └─ health.ts         # [v0.7.0] 记忆库体检评分、RIME 自动应用、候选晋升与 Core Memory 自主同步
 │  ├─ ingest/              # 增量事件摄入与历史回填
 │  │  ├─ rules.ts          # 零延迟本地正则规则抽取器 (高频偏好与指令即时捕获)
 │  │  ├─ queue.ts          # 会话消息事件缓冲与批处理队列
 │  │  └─ backfill.ts       # 历史会话日志回填 (流式 zstd 多帧解压缩)
 │  ├─ retrieval/           # 在线亚毫秒级多路召回与融合引擎
 │  │  ├─ query.ts          # 查询意图解析 (时间/因果/步骤/偏好) 与检索计划生成
-│  │  ├─ channels.ts       # 全文/实体/类型/时间/偏好/本地向量/GraphRAG 1-Hop 七路召回通道
-│  │  ├─ fuse.ts           # 确定性多维加权融合打分器 (含 GraphRAG 拓扑扩散晋升与 +0.035 关系协同增益)
-│  │  ├─ governor.ts       # 动态 Token 预算调节器 (价值密度背包装箱算法)
+│  │  ├─ channels.ts       # 全文/实体/类型/时间/偏好/Top-400 128D 向量/SYNAPSE 多跳扩散七路召回通道
+│  │  ├─ fuse.ts           # 确定性多维加权融合打分器 (HippoRAG 2 多源汇聚 PPR + ACT-R 频次强化半衰期)
+│  │  ├─ governor.ts       # [v0.7.0] 词法-语义混合次模 MMR 动态 Token 背包装箱器
 │  │  ├─ render.ts         # 双层提示词 XML/Markdown 渲染与来源溯源格式化
 │  │  └─ recall.ts         # 在线检索主调度器 (含策略版本追踪)
 │  ├─ dsh/                 # DSH 宿主深度集成适配层
-│  │  ├─ plugin.ts         # 插件生命周期管理、后台任务注册与热重载安全降级
+│  │  ├─ plugin.ts         # 插件生命周期、水位线连续蒸馏编排与全自动慢环调度
 │  │  ├─ session-listener.ts # 会话状态流转与消息事件监听
 │  │  ├─ prompt-section.ts # 稳定层 System Prompt 常驻注入
 │  │  ├─ pre-step.ts       # agent/pre-step 动态记忆注入与在线遥测落盘
-│  │  ├─ tools.ts          # 8 个专用模型工具与统一聚合工具 (含 doctor / reconcile)
+│  │  ├─ tools.ts          # [v0.7.0] 七路全融合 memory_search、1-Hop 因果展开与统一聚合工具
 │  │  ├─ commands.ts       # `/memory` 聊天交互指令集 (20+ 子命令)
-│  │  └─ web.ts            # DSH 侧栏可视化工作台后端 REST API
-│  ├─ client/              # Glassmorphism 毛玻璃可视化工作台 (React 19)
-│  │  ├─ MemoryApp.tsx     # 五大视图主工作台容器
-│  │  ├─ api.ts & types.ts # 前后端类型安全通信契约
-│  │  └─ components/       # GlassUI 组件库、召回沙盒、Mem0 调和台、图谱与进化舱
+│  │  └─ web.ts            # Studio 侧栏 REST API (含二进制向量剥离与稳定层 Token 遥测)
+│  ├─ client/              # [v0.7.0] Claude Studio 极简单按钮自治控制台 (React 19)
+│  │  ├─ index.ts          # DSH 侧栏挂载入口与内联图标
+│  │  ├─ MemoryApp.tsx     # 3×2 自治遥测、Core Memory 与即时过滤折叠记忆流
+│  │  ├─ styles.ts & types.ts # Studio 设计令牌样式表与前后端通信类型契约
+│  │  └─ components/       # MemoryHeader (唯一配置入口) 与 LLMConfigModal (防抖热保存浮层)
 │  ├─ evolution/           # 离线自进化慢环系统
 │  │  ├─ ledger.ts         # 每日 40次/200k Token 原子预留风控账本
 │  │  ├─ llm.ts            # 兼容 OpenAI / Responses / Messages 多协议 LLM 客户端
 │  │  ├─ prompts.ts        # 结构化受控 Prompt 模板 (distill / reflect / repair)
-│  │  ├─ extractor.ts      # distill-v2 会话高价值知识蒸馏
+│  │  ├─ extractor.ts      # [v0.7.0] distill-v2 水位线连续蒸馏与 Mem0 调和闭环
 │  │  ├─ reflector.ts      # reflect-v2 任务失败归因与防错经验提炼
 │  │  ├─ consolidator.ts   # consolidate-v2 碎片记忆聚类合并
-│  │  ├─ reconciler.ts     # Mem0 风格动态冲突调和器 (ADD/UPDATE/DELETE/NOOP)
+│  │  ├─ reconciler.ts     # [v0.7.0] 哈希作用域对齐的 Mem0 混合冲突调和器
 │  │  ├─ lab.ts            # EvolveMem 策略进化实验舱与在线哨兵自动回滚
 │  │  ├─ outcome.ts        # 在线引用追踪、隐式负反馈识别与评测用例自动收获
 │  │  ├─ repair.ts         # RIME 检索触发式精准修复管线
-│  │  └─ maintenance.ts    # 冷热归档、过期清理、FTS 重建与安全备份恢复
+│  │  └─ maintenance.ts    # [v0.7.0] 冷热归档、过期清理与 33 列全字段 + 图谱无损数据库导入恢复
 │  ├─ jobs/                # 离线任务并发与超时调度中心
 │  │  ├─ scheduler.ts      # 空闲检测、夜间维护与任务排队机制
 │  │  └─ runner.ts         # 任务互斥锁执行、指数退避重试与超时恢复
@@ -235,7 +230,7 @@ dsh-memory/
 │     ├─ runner.ts         # 评测套件执行器与规模不变性压测
 │     ├─ metrics.ts        # Recall@Inj、ExclViol、EmptyPrec 核心指标计算
 │     └─ eval-cli.ts       # 独立命令行评测门禁入口
-└─ test/                   # 48 个测试套件，284 个自动化单元测试与端到端验收用例
+└─ test/                   # 50 个测试套件，302 个自动化单元测试与端到端验收用例
 ```
 
 ---
@@ -255,7 +250,7 @@ npm run build
 
 构建完成后将生成三大产物：
 - `dist/index.js`：DSH 服务端插件主入口（ESM）
-- `dist/client.js`：DSH 侧栏 Glassmorphism 可视化工作台前端包
+- `dist/client.js`：DSH 侧栏 Claude Studio 极简自治控制台前端包
 - `dist/eval-cli.js`：120 用例基准评测命令行工具
 
 ### 2. 挂载至 DeepSeek Desktop (DSH)
@@ -340,10 +335,10 @@ npm run build
 
 插件向智能体暴露精简高效的工具接口，支持模型在推理过程中按需调用：
 
-- **`memory`（推荐 · 统一聚合工具）**：将全部 12 项原子能力（`search` / `expand` / `note` / `feedback` / `confirm` / `merge` / `core_read` / `core_set` / `core_append` / `reconcile` / `doctor` / `heal`）收敛至单一 Schema 入口，最大限度节省模型工具定义 Token 开销。
+- **`memory`（推荐 · 统一聚合工具）**：将全部 13 项原子能力（`init` / `search` / `expand` / `note` / `feedback` / `confirm` / `merge` / `core_read` / `core_set` / `core_append` / `reconcile` / `doctor` / `heal`）收敛至单一 Schema 入口，最大限度节省模型工具定义 Token 开销。
 - **专用细分工具集**：
-  - `memory_search`：当前上下文缺失背景知识时，主动发起六路混合检索。
-  - `memory_expand`：按需展开某条摘要记忆的完整正文与原始会话凭据。
+  - `memory_search`：当前上下文缺失背景知识时，主动发起全量七路混合检索（BM25 + 实体 + 类型 + 时间 + 偏好 + 128D 向量 + SYNAPSE 多跳拓扑扩散 + 槽位去重）。
+  - `memory_expand`：按需展开某条摘要记忆的完整正文、原始会话凭据及 **1-Hop 双向因果/拓扑关联（`Relations`）**。
   - `memory_note`：自主记录高价值候选备忘（内置每轮 ≤ 3 次限流，防止模型滥写）。
   - `memory_feedback`：对已注入记忆汇报正/负向效用反馈（驱动 EMA 效用学习；负向反馈自动触发 RIME 冲突修复入队）。
   - `memory_confirm` / `memory_merge`：模型主动确认事实或请求合并重复条目。
@@ -356,10 +351,10 @@ npm run build
 项目内置完整的离线评测生成器（4 大评测套件共 120 条跨领域标准用例 + 20 条关键红线用例）与多级规模压测器：
 
 ```bash
-# 1. 运行 TypeScript 严格类型检查与 48 个测试套件 (284 项测试)
+# 1. 运行 TypeScript 严格类型检查与 50 个测试套件 (302 项测试)
 npm run check
 
-# 2. 构建服务端插件、前端 Glassmorphism 工作台与评测 CLI
+# 2. 构建服务端插件、前端 Claude Studio 自治控制台与评测 CLI
 npm run build
 
 # 3. 执行 120 条标准评测基准门禁
@@ -368,14 +363,14 @@ npm run eval
 
 ### 评测门禁达成实测对照表
 
-| 验收核心指标 | 官方规约门槛 | `v0.5.0` 实测表现 | 门禁结论 |
+| 验收核心指标 | 官方规约门槛 | `v0.7.0` 实测表现 | 门禁结论 |
 |---|---:|---:|:---:|
 | **Recall @ Inject (有效注入召回率)** | $\ge 70\%$ | **100.0% (120 / 120)** | ✅ **PASS** |
 | **Exclude Violations (跨区/废弃违规注入)** | $= 0$ (绝对零容忍) | **0** | ✅ **PASS** |
 | **Empty Precision (无关提问精准空查率)** | $\ge 80\%$ | **100.0%** | ✅ **PASS** |
 | **Critical 关键红线用例通过率** | $100\%$ (20/20) | **20 / 20 (100%)** | ✅ **PASS** |
-| **在线检索响应延迟 (p95)** | $\le 50\text{ ms}$ | **0.6 ~ 1.1 ms** (1万条规模: `p50=20.8ms, p95=29.8ms`) | ✅ **PASS** |
-| **单轮动态 Token 消耗均值** | $\le 1600\text{ tokens}$ | **171 tokens** | ✅ **PASS** |
+| **在线检索响应延迟 (p95)** | $\le 50\text{ ms}$ | **0.8 ~ 1.1 ms** (1万条规模: `p50=20.8ms, p95=29.8ms`) | ✅ **PASS** |
+| **单轮动态 Token 消耗均值** | $\le 1600\text{ tokens}$ | **~170 tokens** | ✅ **PASS** |
 | **1k vs 10k 规模 Token 膨胀率** | $< 10\%$ 波动 | **0.28%** (规模不变性达成) | ✅ **PASS** |
 
 ---

@@ -4,7 +4,8 @@ import type { EvidenceLedger } from './types.js';
 import { PROMPT_DISTILL, renderTranscript } from './prompts.js';
 import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
-import { upsertCandidate } from '../core/writer.js';
+import { reconcileCandidate } from './reconciler.js';
+import { upsertCandidate, addRelation } from '../core/writer.js';
 import { estimateTokens } from '../core/tokens.js';
 
 export interface DistillBatchOptions {
@@ -26,30 +27,43 @@ export interface DistillResult {
 
 /**
  * 寻找需要蒸馏的会话（未处理事件 >= cfg.distillMinEvents，或空闲状态下任何未处理事件）
+ * 返回未处理区间起点 minSeq，用于构造无死锁的批次水位线任务键
  */
 export function findEligibleDistillSession(
   db: Db,
   cfg: PluginConfig,
-  isIdle = false
-): { sessionId: string; workspaceId: string; count: number } | null {
+  isIdle = false,
+  targetSessionId?: string
+): { sessionId: string; workspaceId: string; count: number; minSeq: number } | null {
   const minEvents = isIdle ? 1 : cfg.distillMinEvents || 40;
 
-  const row = db.get<{ session_id: string; workspace_id: string; cnt: number }>(
-    `SELECT session_id, workspace_id, COUNT(*) as cnt
-     FROM raw_events
-     WHERE processed < 2
-     GROUP BY session_id, workspace_id
-     HAVING cnt >= ?
-     ORDER BY CASE WHEN COUNT(*) >= 5 THEN 0 ELSE 1 END, MIN(time) ASC
-     LIMIT 1`,
-    [minEvents]
-  );
+  const row = targetSessionId
+    ? db.get<{ session_id: string; workspace_id: string; cnt: number; min_seq: number }>(
+        `SELECT session_id, workspace_id, COUNT(*) as cnt, MIN(seq) as min_seq
+         FROM raw_events
+         WHERE processed < 2 AND session_id = ?
+         GROUP BY session_id, workspace_id
+         HAVING cnt >= ?
+         LIMIT 1`,
+        [targetSessionId, minEvents]
+      )
+    : db.get<{ session_id: string; workspace_id: string; cnt: number; min_seq: number }>(
+        `SELECT session_id, workspace_id, COUNT(*) as cnt, MIN(seq) as min_seq
+         FROM raw_events
+         WHERE processed < 2
+         GROUP BY session_id, workspace_id
+         HAVING cnt >= ?
+         ORDER BY CASE WHEN COUNT(*) >= 5 THEN 0 ELSE 1 END, MIN(time) ASC
+         LIMIT 1`,
+        [minEvents]
+      );
 
   if (!row) return null;
   return {
     sessionId: row.session_id,
     workspaceId: row.workspace_id,
     count: row.cnt,
+    minSeq: Number(row.min_seq ?? 0),
   };
 }
 
@@ -182,15 +196,30 @@ export async function distillSession(
     };
   }
 
-  // 5. 同一事务提交：写入候选记忆、推进 processed=2、推进 watermark
+  // 5. 同一事务提交：智能调和 (Mem0/Zep Slot & Semantic Reconciliation) 写入候选记忆、推进 processed=2、推进 watermark
   const candidateIds: string[] = [];
+  const now = Date.now();
   try {
     db.transaction(() => {
-      // 写入记忆
+      // 写入记忆（先经 reconcileCandidate 推断规范槽位、抑制完全冗余项并关联语义演化冲突边）
       for (const item of parseRes.items) {
-        const upsertRes = upsertCandidate(db, item);
+        const decision = reconcileCandidate(db, item);
+        if (decision.action === 'NOOP' && decision.reason === 'subsumed_by_existing_memory') {
+          continue;
+        }
+        const upsertRes = upsertCandidate(db, item, now);
         if ('id' in upsertRes) {
-          candidateIds.push(upsertRes.id);
+          if (upsertRes.action !== 'merged') {
+            candidateIds.push(upsertRes.id);
+          }
+          if (
+            (decision.action === 'UPDATE' || decision.action === 'DELETE') &&
+            decision.targetId &&
+            decision.targetId !== upsertRes.id &&
+            upsertRes.action === 'inserted'
+          ) {
+            addRelation(db, upsertRes.id, decision.targetId, 'contradicts', now);
+          }
         }
       }
 
@@ -207,7 +236,7 @@ export async function distillSession(
       // 更新 watermark 至 meta 表
       const watermarkData = JSON.stringify({
         lastSeq: maxSeq,
-        updatedAt: Date.now(),
+        updatedAt: now,
       });
       db.run(
         `INSERT INTO meta (key, value)

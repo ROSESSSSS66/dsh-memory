@@ -3,8 +3,9 @@ import type { Db, MemoryRecord, MemoryType } from '../types.js';
 import { get, sources } from '../core/store.js';
 import { workspaceId } from '../core/scope.js';
 import { buildQueryPlan } from '../retrieval/query.js';
-import { recallLexical, recallEntity } from '../retrieval/channels.js';
-import { fuseCandidates, DEFAULT_STRATEGY } from '../retrieval/fuse.js';
+import { runAllChannels, expandGraphNeighbors } from '../retrieval/channels.js';
+import { fuseCandidates } from '../retrieval/fuse.js';
+import { getActiveStrategy } from '../evolution/strategy.js';
 import { TAG_MAP } from '../retrieval/render.js';
 import { budgetTokens } from '../core/tokens.js';
 import { redactSecrets } from '../core/privacy.js';
@@ -64,24 +65,44 @@ export class MemoryTools {
       cfg: this.cfg,
     });
 
-    // 运行 lexical 与 entity 检索
-    const lexicalCands = recallLexical(this.db, plan, { workspaceId: wsId, sessionId, cfg: this.cfg });
-    const entityCands = recallEntity(this.db, plan, { workspaceId: wsId, sessionId, cfg: this.cfg });
+    const activeStrat = getActiveStrategy(this.db, this.cfg);
+    const strategy = activeStrat.config;
+    const stratVer = activeStrat.version || this.strategyVersion;
 
-    const channelResults = {
-      lexical: lexicalCands,
-      entity: entityCands,
-      typed: [],
-      temporal: [],
-      preference: [],
-      vector: [],
-    };
+    // 运行完整 7 路混合召回 (6 基础通道 + SYNAPSE 图谱拓扑扩散)
+    const channelResults = runAllChannels(this.db, plan, {
+      workspaceId: wsId,
+      sessionId,
+      cfg: this.cfg,
+    });
 
-    const allIds = Array.from(new Set([...lexicalCands.map((c) => c.id), ...entityCands.map((c) => c.id)]));
-    if (allIds.length === 0) {
+    const allIdsSet = new Set<string>();
+    for (const cands of Object.values(channelResults)) {
+      for (const c of cands) {
+        allIdsSet.add(c.id);
+      }
+    }
+
+    if (allIdsSet.size === 0) {
       return 'No relevant memories found.';
     }
 
+    const topSeedIds = [
+      ...channelResults.lexical.slice(0, 4).map((c) => c.id),
+      ...channelResults.entity.slice(0, 4).map((c) => c.id),
+      ...channelResults.vector.slice(0, 3).map((c) => c.id),
+    ];
+    const associativeNeighbors = expandGraphNeighbors(
+      this.db,
+      topSeedIds,
+      { workspaceId: wsId, sessionId, cfg: this.cfg },
+      10
+    );
+    for (const edge of associativeNeighbors) {
+      allIdsSet.add(edge.neighborId);
+    }
+
+    const allIds = Array.from(allIdsSet);
     const placeholders = allIds.map(() => '?').join(', ');
     const memRows = this.db.all<MemoryRecord>(
       `SELECT * FROM memories WHERE id IN (${placeholders}) AND status IN ('active', 'frozen')`,
@@ -93,6 +114,10 @@ export class MemoryTools {
         continue;
       }
       memoriesMap.set(m.id, m);
+    }
+
+    if (memoriesMap.size === 0) {
+      return 'No relevant memories found.';
     }
 
     const memoryEntitiesMap = new Map<string, Set<string>>();
@@ -109,18 +134,53 @@ export class MemoryTools {
       s.add(r.entity.toLowerCase().trim());
     }
 
+    const relRows = this.db.all<{ from_id: string; to_id: string; target_id: string }>(
+      `SELECT r.from_id, r.to_id, target.id as target_id
+       FROM memory_relations r
+       JOIN memories target ON (target.id = r.to_id OR target.id = r.from_id)
+       WHERE r.rel = 'contradicts'
+         AND target.status IN ('active', 'frozen')
+         AND (r.from_id IN (${placeholders}) OR r.to_id IN (${placeholders}))`,
+      [...allIds, ...allIds]
+    );
+    const contradictionsSet = new Set<string>();
+    for (const rel of relRows) {
+      if (allIdsSet.has(rel.from_id) && rel.target_id === rel.to_id) {
+        contradictionsSet.add(rel.from_id);
+      }
+      if (allIdsSet.has(rel.to_id) && rel.target_id === rel.from_id) {
+        contradictionsSet.add(rel.to_id);
+      }
+    }
+
     const scored = fuseCandidates(
       plan,
       channelResults,
       memoriesMap,
       memoryEntitiesMap,
-      new Set(),
-      DEFAULT_STRATEGY,
+      contradictionsSet,
+      strategy,
       this.cfg,
-      now
+      now,
+      associativeNeighbors
     );
 
-    const filtered = scored.slice(0, limit);
+    // 去除同槽位旧项与同哈希重复项
+    const seenSlots = new Set<string>();
+    const seenHashes = new Set<string>();
+    const deduped = scored.filter((sc) => {
+      const m = sc.memory;
+      if (seenHashes.has(m.hash)) return false;
+      if (m.slot_key) {
+        const sk = `${m.scope}:${m.workspace_id || ''}:${m.session_id || ''}:${m.slot_key}`;
+        if (seenSlots.has(sk)) return false;
+        seenSlots.add(sk);
+      }
+      seenHashes.add(m.hash);
+      return true;
+    });
+
+    const filtered = deduped.slice(0, limit);
     if (filtered.length === 0) {
       return 'No relevant memories found.';
     }
@@ -140,7 +200,7 @@ export class MemoryTools {
         `INSERT OR IGNORE INTO injections (
           session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
         ) VALUES (?, ?, ?, ?, 'tool', ?, ?, 'summary', ?, ?)`,
-        [sessionId, turn, m.id, m.content_rev, i + 1, m.summary_cost, this.strategyVersion, now]
+        [sessionId, turn, m.id, m.content_rev, i + 1, m.summary_cost, stratVer, now]
       );
     }
 
@@ -190,15 +250,46 @@ export class MemoryTools {
       return `  - session ${sessShort} seq ${s.seq} (${s.kind})${excerpt}`;
     });
 
-    let res = `[${TAG_MAP[mem.type] || 'FACT'} ${mem.id}] (rev ${mem.content_rev})\n${cleanContent}`;
+    // 1-hop 因果与拓扑关联 (supersedes / derived_from / contradicts / related)
+    const relEdges = this.db.all<{
+      from_id: string;
+      to_id: string;
+      rel: string;
+      other_id: string;
+      other_summary: string;
+      other_status: string;
+    }>(
+      `SELECT r.from_id, r.to_id, r.rel,
+              m2.id as other_id, m2.summary as other_summary, m2.status as other_status
+       FROM memory_relations r
+       JOIN memories m2 ON m2.id = CASE WHEN r.from_id = ? THEN r.to_id ELSE r.from_id END
+       WHERE r.from_id = ? OR r.to_id = ?
+       ORDER BY r.created_at DESC
+       LIMIT 4`,
+      [mem.id, mem.id, mem.id]
+    );
+    const relLines = relEdges.map((r) => {
+      const dir = r.from_id === mem!.id ? `-> ${r.rel} ->` : `<- ${r.rel} <-`;
+      const sum = redactSecrets(r.other_summary || '').text.slice(0, 60);
+      return `  - ${dir} [${r.other_id}] (${r.other_status}) ${sum}`;
+    });
+
+    const headerAndBody = `[${TAG_MAP[mem.type] || 'FACT'} ${mem.id}] (rev ${mem.content_rev})\n${cleanContent}`;
+    let res = headerAndBody;
     if (srcLines.length > 0) {
       res += `\nSources:\n${srcLines.join('\n')}`;
+    }
+    if (relLines.length > 0) {
+      const withRels = `${res}\nRelations:\n${relLines.join('\n')}`;
+      if (budgetTokens(withRels) <= 1500) {
+        res = withRels;
+      }
     }
 
     // 约束总长度 <= 1500 tokens
     if (budgetTokens(res) > 1500) {
       // 优先削减证据
-      res = `[${TAG_MAP[mem.type] || 'FACT'} ${mem.id}] (rev ${mem.content_rev})\n${cleanContent}`;
+      res = headerAndBody;
       if (budgetTokens(res) > 1500) {
         return `Error: memory content exceeds token limit (1500 tokens).`;
       }
@@ -532,7 +623,7 @@ export class MemoryTools {
     const res = autoHealMemoryHealth(this.db, { workspaceId: wsId });
     return [
       `[Memory Auto-Heal Completed] Score: ${res.beforeScore} -> ${res.afterScore}/100 (Grade ${res.afterGrade})`,
-      `Actions: ftsRebuilt=${res.ftsRebuilt}, embeddingsBackfilled=${res.embeddingsBackfilled}, duplicatesMerged=${res.duplicatesMerged}, contradictionsResolved=${res.contradictionsResolved}, linksWeaved=${res.linksWeaved}`,
+      `Actions: ftsRebuilt=${res.ftsRebuilt}, embeddingsBackfilled=${res.embeddingsBackfilled}, duplicatesMerged=${res.duplicatesMerged}, contradictionsResolved=${res.contradictionsResolved}, linksWeaved=${res.linksWeaved}, coreBlocksSynced=${res.coreBlocksSynced ?? 0}`,
     ].join('\n');
   }
 

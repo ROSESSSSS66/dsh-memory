@@ -2,7 +2,27 @@ import type { MemoryRecord } from '../types.js';
 import type { ScoredCandidate } from './fuse.js';
 import { budgetTokens } from '../core/tokens.js';
 import { tokenSet, jaccard } from '../core/text.js';
+import { cosineSimilarity, getOrComputeEmbedding } from '../core/vector.js';
 import { render, type RenderItem } from './render.js';
+
+/**
+ * 混合词法-语义重叠算子 (Hybrid Lexical-Vector Overlap)
+ * 融合词汇 Jaccard 与 128D 本地特征哈希余弦相似度，识别双语/同义改写冗余记忆，同时保护正交多跳事实召回
+ */
+export function computeHybridOverlap(
+  aTokens: Set<string>,
+  bTokens: Set<string>,
+  aVec?: Float32Array | null,
+  bVec?: Float32Array | null,
+  sameType: boolean = false
+): number {
+  const lexSim = jaccard(aTokens, bTokens);
+  if (!aVec || !bVec) return lexSim;
+  const vecSim = Math.max(0, cosineSimilarity(aVec, bVec));
+  const scaledVec =
+    sameType && vecSim >= 0.58 ? 0.95 * vecSim : vecSim >= 0.8 ? 0.8 * vecSim : 0;
+  return Math.max(lexSim, scaledVec);
+}
 
 /**
  * LightMem (2025) / Submodular MMR 边际信息增益算子 (Maximal Marginal Relevance over Value-Per-Token)
@@ -105,11 +125,12 @@ export function govern(
   const candidates = Array.from(hashMap.values());
   if (candidates.length === 0) return [];
 
-  // 4. 计算 VPT (Value Per Token) 与词集特征 (用于 LightMem Submodular MMR 边际去重)
+  // 4. 计算 VPT (Value Per Token) 与混合词法/128D向量特征 (用于 LightMem Hybrid Submodular MMR 边际去重)
   const withVpt = candidates.map((c) => ({
     cand: c,
     vpt: c.score / Math.max(c.memory.token_cost, 30),
     tokens: tokenSet(`${c.memory.content} ${c.memory.summary}`),
+    vec: getOrComputeEmbedding(c.memory),
   }));
 
   // 按 score 降序找最高分的第一条锚点记忆
@@ -118,7 +139,7 @@ export function govern(
   const remaining = withVpt.slice(1);
 
   const selected: SelectedItem[] = [];
-  const selectedTokenSets: Set<string>[] = [];
+  const selectedFeatures: Array<{ tokens: Set<string>; vec: Float32Array | null; type: string }> = [];
 
   function testBudget(items: RenderItem[]): number {
     const text = render(items, { strategyVersion, layer });
@@ -143,7 +164,7 @@ export function govern(
         score: item.cand.score,
         tokens: m.token_cost,
       });
-      selectedTokenSets.push(item.tokens);
+      selectedFeatures.push({ tokens: item.tokens, vec: item.vec, type: m.type });
       return true;
     }
 
@@ -161,7 +182,7 @@ export function govern(
         score: item.cand.score,
         tokens: m.summary_cost,
       });
-      selectedTokenSets.push(item.tokens);
+      selectedFeatures.push({ tokens: item.tokens, vec: item.vec, type: m.type });
       return true;
     }
     return false;
@@ -170,7 +191,7 @@ export function govern(
   // 先装入最高分锚点项
   tryPackCandidate(first);
 
-  // 其余项按 LightMem Submodular MMR-VPT 贪心迭代选择
+  // 其余项按 LightMem Hybrid Submodular MMR-VPT 贪心迭代选择
   while (remaining.length > 0 && selected.length < opts.maxItems) {
     let bestIdx = 0;
     let bestMmrVpt = -1;
@@ -178,8 +199,14 @@ export function govern(
     for (let i = 0; i < remaining.length; i++) {
       const item = remaining[i];
       let maxOverlap = 0;
-      for (const selSet of selectedTokenSets) {
-        const sim = jaccard(item.tokens, selSet);
+      for (const selFeat of selectedFeatures) {
+        const sim = computeHybridOverlap(
+          item.tokens,
+          selFeat.tokens,
+          item.vec,
+          selFeat.vec,
+          item.cand.memory.type === selFeat.type
+        );
         if (sim > maxOverlap) {
           maxOverlap = sim;
         }

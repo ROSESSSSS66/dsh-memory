@@ -459,7 +459,9 @@ describe('M1-T3: writer.ts Pipeline Tests (12 Required Checks)', () => {
     expect(editRes.version).toBe(2);
 
     const memEdited = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
-    expect(memEdited?.embedding).toBeNull(); // 旧 embedding 清空
+    // v0.7.0: 旧伪造 3-byte embedding 被即时重算覆盖为最新 128D Float32 BLOB (512 bytes)
+    expect(memEdited?.embedding).toBeDefined();
+    expect(memEdited?.embedding?.byteLength).toBe(512);
 
     // FTS 更新
     const fts = db.get<{ fts_text: string }>('SELECT fts_text FROM memory_fts WHERE rowid = ?', [memEdited?.rowid_]);

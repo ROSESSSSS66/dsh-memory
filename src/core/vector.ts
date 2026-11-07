@@ -57,9 +57,26 @@ export function computeLocalEmbedding(
     }
   }
 
-  // 3. 代码/路径/标识符实体增强权重
+  // 3. 代码/路径/标识符实体增强权重 + 层级路径目录前缀特征 (Hierarchical Path Prefixes)
   for (const ent of entities) {
     addFeature(`e:${ent}`, 2.0);
+    if (ent.includes('/')) {
+      const normPath = ent.replace(/^\.?\//, '');
+      const parts = normPath.split('/').filter(Boolean);
+      for (let d = 1; d < parts.length; d++) {
+        addFeature(`dir:${parts.slice(0, d).join('/')}`, 0.9);
+      }
+    }
+  }
+
+  // 4. 中文复合词三元组语义特征 (CJK Trigram Context)
+  const cjkRuns = text.match(/[\u4e00-\u9fff]{3,}/g);
+  if (cjkRuns) {
+    for (const run of cjkRuns) {
+      for (let i = 0; i + 3 <= run.length; i++) {
+        addFeature(`c3:${run.slice(i, i + 3)}`, 0.35);
+      }
+    }
   }
 
   // L2 归一化

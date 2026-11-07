@@ -51,11 +51,21 @@ export interface LLMConfigModalProps {
 const PRESETS: Array<{
   key: string;
   label: string;
+  useDshLlm?: boolean;
   baseURL: string;
   model: string;
   apiKeyEnv: string;
   protocol: LLMProtocolType;
 }> = [
+  {
+    key: 'dsh-host',
+    label: 'DSH 宿主内置模型 (零外部配置)',
+    useDshLlm: true,
+    baseURL: '',
+    model: 'deepseek-chat',
+    apiKeyEnv: '',
+    protocol: 'chat/completions',
+  },
   {
     key: 'deepseek',
     label: 'DeepSeek (api.deepseek.com)',
@@ -113,6 +123,7 @@ export function LLMConfigModal({
   onSave,
   onTestConnection,
 }: LLMConfigModalProps) {
+  const [useDshLlm, setUseDshLlm] = useState(false);
   const [baseURL, setBaseURL] = useState('https://api.deepseek.com/v1');
   const [model, setModel] = useState('deepseek-chat');
   const [protocol, setProtocol] = useState<LLMProtocolType>('chat/completions');
@@ -126,6 +137,7 @@ export function LLMConfigModal({
   const [statusTone, setStatusTone] = useState<'muted' | 'ok' | 'err'>('muted');
 
   const latestRef = useRef({
+    useDshLlm,
     baseURL,
     model,
     protocol,
@@ -136,6 +148,7 @@ export function LLMConfigModal({
     dirty,
   });
   latestRef.current = {
+    useDshLlm,
     baseURL,
     model,
     protocol,
@@ -148,6 +161,7 @@ export function LLMConfigModal({
 
   useEffect(() => {
     if (config && open) {
+      setUseDshLlm(Boolean(config.offlineLLM.useDshLlm));
       setBaseURL(config.offlineLLM.baseURL || 'https://api.deepseek.com/v1');
       setModel(config.offlineLLM.model || 'deepseek-chat');
       setProtocol(config.offlineLLM.protocol || 'chat/completions');
@@ -171,7 +185,7 @@ export function LLMConfigModal({
       try {
         await onSave({
           offlineLLM: {
-            useDshLlm: false,
+            useDshLlm: cur.useDshLlm,
             baseURL: cur.baseURL.trim(),
             model: cur.model.trim() || 'deepseek-chat',
             apiKeyEnv: cur.apiKeyEnv.trim(),
@@ -185,7 +199,7 @@ export function LLMConfigModal({
           dailyLLMTokens: Math.max(1000, Number(cur.dailyTokens) || 200000),
         });
 
-        if (verifyAfter && onTestConnection && cur.baseURL.trim()) {
+        if (!cur.useDshLlm && verifyAfter && onTestConnection && cur.baseURL.trim()) {
           const testRes = await onTestConnection({
             baseURL: cur.baseURL.trim(),
             model: cur.model.trim() || 'deepseek-chat',
@@ -206,7 +220,11 @@ export function LLMConfigModal({
           }
         }
 
-        setStatusText('已自动保存并激活全自动后台进化');
+        setStatusText(
+          cur.useDshLlm
+            ? '已保存并启用 DSH 宿主内置模型慢环通道'
+            : '已自动保存并激活全自动后台进化'
+        );
         setStatusTone('ok');
       } catch {
         setStatusText('保存失败，请检查网络连接');
@@ -223,7 +241,7 @@ export function LLMConfigModal({
       flushSave(true);
     }, 550);
     return () => clearTimeout(t);
-  }, [open, dirty, baseURL, model, protocol, apiKey, apiKeyEnv, dailyCalls, dailyTokens, flushSave]);
+  }, [open, dirty, useDshLlm, baseURL, model, protocol, apiKey, apiKeyEnv, dailyCalls, dailyTokens, flushSave]);
 
   const handleClose = useCallback(async () => {
     if (latestRef.current.dirty) {
@@ -250,9 +268,12 @@ export function LLMConfigModal({
   const handlePresetSelect = (key: string) => {
     const found = PRESETS.find((p) => p.key === key);
     if (!found) return;
-    setBaseURL(found.baseURL);
+    setUseDshLlm(Boolean(found.useDshLlm));
+    if (!found.useDshLlm) {
+      setBaseURL(found.baseURL);
+      setApiKeyEnv(found.apiKeyEnv);
+    }
     setModel(found.model);
-    setApiKeyEnv(found.apiKeyEnv);
     setProtocol(found.protocol);
     setDirty(true);
   };
@@ -322,11 +343,17 @@ export function LLMConfigModal({
                 <input
                   className="dshm-field-input dshm-field-input--mono"
                   value={baseURL}
+                  disabled={useDshLlm}
                   onChange={(e) => {
+                    setUseDshLlm(false);
                     setBaseURL(e.target.value);
                     setDirty(true);
                   }}
-                  placeholder="https://api.deepseek.com/v1"
+                  placeholder={
+                    useDshLlm
+                      ? '当前使用 DSH 宿主内置 LLM 通道'
+                      : 'https://api.deepseek.com/v1'
+                  }
                 />
               </div>
 

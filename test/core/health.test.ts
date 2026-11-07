@@ -150,6 +150,8 @@ describe('Memory Health & Conflict Doctor (src/core/health.ts)', () => {
       now - 5000
     );
     const id3 = (r3 as any).id;
+    // Simulate a legacy unembedded record so autoHealMemoryHealth exercises embedding backfill alongside inline write embeddings
+    db.run(`UPDATE memories SET embedding = NULL WHERE id = ?`, [id3]);
     db.run(
       `INSERT INTO memory_relations (from_id, to_id, rel, created_at) VALUES (?, ?, 'contradicts', ?)`,
       [id1, id3, now]

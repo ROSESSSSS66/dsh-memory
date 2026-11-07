@@ -267,7 +267,8 @@ export function recallVector(
            WHERE m.status IN ('active', 'frozen')
              AND m.type != 'meta'
              AND (${scope.sql})
-           LIMIT 250`,
+           ORDER BY m.pinned DESC, m.utility DESC, m.updated_at DESC
+           LIMIT 400`,
           scope.params
         )
       : db.all<{
@@ -284,7 +285,8 @@ export function recallVector(
              AND m.type != 'meta'
              AND m.embedding IS NOT NULL
              AND (${scope.sql})
-           LIMIT 250`,
+           ORDER BY m.pinned DESC, m.utility DESC, m.updated_at DESC
+           LIMIT 400`,
           scope.params
         );
 

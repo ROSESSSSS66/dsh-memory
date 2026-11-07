@@ -372,10 +372,48 @@ export const MEMORY_STYLES = `
 
 .dshm-section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 10px;
   padding-top: 4px;
+}
+
+.dshm-section-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dshm-filter-input {
+  width: 176px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 1px solid var(--dshm-border-1);
+  background: var(--dshm-tile);
+  color: var(--dshm-ink-1);
+  font-family: var(--dshm-font-sans);
+  font-size: 11.5px;
+  outline: none;
+  transition: border-color var(--dshm-timing), width var(--dshm-timing);
+}
+
+.dshm-filter-input::placeholder {
+  color: var(--dshm-ink-4);
+}
+
+.dshm-filter-input:focus {
+  width: 220px;
+  border-color: var(--dshm-border-2);
+}
+
+.dshm-doctor-note {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dshm-ink-3);
+  padding-top: 6px;
+  border-top: 0.5px solid var(--dshm-divider);
 }
 
 .dshm-section-label {
