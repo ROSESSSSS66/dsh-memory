@@ -10,10 +10,20 @@ import { workspaceId } from '../core/scope.js';
 import { registerJobHandler } from '../jobs/runner.js';
 
 export interface ReflectPayload {
-  sessionId: string;
-  turn: number;
+  sessionId?: string;
+  turn?: number;
   cwd?: string;
+  workspaceId?: string;
+  sig?: string;
+  signalKind?: 'user_correction' | 'repeated_tool_failure';
   correctionMessage?: string;
+}
+
+function resolveRealCwd(cwdOrWsId?: string): string {
+  if (cwdOrWsId && cwdOrWsId.trim() && !/^[0-9a-f]{16}$/i.test(cwdOrWsId.trim())) {
+    return cwdOrWsId.trim();
+  }
+  return process.cwd();
 }
 
 /**
@@ -33,31 +43,84 @@ export async function runReflectJob(
     return { action: 'failed', error: 'invalid_reflect_job_payload', nonRetryable: true };
   }
 
-  const { sessionId, turn, cwd = '', correctionMessage = 'User corrected previous answer' } = payload;
+  let { sessionId, turn, cwd = '', correctionMessage } = payload;
+  const sig = payload.sig;
+
+  // 兼容 R4 跨会话重复工具失败入队的 reflect:failure_sig 任务
+  if (sig && (!sessionId || typeof turn !== 'number')) {
+    const sigRow = db.get<{ sessions: string; last_seq_ref: string | null; workspace_id: string }>(
+      'SELECT sessions, last_seq_ref, workspace_id FROM failure_sigs WHERE sig = ? ORDER BY updated_at DESC LIMIT 1',
+      [sig]
+    );
+    if (sigRow) {
+      if (!sessionId && sigRow.last_seq_ref && sigRow.last_seq_ref.includes(':')) {
+        sessionId = sigRow.last_seq_ref.split(':')[0];
+      }
+      if (!sessionId) {
+        try {
+          const parsedSessions = JSON.parse(sigRow.sessions || '[]');
+          if (Array.isArray(parsedSessions) && parsedSessions.length > 0) {
+            sessionId = String(parsedSessions[parsedSessions.length - 1]);
+          }
+        } catch {}
+      }
+      if (typeof turn !== 'number' && sessionId) {
+        const lastEv = db.get<{ turn: number | null }>(
+          'SELECT turn FROM raw_events WHERE session_id = ? ORDER BY seq DESC LIMIT 1',
+          [sessionId]
+        );
+        turn = typeof lastEv?.turn === 'number' ? lastEv.turn : 0;
+      }
+    }
+    if (!correctionMessage) {
+      correctionMessage = `Repeated tool failure signature: ${sig.slice(0, 200)}`;
+    }
+  }
+
+  if (!correctionMessage) {
+    correctionMessage = 'User corrected previous answer';
+  }
+
   if (!sessionId || typeof turn !== 'number') {
     return { action: 'failed', error: 'missing_session_or_turn', nonRetryable: true };
   }
 
   // 1. 获取失败/纠正前后的关键事件
-  const events = db.all<RawEvent>(
+  let events = db.all<RawEvent>(
     `SELECT * FROM raw_events
      WHERE session_id = ? AND (turn = ? OR turn = ?)
      ORDER BY seq ASC`,
     [sessionId, turn, turn + 1]
   );
 
+  if (events.length === 0 && sig) {
+    events = db
+      .all<RawEvent>(
+        `SELECT * FROM raw_events
+         WHERE session_id = ?
+         ORDER BY seq DESC
+         LIMIT 12`,
+        [sessionId]
+      )
+      .reverse();
+  }
+
   if (events.length === 0) {
     return { action: 'done' };
   }
 
-  const wsId = cwd ? workspaceId(cwd) : (events[0].workspace_id || '');
+  const wsId =
+    payload.workspaceId ||
+    (cwd && !/^[0-9a-f]{16}$/i.test(cwd) ? workspaceId(cwd) : cwd || events[0].workspace_id || '');
+  const realCwd = resolveRealCwd(cwd);
   const evidenceLedger: EvidenceLedger = new Map();
   const transcript = renderTranscript(events, evidenceLedger);
+  const signalKind = payload.signalKind || (sig ? 'repeated_tool_failure' : 'user_correction');
 
   const userPrompt = PROMPT_REFLECT.buildUser({
     cwd: wsId,
     turn,
-    signalKind: 'user_correction',
+    signalKind,
     signalDetail: correctionMessage,
     transcript,
   });
@@ -71,7 +134,7 @@ export async function runReflectJob(
       systemPrompt: PROMPT_REFLECT.system,
       userPrompt,
       maxOutputTokens: PROMPT_REFLECT.maxOutputTokens,
-      cwd: cwd || wsId,
+      cwd: realCwd,
       workspaceId: wsId,
       signal,
       fetchFn,

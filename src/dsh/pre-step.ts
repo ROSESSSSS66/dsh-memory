@@ -125,8 +125,11 @@ export async function handlePreStep(
       alreadyInjected.add(`${row.memory_id}@${row.content_rev}`);
     }
 
-    // 7. 计算动态层可用预算
-    const stableTokens = ctx.promptSections.getStableTokens(agentId);
+    // 7. 计算动态层可用预算 (统一采用 estimateTokens 估值口径，避免 UTF-8 字节数与 token 预算混淆)
+    const stableTokens =
+      typeof ctx.promptSections.getStableEstimatedTokens === 'function'
+        ? ctx.promptSections.getStableEstimatedTokens(agentId)
+        : ctx.promptSections.getStableTokens(agentId);
     const hardBudget = cfg.hardBudgetTokens || 3200;
     const dynamicBudget = Math.min(cfg.dynamicBudgetTokens || 1600, hardBudget - stableTokens);
 

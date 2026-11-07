@@ -29,6 +29,8 @@ import {
   autoPinMemories,
   checkAndRepairFts,
   cleanOldTelemetry,
+  pruneInvalidMemories,
+  curateMemoriesWithLLM,
 } from '../evolution/maintenance.js';
 import { registerWebRoutes } from './web.js';
 import { backfillMissingEmbeddings } from '../core/vector.js';
@@ -91,9 +93,13 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     if (!db) return;
     const currentDb: Db = db;
 
-    // 合并存储中的用户自定义动态配置 (LLM 配置、风控与隐私选项)
+    // 合并存储中的用户自定义动态配置 (LLM 配置、风控与隐私选项)，并保持全局共享 cfg 引用实时同步
     const cfg = loadConfigFromDb(currentDb, initialCfg);
-    const getLiveCfg = () => loadConfigFromDb(currentDb, initialCfg);
+    const getLiveCfg = (): PluginConfig => {
+      const loaded = loadConfigFromDb(currentDb, initialCfg);
+      Object.assign(cfg, loaded);
+      return cfg;
+    };
 
     console.log('[dsh-memory] Plugin initialized with database at:', dbPath);
 
@@ -165,14 +171,23 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
       return { action: 'done' };
     });
 
-    registerJobHandler('maintain', async () => {
+    registerJobHandler('maintain', async (_job, signal) => {
       const liveCfg = getLiveCfg();
-      const maintainWsId = workspaceId(ctx?.agent?.cwd || process.cwd());
+      const rawCwd = ctx?.agent?.cwd || process.cwd();
+      const maintainWsId = workspaceId(rawCwd);
+      pruneInvalidMemories(currentDb, { workspaceId: maintainWsId });
       archiveColdMemories(currentDb, liveCfg);
       expireCandidates(currentDb);
       autoPinMemories(currentDb);
       checkAndRepairFts(currentDb);
       backfillMissingEmbeddings(currentDb, { limit: 500 });
+      try {
+        await curateMemoriesWithLLM(currentDb, liveCfg, {
+          workspaceId: maintainWsId,
+          cwd: rawCwd,
+          signal,
+        });
+      } catch {}
       autoHealMemoryHealth(currentDb, { workspaceId: maintainWsId });
       weaveZettelkastenLinks(currentDb, { maxNewLinks: 25 });
       cleanOldTelemetry(currentDb);
@@ -194,6 +209,22 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
         }
       } catch {}
 
+      return { action: 'done' };
+    });
+
+    registerJobHandler('curate', async (job, signal) => {
+      const liveCfg = getLiveCfg();
+      const payload = job.payload ? JSON.parse(job.payload) : {};
+      const rawCwd = payload.cwd || ctx?.agent?.cwd || process.cwd();
+      const wsId = payload.workspaceId || workspaceId(rawCwd);
+      const res = await curateMemoriesWithLLM(currentDb, liveCfg, {
+        workspaceId: wsId,
+        cwd: rawCwd,
+        signal,
+      });
+      if (!res.ok && res.error !== 'daily_tokens_exceeded' && res.error !== 'daily_calls_exceeded') {
+        return { action: 'failed', error: res.error || 'curate_failed' };
+      }
       return { action: 'done' };
     });
 
@@ -460,6 +491,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     }
 
     // 6.2 注册 turn-stopping 全自动闭环调度监听器
+    let lastTurnWeaveAt = 0;
     const unlistenTurnStopping =
       typeof ctx.on === 'function'
         ? ctx.on('agent/turn-stopping', (evt: any) => {
@@ -496,8 +528,12 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
                 });
               }
 
-              // 每 10 分钟时间桶自动排队一次后台自愈与维护，并即时为当前工作区新增记忆执行 A-Mem 双链织网
-              weaveZettelkastenLinks(currentDb, { workspaceId: wsId, maxNewLinks: 15, now });
+              // 节流执行本地无效记忆清理与 A-Mem 双链织网 (至少间隔 60s)，每 10 分钟时间桶自动排队一次后台自愈与 LLM 记忆审阅淘汰
+              if (now - lastTurnWeaveAt >= 60_000) {
+                lastTurnWeaveAt = now;
+                pruneInvalidMemories(currentDb, { workspaceId: wsId, now });
+                weaveZettelkastenLinks(currentDb, { workspaceId: wsId, maxNewLinks: 15, now });
+              }
               const bucket10m = Math.floor(now / 600_000);
               scheduler.enqueue('maintain', `auto_maintain:${bucket10m}`, { auto: true });
 
@@ -519,7 +555,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
           if (unlistenPressure) unlistenPressure();
           unlistenPreStep();
           scheduler.stop();
-          for (const kind of ['distill', 'reflect', 'consolidate', 'maintain', 'repair', 'evolve']) {
+          for (const kind of ['distill', 'reflect', 'consolidate', 'maintain', 'curate', 'repair', 'evolve']) {
             unregisterJobHandler(kind);
           }
           promptSections?.disposeAll();

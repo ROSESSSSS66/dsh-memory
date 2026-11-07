@@ -2,9 +2,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Db, MemoryRecord } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import { ftsText } from '../core/text.js';
+import { ftsText, contentHash } from '../core/text.js';
 import { openDb } from '../core/db.js';
-import { backfillMissingEmbeddings, clearRuntimeVectorCache } from '../core/vector.js';
+import {
+  backfillMissingEmbeddings,
+  clearRuntimeVectorCache,
+  computeLocalEmbedding,
+  encodeEmbeddingBlob,
+  primeRuntimeVectorCache,
+  removeCachedRuntimeEmbedding,
+} from '../core/vector.js';
+import { saveVersionSnapshot, editContent, addRelation } from '../core/writer.js';
+import { PROMPT_CURATE } from './prompts.js';
+import { parseOutput } from './parse.js';
+import { callOfflineLLM } from './llm.js';
 
 export function getBackupTimestamp(date: Date = new Date()): string {
   const y = date.getFullYear();
@@ -488,4 +499,318 @@ export function importDatabaseFile(
     try { sourceDb.close(); } catch {}
     return { success: false, importedRecords: 0, error: err.message };
   }
+}
+
+const TRANSIENT_NOISE_REGEX =
+  /^(?:请\s*)?(?:帮我|给我|替我)?\s*(?:创建一个|写一个|生成一个|画一个|绘制一个|制作一个|看看这段|运行一下|执行一下|测试一下)/i;
+
+const DURABLE_RULE_REGEX =
+  /(?:以后|今后|总是|一律|永远|每次都|统一使用|必须使用|严禁|切勿|绝不|from now on|always|never|must always)/i;
+
+/**
+ * 本地确定性无效记忆清理 (无需等待 60 天冷期，即时淘汰已被证伪、遮蔽或明显属于一次性噪音的记忆)
+ * 严格保护 frozen=1、pinned=1 与 core:* 核心块
+ */
+export function pruneInvalidMemories(
+  db: Db,
+  options: { workspaceId?: string; now?: number } = {}
+): { prunedCount: number; prunedIds: string[] } {
+  const now = options.now ?? Date.now();
+  const wsFilter = options.workspaceId
+    ? `AND (workspace_id = ? OR scope IN ('user', 'global'))`
+    : '';
+  const params: unknown[] = options.workspaceId ? [options.workspaceId] : [];
+
+  const rows = db.all<MemoryRecord>(
+    `SELECT * FROM memories
+     WHERE status IN ('active', 'candidate')
+       AND pinned = 0
+       AND type != 'meta'
+       AND COALESCE(slot_key, '') NOT LIKE 'core:%'
+       ${wsFilter}`,
+    params
+  );
+
+  if (rows.length === 0) {
+    return { prunedCount: 0, prunedIds: [] };
+  }
+
+  // 构建同槽位更高优先级 active 记忆索引，用于淘汰被遮蔽的过时 candidate
+  const activeSlotMap = new Map<string, MemoryRecord>();
+  for (const m of rows) {
+    if (m.status === 'active' && m.slot_key) {
+      const key = `${m.scope}:${m.workspace_id || ''}:${m.slot_key}`;
+      const prev = activeSlotMap.get(key);
+      if (!prev || m.updated_at > prev.updated_at) {
+        activeSlotMap.set(key, m);
+      }
+    }
+  }
+
+  const prunedIds: string[] = [];
+
+  db.transaction(() => {
+    for (const mem of rows) {
+      let reason: string | null = null;
+
+      // 1. 实战多次被证伪且零正反馈的负效用记忆
+      if (mem.fail_count >= 2 && mem.success_count === 0 && mem.utility <= 0.38) {
+        reason = 'repeated_negative_outcome';
+      }
+
+      // 2. 一次性临时指令噪音 (且不含持久规则词、未被正向验证)
+      if (
+        !reason &&
+        mem.success_count === 0 &&
+        (mem.status === 'candidate' || (mem.use_count === 0 && mem.utility <= 0.45)) &&
+        TRANSIENT_NOISE_REGEX.test(mem.content.trim()) &&
+        !DURABLE_RULE_REGEX.test(mem.content)
+      ) {
+        reason = 'transient_one_off_noise';
+      }
+
+      // 3. 候选记忆对应的规范槽位已有更新的 active 记忆生效
+      if (!reason && mem.status === 'candidate' && mem.slot_key) {
+        const key = `${mem.scope}:${mem.workspace_id || ''}:${mem.slot_key}`;
+        const activeHolder = activeSlotMap.get(key);
+        if (activeHolder && activeHolder.id !== mem.id && activeHolder.updated_at >= mem.created_at) {
+          reason = 'shadowed_by_active_slot';
+        }
+      }
+
+      if (reason) {
+        saveVersionSnapshot(db, mem, reason, 'maintenance', now);
+        const nextStatus = mem.status === 'candidate' ? 'rejected' : 'archived';
+        db.run(
+          `UPDATE memories
+           SET status = ?, valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ?
+           WHERE id = ?`,
+          [nextStatus, now, now, now, mem.id]
+        );
+        removeCachedRuntimeEmbedding(mem.id);
+        prunedIds.push(mem.id);
+      }
+    }
+  });
+
+  return { prunedCount: prunedIds.length, prunedIds };
+}
+
+export interface CurateResult {
+  ok: boolean;
+  deterministicPruned: number;
+  llmDiscarded: number;
+  llmUpdated: number;
+  discardedIds: string[];
+  updatedIds: string[];
+  error?: string;
+}
+
+/**
+ * 通过离线 LLM 全自动审阅、舍弃无效/噪音/过时记忆，并原地合并更新存量记忆 (curate-v1)
+ */
+export async function curateMemoriesWithLLM(
+  db: Db,
+  cfg: PluginConfig,
+  options: {
+    workspaceId?: string;
+    cwd?: string;
+    signal?: AbortSignal;
+    fetchFn?: typeof fetch;
+    now?: number;
+  } = {}
+): Promise<CurateResult> {
+  const now = options.now ?? Date.now();
+
+  // 1. 先执行本地确定性无效记忆清理
+  const localPrune = pruneInvalidMemories(db, { workspaceId: options.workspaceId, now });
+  const discardedIds = [...localPrune.prunedIds];
+  const updatedIds: string[] = [];
+
+  // 2. 选取待 LLM 审阅的存量非冻结记忆 (优先审阅 candidate、有负反馈、低效用或近期未审阅记录)
+  const wsFilter = options.workspaceId
+    ? `AND (workspace_id = ? OR scope IN ('user', 'global'))`
+    : '';
+  const params: unknown[] = options.workspaceId ? [options.workspaceId] : [];
+
+  const candidates = db.all<MemoryRecord>(
+    `SELECT * FROM memories
+     WHERE status IN ('active', 'candidate')
+       AND pinned = 0
+       AND type != 'meta'
+       AND COALESCE(slot_key, '') NOT LIKE 'core:%'
+       ${wsFilter}
+     ORDER BY
+       (CASE WHEN status = 'candidate' THEN 0 ELSE 1 END) ASC,
+       (CASE WHEN fail_count > 0 THEN 0 ELSE 1 END) ASC,
+       utility ASC,
+       updated_at DESC
+     LIMIT 20`,
+    params
+  );
+
+  if (candidates.length === 0) {
+    return {
+      ok: true,
+      deterministicPruned: localPrune.prunedCount,
+      llmDiscarded: 0,
+      llmUpdated: 0,
+      discardedIds,
+      updatedIds,
+    };
+  }
+
+  const reviewedMap = new Map<string, MemoryRecord>();
+  const lines: string[] = [];
+  for (const m of candidates) {
+    reviewedMap.set(m.id, m);
+    lines.push(
+      `[${m.id}] type=${m.type} status=${m.status}${m.slot_key ? ` slot=${m.slot_key}` : ''} utility=${m.utility.toFixed(2)} use=${m.use_count} ok=${m.success_count} fail=${m.fail_count}: ${m.content}`
+    );
+  }
+
+  const wsId = options.workspaceId || candidates[0].workspace_id || '';
+  const realCwd =
+    options.cwd && options.cwd.trim() && !/^[0-9a-f]{16}$/i.test(options.cwd.trim())
+      ? options.cwd.trim()
+      : process.cwd();
+
+  const userPrompt = PROMPT_CURATE.buildUser({
+    cwd: wsId || 'global',
+    memoriesList: lines.join('\n'),
+  });
+
+  const llmRes = await callOfflineLLM(
+    db,
+    {
+      jobKind: 'curate',
+      promptVersion: PROMPT_CURATE.version,
+      systemPrompt: PROMPT_CURATE.system,
+      userPrompt,
+      maxOutputTokens: PROMPT_CURATE.maxOutputTokens,
+      cwd: realCwd,
+      workspaceId: wsId,
+      signal: options.signal,
+      fetchFn: options.fetchFn,
+    },
+    cfg
+  );
+
+  if (!llmRes.ok) {
+    return {
+      ok: false,
+      deterministicPruned: localPrune.prunedCount,
+      llmDiscarded: 0,
+      llmUpdated: 0,
+      discardedIds,
+      updatedIds,
+      error: llmRes.error,
+    };
+  }
+
+  const parseRes = parseOutput(llmRes.content, {
+    taskKind: 'curate',
+    evidenceLedger: new Map(),
+    workspaceId: wsId,
+  });
+
+  if (!parseRes.success || !parseRes.curateResult) {
+    return {
+      ok: false,
+      deterministicPruned: localPrune.prunedCount,
+      llmDiscarded: 0,
+      llmUpdated: 0,
+      discardedIds,
+      updatedIds,
+      error: !parseRes.success ? parseRes.error : 'missing_curate_result',
+    };
+  }
+
+  const { discard_ids, updates } = parseRes.curateResult;
+  let llmDiscarded = 0;
+  let llmUpdated = 0;
+
+  db.transaction(() => {
+    // 3.1 执行 LLM 判定的无效记忆舍弃
+    for (const id of discard_ids) {
+      const target = reviewedMap.get(id);
+      if (!target || target.status === 'frozen' || target.pinned === 1) continue;
+      saveVersionSnapshot(db, target, 'llm_curate_discard', 'llm', now);
+      const nextStatus = target.status === 'candidate' ? 'rejected' : 'archived';
+      db.run(
+        `UPDATE memories
+         SET status = ?, valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ?
+         WHERE id = ?`,
+        [nextStatus, now, now, now, target.id]
+      );
+      removeCachedRuntimeEmbedding(target.id);
+      if (!discardedIds.includes(target.id)) {
+        discardedIds.push(target.id);
+      }
+      llmDiscarded++;
+    }
+
+    // 3.2 执行 LLM 判定的记忆原地更新与冗余吸收
+    for (const upd of updates) {
+      if (discard_ids.includes(upd.target_id)) continue;
+      const target = reviewedMap.get(upd.target_id);
+      if (!target || target.status === 'frozen') continue;
+
+      const editRes = editContent(db, target.id, upd.text, undefined, 'llm', now);
+      if (!editRes.ok) continue;
+
+      const nextSlot = upd.slot_key !== undefined ? upd.slot_key : target.slot_key;
+      const nextType = upd.type || target.type;
+      const newHash = contentHash(nextType, upd.text);
+      const newVec = computeLocalEmbedding(
+        `${upd.text.slice(0, 80)}\n${upd.text}${nextSlot ? `\n${nextSlot}` : ''}`
+      );
+
+      db.run(
+        `UPDATE memories
+         SET type = ?, slot_key = ?, confidence = ?, status = 'active',
+             approved_at = COALESCE(approved_at, ?), approved_by = COALESCE(approved_by, 'llm-curator'),
+             hash = ?, embedding = ?, updated_at = ?
+         WHERE id = ?`,
+        [
+          nextType,
+          nextSlot,
+          upd.confidence,
+          now,
+          newHash,
+          encodeEmbeddingBlob(newVec),
+          now,
+          target.id,
+        ]
+      );
+      removeCachedRuntimeEmbedding(target.id);
+      primeRuntimeVectorCache(target.id, newHash, newVec);
+      updatedIds.push(target.id);
+      llmUpdated++;
+
+      // 吸收并取代被合并的冗余兄弟记忆
+      for (const absId of upd.absorb_ids || []) {
+        const absMem = reviewedMap.get(absId);
+        if (!absMem || absMem.id === target.id || absMem.status === 'frozen') continue;
+        saveVersionSnapshot(db, absMem, 'llm_curate_merged', 'llm', now);
+        db.run(
+          `UPDATE memories
+           SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ?
+           WHERE id = ?`,
+          [now, now, now, absMem.id]
+        );
+        removeCachedRuntimeEmbedding(absMem.id);
+        addRelation(db, target.id, absMem.id, 'supersedes', now);
+      }
+    }
+  });
+
+  return {
+    ok: true,
+    deterministicPruned: localPrune.prunedCount,
+    llmDiscarded,
+    llmUpdated,
+    discardedIds,
+    updatedIds,
+  };
 }

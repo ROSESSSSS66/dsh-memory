@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { Db, MemoryRecord } from '../types.js';
 import { scopeFilterSQL } from '../core/scope.js';
 import { render } from '../retrieval/render.js';
-import { budgetTokens } from '../core/tokens.js';
+import { budgetTokens, estimateTokens } from '../core/tokens.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
 export interface StableSectionState {
@@ -10,6 +10,7 @@ export interface StableSectionState {
   lastHash?: string;
   visibleRefs: Set<string>; // id@contentRev
   stableTokens: number;
+  estimatedTokens: number;
 }
 
 /**
@@ -24,7 +25,7 @@ export function renderStableLayer(
   ctx: { workspaceId: string; sessionId?: string },
   cfg: PluginConfig = DEFAULTS,
   strategyVersion: number = 1
-): { text: string; visibleRefs: Set<string>; stableTokens: number } {
+): { text: string; visibleRefs: Set<string>; stableTokens: number; estimatedTokens: number } {
   try {
     const scope = scopeFilterSQL({
       workspaceId: ctx.workspaceId,
@@ -42,7 +43,7 @@ export function renderStableLayer(
     );
 
     if (!rows || rows.length === 0) {
-      return { text: '', visibleRefs: new Set(), stableTokens: 0 };
+      return { text: '', visibleRefs: new Set(), stableTokens: 0, estimatedTokens: 0 };
     }
 
     // 装箱预算检查
@@ -90,10 +91,11 @@ export function renderStableLayer(
       text: currentText,
       visibleRefs,
       stableTokens: currentTokens,
+      estimatedTokens: estimateTokens(currentText),
     };
   } catch (err: any) {
     console.warn('[dsh-memory] renderStableLayer failed (degrading to empty):', err?.message || err);
-    return { text: '', visibleRefs: new Set(), stableTokens: 0 };
+    return { text: '', visibleRefs: new Set(), stableTokens: 0, estimatedTokens: 0 };
   }
 }
 
@@ -118,11 +120,11 @@ export class PromptSectionManager {
     const agentId = agent?.id || 'default_agent';
     let state = this.agentStates.get(agentId);
     if (!state) {
-      state = { visibleRefs: new Set(), stableTokens: 0 };
+      state = { visibleRefs: new Set(), stableTokens: 0, estimatedTokens: 0 };
       this.agentStates.set(agentId, state);
     }
 
-    const { text, visibleRefs, stableTokens } = renderStableLayer(
+    const { text, visibleRefs, stableTokens, estimatedTokens } = renderStableLayer(
       this.db,
       scopeCtx,
       this.cfg
@@ -134,6 +136,7 @@ export class PromptSectionManager {
     if (hash === state.lastHash && state.disposer) {
       state.visibleRefs = visibleRefs;
       state.stableTokens = stableTokens;
+      state.estimatedTokens = estimatedTokens;
       return state;
     }
 
@@ -148,6 +151,7 @@ export class PromptSectionManager {
     state.lastHash = hash;
     state.visibleRefs = visibleRefs;
     state.stableTokens = stableTokens;
+    state.estimatedTokens = estimatedTokens;
 
     // 注册到 agent.ctx.systemPrompt
     if (agent?.ctx?.systemPrompt?.section) {
@@ -172,6 +176,11 @@ export class PromptSectionManager {
 
   public getStableTokens(agentId: string): number {
     return this.agentStates.get(agentId)?.stableTokens || 0;
+  }
+
+  public getStableEstimatedTokens(agentId: string): number {
+    const state = this.agentStates.get(agentId);
+    return state?.estimatedTokens ?? state?.stableTokens ?? 0;
   }
 
   public disposeAgent(agentId: string): void {

@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { URL } from 'node:url';
+import path from 'node:path';
+import os from 'node:os';
 import type { Db, MemoryRecord, MemoryType } from '../types.js';
 import { type PluginConfig, saveConfigToDb } from '../config.js';
 import { get, list, stats, sources, history, getGraphData, getSubgraph } from '../core/store.js';
@@ -20,8 +22,8 @@ import {
 } from '../core/writer.js';
 import { redactSecrets, isOfflineEndpointAllowed } from '../core/privacy.js';
 import { workspaceId } from '../core/scope.js';
-import { serializeMemoryToMarkdown } from '../core/markdown.js';
-import { estimateTokens, budgetTokens } from '../core/tokens.js';
+import { serializeMemoryToMarkdown, trashMemory } from '../core/markdown.js';
+import { estimateTokens } from '../core/tokens.js';
 import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
 import { contentHash } from '../core/text.js';
@@ -50,6 +52,8 @@ import {
   autoPinMemories,
   checkAndRepairFts,
   cleanOldTelemetry,
+  pruneInvalidMemories,
+  curateMemoriesWithLLM,
 } from '../evolution/maintenance.js';
 import { resolveEndpointAndProtocol, buildProtocolPayload } from '../evolution/llm.js';
 import {
@@ -176,6 +180,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
   }
 
   let lastAutoCycleAt = 0;
+  let lastLlmCurateAt = 0;
   const runThrottledAutonomousCycle = (wsId?: string) => {
     const now = Date.now();
     if (now - lastAutoCycleAt < 45_000) return;
@@ -183,6 +188,10 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
     try {
       autoHealMemoryHealth(db, { workspaceId: wsId, now });
     } catch {}
+    if (cfg.privacy?.offlineConsent && now - lastLlmCurateAt >= 600_000) {
+      lastLlmCurateAt = now;
+      curateMemoriesWithLLM(db, cfg, { workspaceId: wsId, now }).catch(() => {});
+    }
   };
 
   const dispose = ctx.webServer.register({
@@ -454,7 +463,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             recallSimulation = {
               query: queryText,
               latencyMs: recRes.latencyMs,
-              dynamicTokens: budgetTokens(recRes.block),
+              dynamicTokens: estimateTokens(recRes.block),
               block: recRes.block,
               plan: {
                 tokens: plan.tokens,
@@ -507,7 +516,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             ok: true,
             stableLayer: {
               text: stableLayer.text,
-              stableTokens: stableLayer.stableTokens,
+              stableTokens: stableLayer.estimatedTokens ?? stableLayer.stableTokens,
+              stableByteTokens: stableLayer.stableTokens,
               stableBudgetTokens: cfg.stableBudgetTokens || 600,
               visibleCount: stableLayer.visibleRefs.size,
             },
@@ -538,23 +548,12 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         }
 
         // 1.6. Memory Health & Conflict Doctor (v0.3.0)
+        // 由 runThrottledAutonomousCycle (45s 节流) 统一触发后台自愈，避免前端 8s 轮询阻塞主线程
         if (subPath === '/health') {
           const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
           const wsId = rawWs ? workspaceId(rawWs) : undefined;
           runThrottledAutonomousCycle(wsId);
-          let health = auditMemoryHealth(db, { workspaceId: wsId });
-          if (
-            !health.ftsConsistent ||
-            (health.missingEmbeddingsCount ?? 0) > 0 ||
-            health.duplicatePairs.length > 0 ||
-            health.contradictions.length > 0 ||
-            (health.orphanMemoriesCount ?? 0) > 0
-          ) {
-            try {
-              const healed = autoHealMemoryHealth(db, { workspaceId: wsId });
-              health = healed.report;
-            } catch {}
-          }
+          const health = auditMemoryHealth(db, { workspaceId: wsId });
           sendJson(res, 200, { ok: true, health });
           return;
         }
@@ -754,6 +753,13 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
 
           if (action === 'forget') {
+            const trashDir = path.join(
+              cfg.dataDir || path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory'),
+              '.trash'
+            );
+            try {
+              trashMemory(db, id, trashDir);
+            } catch {}
             const ok = forget(db, id, 'user');
             if (!ok) {
               sendJson(res, 404, { ok: false, error: `Memory ${id} not found` });
@@ -883,13 +889,22 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             }
             let successCount = 0;
             const now = Date.now();
+            const trashDir = path.join(
+              cfg.dataDir || path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory'),
+              '.trash'
+            );
             for (const targetId of ids) {
               try {
                 if (subAction === 'pin') pin(db, targetId, 'user', now);
                 else if (subAction === 'unpin') unpin(db, targetId, 'user', now);
                 else if (subAction === 'freeze') freeze(db, targetId, 'user', now);
                 else if (subAction === 'unfreeze') unfreeze(db, targetId, 'user', now);
-                else if (subAction === 'forget') forget(db, targetId, 'user', now);
+                else if (subAction === 'forget') {
+                  try {
+                    trashMemory(db, targetId, trashDir);
+                  } catch {}
+                  forget(db, targetId, 'user', now);
+                }
                 else if (subAction === 'restore') restoreMemory(db, targetId, 'user', now);
                 else if (subAction === 'approve') approveCandidate(db, targetId, 'user', now);
                 else if (subAction === 'confirm') confirmMemory(db, targetId, 'user', now);
@@ -897,6 +912,13 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               } catch {}
             }
             sendJson(res, 200, { ok: true, affected: successCount, total: ids.length });
+            return;
+          }
+
+          if (action === 'curate') {
+            const wsId = body.workspaceId ? workspaceId(body.workspaceId) : undefined;
+            const curateRes = await curateMemoriesWithLLM(db, cfg, { workspaceId: wsId });
+            sendJson(res, 200, curateRes);
             return;
           }
 

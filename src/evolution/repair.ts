@@ -173,6 +173,10 @@ export function executeRepair(
     });
 
     // 6. 调用离线 LLM
+    const realCwd =
+      mem.workspace_id && !/^[0-9a-f]{16}$/i.test(mem.workspace_id)
+        ? mem.workspace_id
+        : process.cwd();
     const llmRes = await callOfflineLLM(
       db,
       {
@@ -181,7 +185,7 @@ export function executeRepair(
         systemPrompt: PROMPT_REPAIR.system,
         userPrompt: prompt,
         maxOutputTokens: PROMPT_REPAIR.maxOutputTokens,
-        cwd: mem.workspace_id || '',
+        cwd: realCwd,
         workspaceId: mem.workspace_id || '',
         signal: options.signal,
         fetchFn: options.fetchFn,
