@@ -133,9 +133,12 @@ function runMigrations(db: Db): void {
     db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('created_at', ?)", [now.toString()]);
   }
 
-  // 保证关系表反向索引存在 (性能优化)
+  // 保证关系表反向索引与高规模检索覆盖索引存在 (性能优化)
   try {
     db.exec("CREATE INDEX IF NOT EXISTS ix_mem_rel_to ON memory_relations(to_id, rel);");
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS ix_mem_vec_rank ON memories(pinned DESC, utility DESC, updated_at DESC, status, type, scope, workspace_id, session_id, id, hash) WHERE status IN ('active', 'frozen') AND type != 'meta';"
+    );
   } catch {}
 
   // 保证 Stanford / Zep 时序与重要度字段存在

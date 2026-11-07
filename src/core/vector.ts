@@ -161,6 +161,14 @@ export function primeRuntimeVectorCache(
   runtimeVectorCache.set(cacheKey, vec);
 }
 
+export function getCachedRuntimeEmbedding(
+  id: string,
+  hashOrKey?: string | number | null
+): Float32Array | undefined {
+  if (hashOrKey === undefined || hashOrKey === null || hashOrKey === '') return undefined;
+  return runtimeVectorCache.get(`${id}:${hashOrKey}`);
+}
+
 /**
  * 获取或在线计算记忆的 128 维本地向量（支持外部缓存、SQLite BLOB 解码与内存 LRU 即时回退）
  */
@@ -179,8 +187,18 @@ export function getOrComputeEmbedding(
   const cachedExt = externalCache?.get(row.id);
   if (cachedExt) return cachedExt;
 
+  if (row.hash && dim === DEFAULT_LOCAL_VECTOR_DIM) {
+    const cachedByHash = runtimeVectorCache.get(`${row.id}:${row.hash}`);
+    if (cachedByHash) return cachedByHash;
+  }
+
   const decoded = decodeEmbeddingBlob(row.embedding, dim);
-  if (decoded) return decoded;
+  if (decoded) {
+    if (row.hash && dim === DEFAULT_LOCAL_VECTOR_DIM) {
+      primeRuntimeVectorCache(row.id, row.hash, decoded);
+    }
+    return decoded;
+  }
 
   const text = `${row.summary || ''}\n${row.content || ''}${row.slot_key ? `\n${row.slot_key}` : ''}`.trim();
   if (!text) return null;
