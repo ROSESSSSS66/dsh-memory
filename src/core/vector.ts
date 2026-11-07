@@ -57,9 +57,26 @@ export function computeLocalEmbedding(
     }
   }
 
-  // 3. 代码/路径/标识符实体增强权重
+  // 3. 代码/路径/标识符实体增强权重 + 层级路径目录前缀特征 (Hierarchical Path Prefixes)
   for (const ent of entities) {
     addFeature(`e:${ent}`, 2.0);
+    if (ent.includes('/')) {
+      const normPath = ent.replace(/^\.?\//, '');
+      const parts = normPath.split('/').filter(Boolean);
+      for (let d = 1; d < parts.length; d++) {
+        addFeature(`dir:${parts.slice(0, d).join('/')}`, 0.9);
+      }
+    }
+  }
+
+  // 4. 中文复合词三元组语义特征 (CJK Trigram Context)
+  const cjkRuns = text.match(/[\u4e00-\u9fff]{3,}/g);
+  if (cjkRuns) {
+    for (const run of cjkRuns) {
+      for (let i = 0; i + 3 <= run.length; i++) {
+        addFeature(`c3:${run.slice(i, i + 3)}`, 0.35);
+      }
+    }
   }
 
   // L2 归一化
@@ -144,6 +161,14 @@ export function primeRuntimeVectorCache(
   runtimeVectorCache.set(cacheKey, vec);
 }
 
+export function getCachedRuntimeEmbedding(
+  id: string,
+  hashOrKey?: string | number | null
+): Float32Array | undefined {
+  if (hashOrKey === undefined || hashOrKey === null || hashOrKey === '') return undefined;
+  return runtimeVectorCache.get(`${id}:${hashOrKey}`);
+}
+
 /**
  * 获取或在线计算记忆的 128 维本地向量（支持外部缓存、SQLite BLOB 解码与内存 LRU 即时回退）
  */
@@ -162,8 +187,18 @@ export function getOrComputeEmbedding(
   const cachedExt = externalCache?.get(row.id);
   if (cachedExt) return cachedExt;
 
+  if (row.hash && dim === DEFAULT_LOCAL_VECTOR_DIM) {
+    const cachedByHash = runtimeVectorCache.get(`${row.id}:${row.hash}`);
+    if (cachedByHash) return cachedByHash;
+  }
+
   const decoded = decodeEmbeddingBlob(row.embedding, dim);
-  if (decoded) return decoded;
+  if (decoded) {
+    if (row.hash && dim === DEFAULT_LOCAL_VECTOR_DIM) {
+      primeRuntimeVectorCache(row.id, row.hash, decoded);
+    }
+    return decoded;
+  }
 
   const text = `${row.summary || ''}\n${row.content || ''}${row.slot_key ? `\n${row.slot_key}` : ''}`.trim();
   if (!text) return null;

@@ -1,5 +1,7 @@
 import type { Db, MemoryRecord } from '../types.js';
 import { tokenSet, jaccard, extractEntities } from './text.js';
+import { estimateTokens } from './tokens.js';
+import { getCoreMemory, setCoreMemory } from './core-memory.js';
 import {
   getOrComputeEmbedding,
   cosineSimilarity,
@@ -74,6 +76,7 @@ export interface AutoHealResult {
   linksWeaved: number;
   candidatesPromoted?: number;
   repairsApplied?: number;
+  coreBlocksSynced?: number;
   report: MemoryHealthReport;
 }
 
@@ -690,6 +693,12 @@ export function autoHealMemoryHealth(
     now,
   });
 
+  // 8. 全自动同步已验证高效用规则至 Letta Core Memory 暂存区 (Autonomous Core Memory Sync)
+  const coreBlocksSynced = syncAutonomousCoreMemory(db, {
+    workspaceId: options.workspaceId,
+    now,
+  });
+
   const afterReport = auditMemoryHealth(db, { workspaceId: options.workspaceId, now });
 
   return {
@@ -703,6 +712,123 @@ export function autoHealMemoryHealth(
     linksWeaved,
     candidatesPromoted,
     repairsApplied,
+    coreBlocksSynced,
     report: afterReport,
   };
+}
+
+/**
+ * 全自动高置信度/高效用规则晋升同步至 Core Memory (v0.7.0 Autonomous Core Memory Sync)
+ * 仅将线上正反馈验证过 (pinned=1 或 success_count>=1)、confidence >= 0.88 且 utility >= 0.65 的规则
+ * 幂等蒸馏进 human (用户偏好) 与 project (项目核心规范) 块，严格限制每块 <= 220 tokens 且绝不覆盖 frozen 块
+ */
+export function syncAutonomousCoreMemory(
+  db: Db,
+  options: { workspaceId?: string; maxBlockTokens?: number; now?: number } = {}
+): number {
+  const maxBlockTokens = options.maxBlockTokens ?? 220;
+  let blocksUpdated = 0;
+
+  const trySyncBlock = (
+    block: 'human' | 'project',
+    candidates: Array<{ summary: string; content: string }>,
+    wsId?: string
+  ) => {
+    if (candidates.length === 0) return;
+
+    // 若目标 Core Memory 已处于 frozen 状态，绝不改动
+    const rawCore = db.get<{ status: string }>(
+      `SELECT status FROM memories
+       WHERE slot_key = ?
+         AND scope = ?
+         AND COALESCE(workspace_id, '') = ?
+         AND status IN ('active', 'frozen')
+       LIMIT 1`,
+      [`core:${block}`, block === 'human' ? 'user' : 'workspace', block === 'project' ? wsId || '' : '']
+    );
+    if (rawCore?.status === 'frozen') return;
+
+    const existing = getCoreMemory(db, block, wsId ? { workspaceId: wsId } : undefined);
+    let currentContent = existing?.content?.trim() || '';
+    const existingLines = currentContent
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const existingLineTokens = existingLines.map((l) => tokenSet(l));
+    let changed = false;
+
+    for (const cand of candidates) {
+      const cleanText = (cand.summary?.trim().length >= 8 ? cand.summary : cand.content)
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 110);
+      if (!cleanText) continue;
+
+      const bullet = cleanText.startsWith('-') ? cleanText : `- ${cleanText}`;
+      const candToks = tokenSet(cleanText);
+
+      // 幂等去重：避免子串包含或高词法重叠
+      const alreadyCovered =
+        currentContent.includes(cleanText) ||
+        existingLineTokens.some((lt) => jaccard(candToks, lt) >= 0.58);
+      if (alreadyCovered) continue;
+
+      const nextContent = currentContent ? `${currentContent}\n${bullet}` : bullet;
+      if (estimateTokens(nextContent) > maxBlockTokens) {
+        break;
+      }
+
+      currentContent = nextContent;
+      existingLineTokens.push(candToks);
+      changed = true;
+    }
+
+    if (changed && currentContent) {
+      try {
+        setCoreMemory(db, block, currentContent, {
+          workspaceId: wsId,
+          actor: 'system',
+        });
+        blocksUpdated++;
+      } catch {
+        // 保持自愈幂等容错
+      }
+    }
+  };
+
+  // 1. 同步用户级高效用偏好 -> core:human
+  const userPrefs = db.all<{ summary: string; content: string }>(
+    `SELECT summary, content FROM memories
+     WHERE status IN ('active', 'frozen')
+       AND scope = 'user'
+       AND type = 'preference'
+       AND COALESCE(slot_key, '') NOT LIKE 'core:%'
+       AND confidence >= 0.88
+       AND utility >= 0.65
+       AND (pinned = 1 OR success_count >= 1)
+     ORDER BY pinned DESC, utility DESC, success_count DESC, updated_at DESC
+     LIMIT 3`
+  );
+  trySyncBlock('human', userPrefs);
+
+  // 2. 同步当前工作区高效用架构/规范规则 -> core:project (仅在提供明确 workspaceId 时执行)
+  if (options.workspaceId) {
+    const wsRules = db.all<{ summary: string; content: string }>(
+      `SELECT summary, content FROM memories
+       WHERE status IN ('active', 'frozen')
+         AND scope = 'workspace'
+         AND workspace_id = ?
+         AND type IN ('procedural', 'semantic', 'preference')
+         AND COALESCE(slot_key, '') NOT LIKE 'core:%'
+         AND confidence >= 0.88
+         AND utility >= 0.65
+         AND (pinned = 1 OR success_count >= 1)
+       ORDER BY pinned DESC, utility DESC, success_count DESC, updated_at DESC
+       LIMIT 3`,
+      [options.workspaceId]
+    );
+    trySyncBlock('project', wsRules, options.workspaceId);
+  }
+
+  return blocksUpdated;
 }

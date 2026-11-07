@@ -5,6 +5,7 @@ import {
   computeLocalEmbedding,
   decodeEmbeddingBlob,
   cosineSimilarity,
+  getCachedRuntimeEmbedding,
   getOrComputeEmbedding,
 } from '../core/vector.js';
 
@@ -30,33 +31,99 @@ export function recallLexical(db: Db, plan: QueryPlan, ctx: ChannelContext): Can
   }
 
   const scope = scopeFilterSQL({ workspaceId: ctx.workspaceId, sessionId: ctx.sessionId });
-  const matchTokens = plan.tokens
-    .slice(0, 32)
-    .map((t) => `"${t.replace(/"/g, '')}"`)
-    .filter((t) => t.length > 2);
+  const matchTokens = Array.from(
+    new Set(
+      plan.tokens
+        .slice(0, 32)
+        .map((t) => `"${t.replace(/"/g, '')}"`)
+        .filter((t) => t.length > 2)
+    )
+  );
 
   if (matchTokens.length === 0) {
     return [];
   }
 
-  const matchExpr = matchTokens.join(' OR ');
-
-  const sql = `
-    SELECT m.id
-    FROM memory_fts f
-    JOIN memories m ON m.rowid_ = f.rowid
-    WHERE memory_fts MATCH ?
-      AND ${scope.sql}
-      AND m.status IN ('active', 'frozen')
-      AND m.type != 'meta'
-    ORDER BY bm25(memory_fts)
-    LIMIT 50
-  `;
-
   try {
-    const rows = db.all<{ id: string }>(sql, [matchExpr, ...scope.params]);
-    return rows.map((r, idx) => ({
-      id: r.id,
+    // 1. 高密度语料交集探针：当查询词 >= 3 个且同域存在 >= 25 条全词精确命中文档时，按高区分度词优先交集返回 (< 2ms)
+    if (matchTokens.length >= 3) {
+      const prioritized = [...matchTokens].sort((a, b) => {
+        const aAsciiOrNum = /[0-9a-z]/i.test(a) ? 0 : 1;
+        const bAsciiOrNum = /[0-9a-z]/i.test(b) ? 0 : 1;
+        if (aAsciiOrNum !== bAsciiOrNum) return aAsciiOrNum - bAsciiOrNum;
+        return b.length - a.length;
+      });
+      const andExpr = prioritized.slice(0, 6).join(' AND ');
+      const andRows = db.all<{ id: string }>(
+        `WITH top_and AS MATERIALIZED (
+           SELECT rowid, rank
+           FROM memory_fts
+           WHERE memory_fts MATCH ?
+           ORDER BY rank
+           LIMIT 120
+         )
+         SELECT m.id
+         FROM top_and f
+         JOIN memories m ON m.rowid_ = f.rowid
+         WHERE ${scope.sql}
+           AND m.status IN ('active', 'frozen')
+           AND m.type != 'meta'
+         LIMIT 50`,
+        [andExpr, ...scope.params]
+      );
+      if (andRows.length >= 25) {
+        return andRows.map((r, idx) => ({
+          id: r.id,
+          channel: 'lexical',
+          rank: idx + 1,
+        }));
+      }
+    }
+
+    const matchExpr = matchTokens.join(' OR ');
+
+    // 2. 并集快路径：利用 FTS5 原生 C 层 Top-K 最小堆 (INDEX 32:M1) 先取前 250 条，避免 10k+ 命中时的全表回表与临时排序树
+    const fastRows = db.all<{ id: string; ok: number }>(
+      `WITH top_fts AS MATERIALIZED (
+         SELECT rowid, rank
+         FROM memory_fts
+         WHERE memory_fts MATCH ?
+         ORDER BY rank
+         LIMIT 250
+       )
+       SELECT m.id,
+              CASE WHEN (${scope.sql})
+                    AND m.status IN ('active', 'frozen')
+                    AND m.type != 'meta'
+                   THEN 1 ELSE 0 END AS ok
+       FROM top_fts f
+       JOIN memories m ON m.rowid_ = f.rowid`,
+      [matchExpr, ...scope.params]
+    );
+
+    let validIds = fastRows.filter((r) => r.ok === 1).map((r) => r.id);
+
+    // 完备性回退：仅当全局 Top-250 触顶且有效同域结果不足 50 条时，回退全量关联查询保证 100% 精确召回
+    if (fastRows.length >= 250 && validIds.length < 50) {
+      const fullRows = db.all<{ id: string }>(
+        `SELECT m.id
+         FROM memory_fts f
+         JOIN memories m ON m.rowid_ = f.rowid
+         WHERE memory_fts MATCH ?
+           AND ${scope.sql}
+           AND m.status IN ('active', 'frozen')
+           AND m.type != 'meta'
+         ORDER BY bm25(memory_fts)
+         LIMIT 50`,
+        [matchExpr, ...scope.params]
+      );
+      validIds = fullRows.map((r) => r.id);
+    } else if (validIds.length > 50) {
+      validIds = validIds.slice(0, 50);
+    }
+
+    return validIds.map((id, idx) => ({
+      id,
       channel: 'lexical',
       rank: idx + 1,
     }));
@@ -130,22 +197,47 @@ export function recallTyped(db: Db, plan: QueryPlan, ctx: ChannelContext): Candi
 
   const matchExpr = matchTokens.join(' OR ');
 
-  const sql = `
-    SELECT m.id
-    FROM memory_fts f
-    JOIN memories m ON m.rowid_ = f.rowid
-    WHERE memory_fts MATCH ?
-      AND ${scope.sql}
-      AND m.status IN ('active', 'frozen')
-      AND m.type IN ('procedural', 'failure', 'episodic')
-    ORDER BY bm25(memory_fts)
-    LIMIT 20
-  `;
-
   try {
-    const rows = db.all<{ id: string }>(sql, [matchExpr, ...scope.params]);
-    return rows.map((r, idx) => ({
-      id: r.id,
+    const fastRows = db.all<{ id: string; ok: number }>(
+      `WITH top_fts AS MATERIALIZED (
+         SELECT rowid, rank
+         FROM memory_fts
+         WHERE memory_fts MATCH ?
+         ORDER BY rank
+         LIMIT 200
+       )
+       SELECT m.id,
+              CASE WHEN (${scope.sql})
+                    AND m.status IN ('active', 'frozen')
+                    AND m.type IN ('procedural', 'failure', 'episodic')
+                   THEN 1 ELSE 0 END AS ok
+       FROM top_fts f
+       JOIN memories m ON m.rowid_ = f.rowid`,
+      [matchExpr, ...scope.params]
+    );
+
+    let validIds = fastRows.filter((r) => r.ok === 1).map((r) => r.id);
+
+    if (fastRows.length >= 200 && validIds.length < 20) {
+      const rows = db.all<{ id: string }>(
+        `SELECT m.id
+         FROM memory_fts f
+         JOIN memories m ON m.rowid_ = f.rowid
+         WHERE memory_fts MATCH ?
+           AND ${scope.sql}
+           AND m.status IN ('active', 'frozen')
+           AND m.type IN ('procedural', 'failure', 'episodic')
+         ORDER BY bm25(memory_fts)
+         LIMIT 20`,
+        [matchExpr, ...scope.params]
+      );
+      validIds = rows.map((r) => r.id);
+    } else if (validIds.length > 20) {
+      validIds = validIds.slice(0, 20);
+    }
+
+    return validIds.map((id, idx) => ({
+      id,
       channel: 'typed',
       rank: idx + 1,
     }));
@@ -253,89 +345,66 @@ export function recallVector(
   const minSim = ctx.cfg?.minVectorSimilarity ?? DEFAULTS.minVectorSimilarity;
 
   try {
-    let rows = cache && cache.size > 0
-      ? db.all<{
-          id: string;
-          summary?: string;
-          content?: string;
-          slot_key?: string | null;
-          hash?: string;
-          embedding: Uint8Array | Buffer | null;
-        }>(
-          `SELECT m.id, m.embedding
-           FROM memories m
-           WHERE m.status IN ('active', 'frozen')
-             AND m.type != 'meta'
-             AND (${scope.sql})
-           LIMIT 250`,
-          scope.params
-        )
-      : db.all<{
-          id: string;
-          summary?: string;
-          content?: string;
-          slot_key?: string | null;
-          hash?: string;
-          embedding: Uint8Array | Buffer | null;
-        }>(
-          `SELECT m.id, m.embedding
-           FROM memories m
-           WHERE m.status IN ('active', 'frozen')
-             AND m.type != 'meta'
-             AND m.embedding IS NOT NULL
-             AND (${scope.sql})
-           LIMIT 250`,
-          scope.params
-        );
+    // 1. 强制走 ix_mem_vec_rank 覆盖索引提取 Top-400 (id, hash)，零主表与零临时排序树扫描
+    const ranked = db.all<{ id: string; hash: string }>(
+      `SELECT m.id, m.hash
+       FROM memories m INDEXED BY ix_mem_vec_rank
+       WHERE m.status IN ('active', 'frozen')
+         AND m.type != 'meta'
+         AND (${scope.sql})
+       ORDER BY m.pinned DESC, m.utility DESC, m.updated_at DESC
+       LIMIT 400`,
+      scope.params
+    );
 
-    // 若尚未回填全部 BLOB 嵌入且当前已嵌入数较少 (< 80 条)，自动合并近期未回填的记忆至内存 LRU 实时向量计算
-    if (rows.length < 80 && (!cache || cache.size === 0)) {
-      const cntRow = db.get<{ c: number }>(
-        `SELECT COUNT(*) as c FROM memories m WHERE m.status IN ('active', 'frozen') AND m.type != 'meta' AND (${scope.sql})`,
-        scope.params
-      );
-      const totalInScope = Number(cntRow?.c ?? 0);
-      if (totalInScope > rows.length && totalInScope <= 120) {
-        const unembeddedRows = db.all<{
-          id: string;
-          summary?: string;
-          content?: string;
-          slot_key?: string | null;
-          hash?: string;
-          embedding: Uint8Array | Buffer | null;
-        }>(
-          `SELECT m.id, m.summary, m.content, m.slot_key, m.hash, m.embedding
-           FROM memories m
-           WHERE m.status IN ('active', 'frozen')
-             AND m.type != 'meta'
-             AND m.embedding IS NULL
-             AND (${scope.sql})
-           ORDER BY m.updated_at DESC
-           LIMIT 40`,
-          scope.params
-        );
-        if (unembeddedRows.length > 0) {
-          rows = [...rows, ...unembeddedRows];
-        }
+    if (ranked.length === 0) {
+      return [];
+    }
+
+    // 2. 优先命中内存 LRU / 外部缓存；仅对冷启动未缓存项按主键批量拉取一次
+    const vecById = new Map<string, Float32Array>();
+    const missingIds: string[] = [];
+    for (const r of ranked) {
+      const cachedVec = cache?.get(r.id) ?? getCachedRuntimeEmbedding(r.id, r.hash);
+      if (cachedVec) {
+        vecById.set(r.id, cachedVec);
+      } else {
+        missingIds.push(r.id);
       }
     }
 
-    if (rows.length === 0) {
-      return [];
+    if (missingIds.length > 0) {
+      const placeholders = missingIds.map(() => '?').join(', ');
+      const fetchedRows = db.all<{
+        id: string;
+        summary?: string;
+        content?: string;
+        slot_key?: string | null;
+        hash?: string;
+        embedding: Uint8Array | Buffer | null;
+      }>(
+        `SELECT id, summary, content, slot_key, hash, embedding
+         FROM memories
+         WHERE id IN (${placeholders})`,
+        missingIds
+      );
+      for (const fullRow of fetchedRows) {
+        const docVec = getOrComputeEmbedding(fullRow, cache);
+        if (docVec) {
+          vecById.set(fullRow.id, docVec);
+        }
+      }
     }
 
     const queryVec = computeLocalEmbedding(plan.text);
     const scored: Array<{ id: string; similarity: number }> = [];
 
-    for (const row of rows) {
-      const docVec =
-        cache?.get(row.id) ??
-        decodeEmbeddingBlob(row.embedding) ??
-        getOrComputeEmbedding(row, cache);
+    for (const r of ranked) {
+      const docVec = vecById.get(r.id);
       if (!docVec) continue;
       const sim = cosineSimilarity(queryVec, docVec);
       if (sim >= minSim) {
-        scored.push({ id: row.id, similarity: sim });
+        scored.push({ id: r.id, similarity: sim });
       }
     }
 

@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory",
-  "version": "0.6.0",
-  "description": "DSH Self-Evolving Memory System v0.6.0 (Autonomous Claude Studio Edition) — 100.0% Recall@Inject, zero-intervention autonomous lifecycle, HippoRAG 2 + SYNAPSE spreading activation, LightMem Submodular MMR token knapsack, A-Mem Zettelkasten linking, ACT-R spaced repetition, Letta Core Memory, RIME autonomous self-healing, and Claude Code Desktop Studio UI (Nwflower/dsh-claude-style) for DeepSeek Desktop (DSH)",
+  "version": "0.7.0",
+  "description": "DSH Self-Evolving Memory System v0.7.0 (Hybrid MMR & Autonomous Core Sync Edition) — 100.0% Recall@Inject, inline 128D semantic embeddings, Hybrid Lexical-Semantic Submodular MMR, HippoRAG 2 + SYNAPSE 7-channel retrieval, Autonomous Core Memory sync, Distillation-to-Reconciler closed loop, and single-button Claude Studio UI (Nwflower/dsh-claude-style) for DeepSeek Desktop (DSH)",
   "keywords": [
     "dsh",
     "deepseek",

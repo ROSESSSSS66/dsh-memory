@@ -4,6 +4,7 @@ import type { Db, MemoryRecord } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import { ftsText } from '../core/text.js';
 import { openDb } from '../core/db.js';
+import { backfillMissingEmbeddings } from '../core/vector.js';
 
 export function getBackupTimestamp(date: Date = new Date()): string {
   const y = date.getFullYear();
@@ -378,23 +379,65 @@ export function importDatabaseFile(
       }
     }
 
-    // 3. 读取 sourceDb 的全部有效记忆并在事务内导入到 currentDb
+    // 3. 读取 sourceDb 的全部有效记忆、版本历史及关联图谱/证据并在事务内无损导入到 currentDb
     const memories = sourceDb.all<MemoryRecord>('SELECT * FROM memories');
     const versions = sourceDb.all<any>('SELECT * FROM memory_versions');
+    const entities = tables.includes('memory_entities')
+      ? sourceDb.all<{ memory_id: string; entity: string }>('SELECT memory_id, entity FROM memory_entities')
+      : [];
+    const sourcesRows = tables.includes('memory_sources')
+      ? sourceDb.all<any>(
+          'SELECT memory_id, content_rev, session_id, seq, kind, excerpt, created_at FROM memory_sources'
+        )
+      : [];
+    const relations = tables.includes('memory_relations')
+      ? sourceDb.all<any>('SELECT from_id, to_id, rel, metadata, created_at FROM memory_relations')
+      : [];
 
     currentDb.transaction(() => {
       for (const m of memories) {
         currentDb.run(
           `INSERT OR REPLACE INTO memories (
             id, type, status, content, summary, slot_key, scope, workspace_id, session_id,
-            origin_kinds, source_kind, confidence, utility, use_count, success_count, fail_count,
-            token_cost, summary_cost, hash, version, content_rev, pinned, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            origin_kinds, approved_at, approved_by, source_kind, confidence, utility,
+            use_count, success_count, fail_count, token_cost, summary_cost, hash,
+            version, content_rev, pinned, valid_from, valid_to, created_at, updated_at,
+            importance, invalidated_at, last_used_at, last_repair_at, embedding
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            m.id, m.type, m.status, m.content, m.summary, m.slot_key, m.scope, m.workspace_id, m.session_id,
-            typeof m.origin_kinds === 'string' ? m.origin_kinds : JSON.stringify(m.origin_kinds),
-            m.source_kind, m.confidence, m.utility, m.use_count, m.success_count, m.fail_count,
-            m.token_cost, m.summary_cost, m.hash, m.version, m.content_rev, m.pinned, m.created_at, m.updated_at
+            m.id,
+            m.type,
+            m.status,
+            m.content,
+            m.summary,
+            m.slot_key ?? null,
+            m.scope,
+            m.workspace_id ?? null,
+            m.session_id ?? null,
+            typeof m.origin_kinds === 'string' ? m.origin_kinds : JSON.stringify(m.origin_kinds || []),
+            m.approved_at ?? null,
+            m.approved_by ?? null,
+            m.source_kind,
+            m.confidence,
+            m.utility,
+            m.use_count ?? 0,
+            m.success_count ?? 0,
+            m.fail_count ?? 0,
+            m.token_cost,
+            m.summary_cost,
+            m.hash,
+            m.version ?? 1,
+            m.content_rev ?? 1,
+            m.pinned ?? 0,
+            m.valid_from ?? null,
+            m.valid_to ?? null,
+            m.created_at,
+            m.updated_at,
+            m.importance ?? 5,
+            m.invalidated_at ?? null,
+            m.last_used_at ?? null,
+            m.last_repair_at ?? null,
+            m.embedding ?? null,
           ]
         );
       }
@@ -407,10 +450,36 @@ export function importDatabaseFile(
           [v.memory_id, v.version, v.snapshot, v.reason, v.actor, v.created_at]
         );
       }
+
+      for (const ent of entities) {
+        currentDb.run(
+          `INSERT OR IGNORE INTO memory_entities (memory_id, entity) VALUES (?, ?)`,
+          [ent.memory_id, ent.entity]
+        );
+      }
+
+      for (const s of sourcesRows) {
+        currentDb.run(
+          `INSERT OR IGNORE INTO memory_sources (
+            memory_id, content_rev, session_id, seq, kind, excerpt, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [s.memory_id, s.content_rev ?? 1, s.session_id, s.seq ?? 0, s.kind || 'manual', s.excerpt ?? null, s.created_at || Date.now()]
+        );
+      }
+
+      for (const rel of relations) {
+        currentDb.run(
+          `INSERT OR REPLACE INTO memory_relations (
+            from_id, to_id, rel, metadata, created_at
+          ) VALUES (?, ?, ?, ?, ?)`,
+          [rel.from_id, rel.to_id, rel.rel, rel.metadata || '{}', rel.created_at || Date.now()]
+        );
+      }
     });
 
-    // 4. 重建 FTS 索引
+    // 4. 重建 FTS 索引并补齐旧版备份缺失的 128D 本地向量
     checkAndRepairFts(currentDb);
+    backfillMissingEmbeddings(currentDb, { limit: 1000 });
 
     sourceDb.close();
     return { success: true, importedRecords: memories.length };

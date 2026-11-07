@@ -55,6 +55,9 @@ CREATE INDEX IF NOT EXISTS ix_mem_status_scope ON memories(status, scope, worksp
 CREATE INDEX IF NOT EXISTS ix_mem_slot ON memories(slot_key, scope, workspace_id, status);
 CREATE INDEX IF NOT EXISTS ix_mem_hash ON memories(hash);
 CREATE INDEX IF NOT EXISTS ix_mem_type ON memories(type, status);
+CREATE INDEX IF NOT EXISTS ix_mem_vec_rank
+  ON memories(pinned DESC, utility DESC, updated_at DESC, status, type, scope, workspace_id, session_id, id, hash)
+  WHERE status IN ('active', 'frozen') AND type != 'meta';
 CREATE UNIQUE INDEX IF NOT EXISTS ux_mem_live_slot
   ON memories(scope, COALESCE(workspace_id,''), COALESCE(session_id,''), slot_key)
   WHERE slot_key IS NOT NULL AND status IN ('active','frozen');

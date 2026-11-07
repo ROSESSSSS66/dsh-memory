@@ -209,12 +209,19 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const pendingRepairs = listRepairProposals(db, 'candidate');
           const activeStrat = getActiveStrategy(db, cfg);
           const coreBlocks = getAllCoreMemories(db, { workspaceId: wsId });
+          const stableLayer = renderStableLayer(
+            db,
+            { workspaceId: wsId || process.cwd() },
+            cfg,
+            activeStrat.version
+          );
 
           sendJson(res, 200, {
             ok: true,
             stats: st,
             dynamicBudgetTokens: cfg.dynamicBudgetTokens || 1600,
             stableBudgetTokens: cfg.stableBudgetTokens || 600,
+            stableLayerTokens: stableLayer.stableTokens,
             hardBudgetTokens: cfg.hardBudgetTokens || 3200,
             pendingRepairsCount: pendingRepairs.length,
             activeStrategyVersion: activeStrat.version,
@@ -234,8 +241,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           return;
         }
 
-        // 1.2. Core Memory Scratchpad (GET & POST)
-        if (subPath === '/core-memory') {
+        // 1.2. Core Memory Scratchpad (GET & POST — supports both /core-memory and /core)
+        if (subPath === '/core-memory' || subPath === '/core') {
           const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
           if (req.method === 'GET') {
             const entries = getAllCoreMemories(db, { workspaceId: wsId });
@@ -265,10 +272,18 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               });
             }
             const totalTokens = blocks.reduce((acc, b) => acc + b.tokens, 0);
+            const activeStrat = getActiveStrategy(db, cfg);
+            const stableLayer = renderStableLayer(
+              db,
+              { workspaceId: wsId || process.cwd() },
+              cfg,
+              activeStrat.version
+            );
             sendJson(res, 200, {
               ok: true,
               blocks,
               totalTokens,
+              stableLayerTokens: stableLayer.stableTokens,
               stableBudgetTokens: cfg.stableBudgetTokens || 600,
             });
             return;
@@ -553,6 +568,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const type = (reqUrl.searchParams.get('type') || '') as any;
           const status = (reqUrl.searchParams.get('status') || '') as any;
           const scope = (reqUrl.searchParams.get('scope') || '') as any;
+          const excludeCoreParam = reqUrl.searchParams.get('excludeCore');
+          const excludeCore = excludeCoreParam === '1' || excludeCoreParam === 'true';
           const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
           const limit = parseInt(reqUrl.searchParams.get('limit') || '50', 10);
           const offset = parseInt(reqUrl.searchParams.get('offset') || '0', 10);
@@ -560,6 +577,9 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           let sql = 'SELECT * FROM memories WHERE 1=1';
           const params: unknown[] = [];
 
+          if (excludeCore) {
+            sql += " AND COALESCE(slot_key, '') NOT LIKE 'core:%'";
+          }
           if (q) {
             sql += ' AND (content LIKE ? OR summary LIKE ? OR slot_key LIKE ? OR id LIKE ?)';
             const qPattern = `%${q}%`;
@@ -576,6 +596,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           if (status && status !== 'all') {
             if (status === 'pinned') {
               sql += " AND pinned = 1 AND status IN ('active', 'frozen')";
+            } else if (status === 'live') {
+              sql += " AND status IN ('active', 'frozen')";
             } else {
               sql += ' AND status = ?';
               params.push(status);
@@ -599,7 +621,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           sql += ' ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?';
           params.push(limit, offset);
 
-          const items = db.all<MemoryRecord>(sql, params);
+          const rawItems = db.all<MemoryRecord>(sql, params);
+          const items = rawItems.map(({ embedding: _emb, ...rest }) => rest);
 
           sendJson(res, 200, {
             ok: true,
@@ -638,9 +661,11 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             ...inRels.map((r) => ({ to_id: r.from_id, rel: r.rel, direction: 'incoming' as const })),
           ];
 
+          const { embedding: _emb, ...cleanMem } = mem;
+
           sendJson(res, 200, {
             ok: true,
-            memory: mem,
+            memory: cleanMem,
             sources: srcList,
             history: verList,
             relations,
@@ -1065,10 +1090,10 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           sendJson(res, 200, {
             ok: true,
-            version: '0.4.0',
+            version: '0.7.0',
             exportedAt: Date.now(),
             total: items.length,
-            memories: items,
+            memories: items.map(({ embedding: _emb, ...rest }) => rest),
           });
           return;
         }

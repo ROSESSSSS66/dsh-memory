@@ -65,6 +65,10 @@ describe('Local Feature-Hashing Vector Engine (src/core/vector.ts)', () => {
       actor: 'user',
     });
 
+    // v0.7.0 writes embeddings inline on insert; simulate legacy NULL rows to verify backfill
+    expect(backfillMissingEmbeddings(db, { workspaceId: ws })).toBe(0);
+    db.run(`UPDATE memories SET embedding = NULL`);
+
     // Backfill embeddings
     const updated = backfillMissingEmbeddings(db, { workspaceId: ws });
     expect(updated).toBe(2);

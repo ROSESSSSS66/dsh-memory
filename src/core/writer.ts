@@ -23,6 +23,7 @@ import { redactSecrets } from './privacy.js';
 import {
   computeLocalEmbedding,
   cosineSimilarity,
+  encodeEmbeddingBlob,
   getOrComputeEmbedding,
   primeRuntimeVectorCache,
 } from './vector.js';
@@ -370,8 +371,8 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
       approved_at,
       approved_by,
       now,
+      embeddingVec: newVec,
     });
-    primeRuntimeVectorCache(newId, hash, newVec);
 
     for (const relId of relatedIds) {
       addRelation(db, newId, relId, 'related', now);
@@ -401,6 +402,7 @@ function insertNewRecord(
     approved_at: number | null;
     approved_by: string | null;
     now: number;
+    embeddingVec?: Float32Array;
   }
 ): string {
   const {
@@ -421,7 +423,13 @@ function insertNewRecord(
     approved_at,
     approved_by,
     now,
+    embeddingVec,
   } = params;
+
+  const vec =
+    embeddingVec ??
+    computeLocalEmbedding(`${summary}\n${content}${slot_key ? `\n${slot_key}` : ''}`);
+  const embeddingBlob = encodeEmbeddingBlob(vec);
 
   const res = db.run(
     `INSERT INTO memories (
@@ -429,8 +437,8 @@ function insertNewRecord(
       origin_kinds, approved_at, approved_by, source_kind, confidence, utility,
       use_count, success_count, fail_count, token_cost, summary_cost, hash,
       version, content_rev, pinned, valid_from, valid_to, created_at, updated_at,
-      importance, invalidated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      importance, invalidated_at, embedding
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       c.type,
@@ -462,8 +470,11 @@ function insertNewRecord(
       now,
       Math.max(1, Math.min(10, c.importance || 5)),
       null, // invalidated_at
+      embeddingBlob,
     ]
   );
+
+  primeRuntimeVectorCache(id, hash, vec);
 
   const rowid = Number(res.lastInsertRowid);
 
@@ -606,9 +617,12 @@ export function editContent(
     const nextVersion = memory.version + 1;
     const nextContentRev = memory.content_rev + 1;
     const newHash = contentHash(memory.type, rawContent);
+    const updatedVec = computeLocalEmbedding(
+      `${rawSummary}\n${rawContent}${memory.slot_key ? `\n${memory.slot_key}` : ''}`
+    );
 
     db.run(
-      `UPDATE memories SET content = ?, summary = ?, token_cost = ?, summary_cost = ?, hash = ?, version = ?, content_rev = ?, embedding = NULL, updated_at = ? WHERE id = ?`,
+      `UPDATE memories SET content = ?, summary = ?, token_cost = ?, summary_cost = ?, hash = ?, version = ?, content_rev = ?, embedding = ?, updated_at = ? WHERE id = ?`,
       [
         rawContent,
         rawSummary,
@@ -617,10 +631,12 @@ export function editContent(
         newHash,
         nextVersion,
         nextContentRev,
+        encodeEmbeddingBlob(updatedVec),
         now,
         id,
       ]
     );
+    primeRuntimeVectorCache(id, newHash, updatedVec);
 
     // 重建 FTS
     const rowid = memory.rowid_!;
@@ -667,9 +683,12 @@ export function rollback(
 
     const nextVersion = memory.version + 1;
     const nextContentRev = memory.content_rev + 1;
+    const rollbackVec = computeLocalEmbedding(
+      `${snapshot.summary}\n${snapshot.content}${memory.slot_key ? `\n${memory.slot_key}` : ''}`
+    );
 
     db.run(
-      `UPDATE memories SET content = ?, summary = ?, token_cost = ?, summary_cost = ?, hash = ?, version = ?, content_rev = ?, embedding = NULL, updated_at = ? WHERE id = ?`,
+      `UPDATE memories SET content = ?, summary = ?, token_cost = ?, summary_cost = ?, hash = ?, version = ?, content_rev = ?, embedding = ?, updated_at = ? WHERE id = ?`,
       [
         snapshot.content,
         snapshot.summary,
@@ -678,10 +697,12 @@ export function rollback(
         snapshot.hash,
         nextVersion,
         nextContentRev,
+        encodeEmbeddingBlob(rollbackVec),
         now,
         id,
       ]
     );
+    primeRuntimeVectorCache(id, snapshot.hash, rollbackVec);
 
     // 重建 FTS
     const rowid = memory.rowid_!;

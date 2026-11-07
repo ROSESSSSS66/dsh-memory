@@ -87,7 +87,10 @@ describe('v0.4.0 Auto-Bootstrap, SYNAPSE Spreading Activation & A-Mem Zettelkast
     expect(res1.coreBlocksInitialized).toEqual(expect.arrayContaining(['human', 'persona', 'project']));
     expect(res1.workspaceMemoriesSeeded).toBeGreaterThanOrEqual(3);
     expect(res1.markdownMemoriesImported).toBeGreaterThanOrEqual(1);
-    expect(res1.embeddingsBackfilled).toBeGreaterThan(0);
+    expect(res1.embeddingsBackfilled).toBeGreaterThanOrEqual(0);
+    const bootHealth = auditMemoryHealth(db, { workspaceId: res1.workspaceId, now });
+    expect(bootHealth.missingEmbeddingsCount).toBe(0);
+    expect(bootHealth.embeddingsReadyCount).toBeGreaterThan(0);
     expect(res1.linksWeaved).toBeGreaterThanOrEqual(1);
 
     // Verify Letta Core Memory blocks are populated

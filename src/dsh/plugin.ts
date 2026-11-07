@@ -133,6 +133,14 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
       if (!res.success) {
         return { action: 'failed', error: res.error || 'distill_failed', nonRetryable: true };
       }
+      if (res.sessionId && res.consumedCount > 0) {
+        const nextBatch = findEligibleDistillSession(currentDb, liveCfg, true, res.sessionId);
+        if (nextBatch) {
+          scheduler.enqueue('distill', `${nextBatch.sessionId}:seq:${nextBatch.minSeq}`, {
+            sessionId: nextBatch.sessionId,
+          });
+        }
+      }
       return { action: 'done' };
     });
 
@@ -157,23 +165,30 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
 
     registerJobHandler('maintain', async () => {
       const liveCfg = getLiveCfg();
+      const maintainWsId = workspaceId(ctx?.agent?.cwd || process.cwd());
       archiveColdMemories(currentDb, liveCfg);
       expireCandidates(currentDb);
       autoPinMemories(currentDb);
       checkAndRepairFts(currentDb);
       backfillMissingEmbeddings(currentDb, { limit: 500 });
-      autoHealMemoryHealth(currentDb);
+      autoHealMemoryHealth(currentDb, { workspaceId: maintainWsId });
       weaveZettelkastenLinks(currentDb, { maxNewLinks: 25 });
       cleanOldTelemetry(currentDb);
       checkSentinelAndRollback(currentDb);
 
-      // 若线上自动收割样本达到阈值，全自动排队策略进化任务
+      // 若线上自动收割样本 (eval_cases.suite = 'harvested') 新增达到阈值，全自动排队策略进化任务
       try {
         const sampleCnt =
-          currentDb.get<{ cnt: number }>('SELECT COUNT(*) as cnt FROM harvested_eval_samples')?.cnt || 0;
-        if (sampleCnt >= 5) {
+          currentDb.get<{ cnt: number }>(
+            "SELECT COUNT(*) as cnt FROM eval_cases WHERE suite = 'harvested'"
+          )?.cnt || 0;
+        const lastRow = currentDb.get<{ value: string }>(
+          "SELECT value FROM meta WHERE key = 'lab.last_evolved_harvest_count'"
+        );
+        const lastCnt = lastRow ? Number(lastRow.value) || 0 : 0;
+        if (sampleCnt >= 5 && sampleCnt >= lastCnt + 5) {
           const bucket6h = Math.floor(Date.now() / (6 * 3600_000));
-          scheduler.enqueue('evolve', `auto_evolve:${bucket6h}`, { auto: true });
+          scheduler.enqueue('evolve', `auto_evolve:${bucket6h}:n${sampleCnt}`, { auto: true });
         }
       } catch {}
 
@@ -193,6 +208,17 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     registerJobHandler('evolve', async () => {
       const liveCfg = getLiveCfg();
       runStrategyEvolution(currentDb, {}, liveCfg);
+      try {
+        const sampleCnt =
+          currentDb.get<{ cnt: number }>(
+            "SELECT COUNT(*) as cnt FROM eval_cases WHERE suite = 'harvested'"
+          )?.cnt || 0;
+        currentDb.run(
+          `INSERT INTO meta (key, value) VALUES ('lab.last_evolved_harvest_count', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          [String(sampleCnt)]
+        );
+      } catch {}
       return { action: 'done' };
     });
 
@@ -203,7 +229,10 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     // 2.1 监听上下文压力事件，自适应触发后台抽取 (汲取自 creativedswork/dsh-expmem)
     const unlistenPressure = ctx.on ? ctx.on('memory/context-pressure', (evt: any) => {
       if (evt?.sessionId) {
-        scheduler.enqueue('distill', evt.sessionId, { sessionId: evt.sessionId });
+        const liveCfg = getLiveCfg();
+        const eligible = findEligibleDistillSession(currentDb, liveCfg, true, evt.sessionId);
+        const minSeq = eligible?.minSeq ?? 1;
+        scheduler.enqueue('distill', `${evt.sessionId}:seq:${minSeq}`, { sessionId: evt.sessionId });
       }
     }) : undefined;
 
@@ -445,9 +474,11 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
               const wsId = workspaceId(rawCwd);
 
               if (sessId) {
-                const eligible = findEligibleDistillSession(currentDb, liveCfg, true);
+                const eligible =
+                  findEligibleDistillSession(currentDb, liveCfg, true, sessId) ||
+                  findEligibleDistillSession(currentDb, liveCfg, true);
                 if (eligible) {
-                  scheduler.enqueue('distill', eligible.sessionId, {
+                  scheduler.enqueue('distill', `${eligible.sessionId}:seq:${eligible.minSeq}`, {
                     sessionId: eligible.sessionId,
                   });
                 }

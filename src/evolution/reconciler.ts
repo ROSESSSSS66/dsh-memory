@@ -1,6 +1,6 @@
 import type { Db, CandidateInput, MemoryRecord, ReconcileDecision, UpsertResult } from '../types.js';
 import { tokenSet, jaccard, contentHash, extractEntities } from '../core/text.js';
-import { scopeFilterSQL } from '../core/scope.js';
+import { scopeFilterSQL, workspaceId as resolveWorkspaceId } from '../core/scope.js';
 import { upsertCandidate, saveVersionSnapshot, addRelation, invalidateMemory } from '../core/writer.js';
 import { resolveFixedSlot } from '../ingest/rules.js';
 import { computeLocalEmbedding, cosineSimilarity } from '../core/vector.js';
@@ -55,9 +55,9 @@ export function reconcileCandidate(
   let wsId: string | null = null;
   let sessId: string | null = null;
   if (scope === 'workspace') {
-    wsId = candidate.workspaceId || null;
+    wsId = candidate.workspaceId ? resolveWorkspaceId(candidate.workspaceId) : null;
   } else if (scope === 'session') {
-    wsId = candidate.workspaceId || null;
+    wsId = candidate.workspaceId ? resolveWorkspaceId(candidate.workspaceId) : null;
     sessId = candidate.sessionId || null;
   }
 
@@ -170,12 +170,18 @@ export function reconcileCandidate(
       };
     }
 
-    // B: 中高相似度 (Jaccard >= 0.42 或 Hybrid >= 0.48) 或共用核心实体
+    // B: 中高相似度 (Jaccard >= 0.42 或 Hybrid >= 0.48) 或共用核心实体，或带显式迁移/废弃句式且具备话题锚点重合 (Jaccard >= 0.22 / Hybrid >= 0.30)
     const memContentLower = bestMatch.content.toLowerCase();
     const hasSharedEntity = candEntities.length > 0 && candEntities.some((ent) => memContentLower.includes(ent));
+    const isEvolution = EVOLUTION_PATTERNS.some((p) => p.test(rawContent));
+    const isNegation = NEGATION_PATTERNS.some((p) => p.test(rawContent));
 
-    if (maxJaccard >= 0.42 || maxHybridSim >= 0.48 || hasSharedEntity) {
-      const isEvolution = EVOLUTION_PATTERNS.some((p) => p.test(rawContent));
+    if (
+      maxJaccard >= 0.42 ||
+      maxHybridSim >= 0.48 ||
+      hasSharedEntity ||
+      ((isEvolution || isNegation) && (maxJaccard >= 0.22 || maxHybridSim >= 0.3))
+    ) {
       if (isEvolution) {
         return {
           action: 'UPDATE',
@@ -185,7 +191,6 @@ export function reconcileCandidate(
         };
       }
 
-      const isNegation = NEGATION_PATTERNS.some((p) => p.test(rawContent));
       if (isNegation) {
         return {
           action: 'DELETE',
