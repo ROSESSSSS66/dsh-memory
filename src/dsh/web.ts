@@ -152,6 +152,16 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
     return () => {};
   }
 
+  let lastAutoCycleAt = 0;
+  const runThrottledAutonomousCycle = (wsId?: string) => {
+    const now = Date.now();
+    if (now - lastAutoCycleAt < 45_000) return;
+    lastAutoCycleAt = now;
+    try {
+      autoHealMemoryHealth(db, { workspaceId: wsId, now });
+    } catch {}
+  };
+
   const dispose = ctx.webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
@@ -174,6 +184,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         // 1. Overview & Stats
         if (subPath === '/overview' || subPath === '/stats') {
           const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
+          runThrottledAutonomousCycle(wsId);
           const st = stats(db, wsId);
           const ledger = getLedgerUsage(db, 'enforce');
 
@@ -1166,7 +1177,21 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               }
             }
 
-            // Ensure baseURL is added to allowedOfflineEndpoints if offlineConsent is enabled
+            // Ensure baseURL is added to allowedOfflineEndpoints and auto-enable consent when model is configured
+            const hasConfiguredModel =
+              Boolean(patch.offlineLLM?.useDshLlm ?? cfg.offlineLLM.useDshLlm) ||
+              Boolean((patch.offlineLLM?.baseURL ?? cfg.offlineLLM.baseURL)?.trim());
+            if (
+              hasConfiguredModel &&
+              body.privacy?.offlineConsent === undefined &&
+              !cfg.privacy.offlineConsent
+            ) {
+              if (!patch.privacy) {
+                patch.privacy = { ...cfg.privacy };
+              }
+              patch.privacy.offlineConsent = true;
+            }
+
             const effectiveConsent =
               patch.privacy?.offlineConsent !== undefined
                 ? patch.privacy.offlineConsent

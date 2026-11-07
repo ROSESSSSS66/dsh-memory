@@ -1,204 +1,170 @@
-import * as React from 'react';
-import type { OverviewResponse, WorkspaceViewMode } from '../types.js';
-import { GlassCard } from './GlassUI.js';
-import { BrainIcon, PinIcon, ZapIcon, ShieldIcon } from './Icons.js';
+import React from 'react';
+import { GlassCard, GlassBadge } from './GlassUI.js';
 
-interface StatCardsProps {
-  overview: OverviewResponse | null;
-  onFilterSelect?: (status: string, type?: string) => void;
-  onNavigateView?: (mode: WorkspaceViewMode) => void;
+export interface OverviewStatsData {
+  stats: {
+    total: number;
+    active: number;
+    candidate: number;
+    superseded: number;
+    archived: number;
+    frozen?: number;
+    byType: Record<string, number>;
+  };
+  dynamicBudgetTokens: number;
+  stableBudgetTokens?: number;
+  hardBudgetTokens?: number;
+  pendingRepairsCount?: number;
+  activeStrategyVersion?: number;
+  coreMemoryCount?: number;
+  ledger: {
+    callsToday: number;
+    tokensToday: number;
+    maxDailyCalls: number;
+    maxDailyTokens: number;
+  };
+  recentTelemetry: {
+    injectionCount: number;
+    avgTokens: number;
+    correctionRate: number;
+  };
 }
 
-export const StatCards: React.FC<StatCardsProps> = ({
-  overview,
-  onFilterSelect,
-  onNavigateView,
-}) => {
-  const stats = overview?.stats;
-  const total = stats?.total ?? 0;
-  const active = stats?.byStatus['active'] ?? 0;
-  const candidate = stats?.byStatus['candidate'] ?? 0;
-  const archived = stats?.byStatus['archived'] ?? 0;
-  const frozen = stats?.byStatus['frozen'] ?? 0;
-  const pinnedCount = stats?.pinnedCount ?? 0;
-  const coreCount = overview?.coreMemoryCount ?? 0;
+export function StatCards({ data }: { data: OverviewStatsData | null }) {
+  const activeCount = data?.stats.active ?? 0;
+  const candidateCount = data?.stats.candidate ?? 0;
+  const supersededCount = data?.stats.superseded ?? 0;
+  const totalCount = data?.stats.total ?? 0;
 
-  const avgConf = Math.round((stats?.avgConfidence ?? 0) * 100);
-  const avgUtil = Math.round((stats?.avgUtility ?? 0) * 100);
+  const avgTokens = data?.recentTelemetry.avgTokens ?? 0;
+  const budgetTokens = data?.dynamicBudgetTokens ?? 1600;
+  const budgetRatio = Math.min(100, Math.round((avgTokens / Math.max(1, budgetTokens)) * 100));
 
-  const dynamicBudget = overview?.dynamicBudgetTokens ?? 1600;
-  const stableBudget = overview?.stableBudgetTokens ?? 600;
-  const activeStratVer = overview?.activeStrategyVersion ?? 1;
+  const correctionRate = data?.recentTelemetry.correctionRate ?? 0;
+  const injectionCount = data?.recentTelemetry.injectionCount ?? 0;
 
-  const injCount = overview?.recentTelemetry?.injectionCount ?? 0;
-  const avgTokens = overview?.recentTelemetry?.avgTokens ?? 0;
-  const corrRate = overview?.recentTelemetry?.correctionRate ?? 0;
-
-  const callsToday = overview?.ledger?.callsToday ?? 0;
-  const maxCalls = overview?.ledger?.maxDailyCalls ?? 40;
-  const tokensToday = overview?.ledger?.tokensToday ?? 0;
-  const maxTokens = overview?.ledger?.maxDailyTokens ?? 200000;
-
-  const quotaPercent = Math.min(100, Math.round((callsToday / Math.max(1, maxCalls)) * 100));
+  const callsToday = data?.ledger.callsToday ?? 0;
+  const maxDailyCalls = data?.ledger.maxDailyCalls ?? 40;
+  const tokensToday = data?.ledger.tokensToday ?? 0;
+  const callsRatio = Math.min(100, Math.round((callsToday / Math.max(1, maxDailyCalls)) * 100));
 
   return (
-    <div className="dshm-stats-grid">
-      {/* 1. 记忆规模与状态分布 */}
-      <GlassCard
-        className="dshm-stat-card is-clickable"
-        onClick={() => onFilterSelect?.('all', 'all')}
-        title="点击查看全部记忆"
-      >
-        <div className="dshm-stat-top">
-          <span className="dshm-stat-label">记忆库总规模</span>
-          <div className="dshm-stat-icon-wrapper dshm-icon-indigo">
-            <BrainIcon size={16} />
-          </div>
+    <section className="dshm-stats-grid" aria-label="Memory Telemetry Overview">
+      {/* Card 1: Active Memories */}
+      <GlassCard className="dshm-stat-card">
+        <div className="dshm-stat-header">
+          <span className="dshm-stat-label">活跃记忆资产 (Active)</span>
+          <span
+            className="dshm-stat-icon"
+            style={{
+              color: 'var(--dshm-accent)',
+            }}
+          >
+            ◈
+          </span>
         </div>
         <div className="dshm-stat-value-row">
-          <div className="dshm-stat-value">
-            {total} <span className="dshm-stat-unit">条</span>
-          </div>
-          {total > 0 && (
-            <span className="dshm-stat-subpill" title="平均置信度与实用度">
-              置信 {avgConf}% · 效用 {avgUtil}%
-            </span>
-          )}
+          <span className="dshm-stat-value">{activeCount}</span>
+          <span className="dshm-stat-unit">/ 共 {totalCount} 条</span>
         </div>
-        <div className="dshm-stat-desc">
-          <span
-            className="dshm-stat-link"
-            onClick={(e) => {
-              e.stopPropagation();
-              onFilterSelect?.('active', 'all');
-            }}
-          >
-            活跃 {active}
-          </span>
-          <span>·</span>
-          <span
-            className={`dshm-stat-link ${candidate > 0 ? 'is-highlight-amber' : ''}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              onFilterSelect?.('candidate', 'all');
-            }}
-          >
-            待审 {candidate}
-          </span>
-          <span>·</span>
-          <span
-            className="dshm-stat-link"
-            onClick={(e) => {
-              e.stopPropagation();
-              onFilterSelect?.('archived', 'all');
-            }}
-          >
-            归档 {archived}
-          </span>
+        <div className="dshm-stat-footer">
+          <span>自动观察池: {candidateCount}</span>
+          <span>因果演进链: {supersededCount}</span>
         </div>
       </GlassCard>
 
-      {/* 2. 稳定层固化与冻结保护 */}
-      <GlassCard
-        className="dshm-stat-card is-clickable"
-        onClick={() => onFilterSelect?.('pinned', 'all')}
-        title="点击筛选已置顶固化的记忆"
-      >
-        <div className="dshm-stat-top">
-          <span className="dshm-stat-label">稳定固化 & 保护层</span>
-          <div className="dshm-stat-icon-wrapper dshm-icon-amber">
-            <PinIcon size={15} />
-          </div>
+      {/* Card 2: Online Budget */}
+      <GlassCard className="dshm-stat-card">
+        <div className="dshm-stat-header">
+          <span className="dshm-stat-label">在线注入均值 (7d)</span>
+          <span
+            className="dshm-stat-icon"
+            style={{
+              color: 'var(--dshm-cyan)',
+            }}
+          >
+            ⚡
+          </span>
         </div>
         <div className="dshm-stat-value-row">
-          <div className="dshm-stat-value">
-            {pinnedCount} <span className="dshm-stat-unit">置顶固化</span>
-          </div>
-          <span
-            className="dshm-stat-subpill is-clickable-pill"
-            onClick={(e) => {
-              e.stopPropagation();
-              onNavigateView?.('core');
-            }}
-            title="点击管理 Core Memory 核心块"
-          >
-            Core 块 {coreCount}
-          </span>
+          <span className="dshm-stat-value">{avgTokens}</span>
+          <span className="dshm-stat-unit">/ {budgetTokens} tok</span>
         </div>
-        <div className="dshm-stat-desc">
-          <span
-            className="dshm-stat-link"
-            onClick={(e) => {
-              e.stopPropagation();
-              onFilterSelect?.('frozen', 'all');
-            }}
-          >
-            ❄️ 冻结保护 {frozen} 条
-          </span>
-          <span>·</span>
-          <span>预算 ≤ {stableBudget} tok</span>
+        <div>
+          <div className="dshm-progress-track" style={{ marginBottom: 7 }}>
+            <div
+              className="dshm-progress-fill"
+              style={{
+                width: `${budgetRatio}%`,
+                background: 'var(--dshm-accent)',
+              }}
+            />
+          </div>
+          <div className="dshm-stat-footer" style={{ paddingTop: 4, borderTop: 'none' }}>
+            <span>累计注入 {injectionCount} 轮</span>
+            <span>预算占用 {budgetRatio}%</span>
+          </div>
         </div>
       </GlassCard>
 
-      {/* 3. 在线快环检索与 7 日遥测 */}
-      <GlassCard
-        className="dshm-stat-card is-clickable"
-        onClick={() => onNavigateView?.('evolution')}
-        title="点击查看策略实验室与召回评测"
-      >
-        <div className="dshm-stat-top">
-          <span className="dshm-stat-label">在线召回 (Governor v{activeStratVer})</span>
-          <div className="dshm-stat-icon-wrapper dshm-icon-blue">
-            <ZapIcon size={15} />
-          </div>
-        </div>
-        <div className="dshm-stat-value-row">
-          <div className="dshm-stat-value">
-            {dynamicBudget} <span className="dshm-stat-unit">tokens</span>
-          </div>
-          <span className="dshm-stat-subpill">
-            纠正率 {corrRate}%
+      {/* Card 3: Attribution & Correction Rate */}
+      <GlassCard className="dshm-stat-card">
+        <div className="dshm-stat-header">
+          <span className="dshm-stat-label">在线归因纠错率</span>
+          <span
+            className="dshm-stat-icon"
+            style={{
+              color: correctionRate > 12 ? 'var(--dshm-amber)' : 'var(--dshm-emerald)',
+            }}
+          >
+            ✦
           </span>
         </div>
-        <div className="dshm-stat-desc">
-          <span>7日注入 {injCount} 次</span>
-          <span>·</span>
-          <span>均值 {avgTokens} tok/轮</span>
+        <div className="dshm-stat-value-row">
+          <span className="dshm-stat-value">{correctionRate}%</span>
+          <GlassBadge variant={correctionRate <= 10 ? 'emerald' : 'amber'}>
+            {correctionRate <= 10 ? '高信噪比' : '自愈监控中'}
+          </GlassBadge>
+        </div>
+        <div className="dshm-stat-footer">
+          <span>策略版本: v{data?.activeStrategyVersion ?? 1}</span>
+          <span>自动修复流: 实时</span>
         </div>
       </GlassCard>
 
-      {/* 4. 离线慢环风控账本 */}
-      <GlassCard
-        className="dshm-stat-card is-clickable"
-        onClick={() => onNavigateView?.('evolution')}
-        title="点击查看离线任务账本与风控详情"
-      >
-        <div className="dshm-stat-top">
-          <span className="dshm-stat-label">今日慢环风控账本</span>
-          <div className="dshm-stat-icon-wrapper dshm-icon-emerald">
-            <ShieldIcon size={15} />
-          </div>
+      {/* Card 4: Offline Evolution Ledger */}
+      <GlassCard className="dshm-stat-card">
+        <div className="dshm-stat-header">
+          <span className="dshm-stat-label">今日后台进化配额</span>
+          <span
+            className="dshm-stat-icon"
+            style={{
+              color: 'var(--dshm-purple)',
+            }}
+          >
+            ⟳
+          </span>
         </div>
         <div className="dshm-stat-value-row">
-          <div className="dshm-stat-value">
-            {callsToday} <span className="dshm-stat-unit">/ {maxCalls} 次</span>
+          <span className="dshm-stat-value">{callsToday}</span>
+          <span className="dshm-stat-unit">/ {maxDailyCalls} 次</span>
+        </div>
+        <div>
+          <div className="dshm-progress-track" style={{ marginBottom: 7 }}>
+            <div
+              className="dshm-progress-fill"
+              style={{
+                width: `${callsRatio}%`,
+                background: 'var(--dshm-cyan)',
+              }}
+            />
           </div>
-          <span className="dshm-stat-subpill">
-            {quotaPercent}% 配额
-          </span>
-        </div>
-        <div className="dshm-stat-progress">
-          <div
-            className={`dshm-stat-progress-bar ${quotaPercent > 80 ? 'is-danger' : 'is-safe'}`}
-            style={{ width: `${quotaPercent}%` }}
-          />
-        </div>
-        <div className="dshm-stat-desc">
-          <span>
-            Token 消耗 {(tokensToday / 1000).toFixed(1)}k / {(maxTokens / 1000).toFixed(0)}k
-          </span>
+          <div className="dshm-stat-footer" style={{ paddingTop: 4, borderTop: 'none' }}>
+            <span>已耗 {(tokensToday / 1000).toFixed(1)}k tok</span>
+            <span>零热路径阻塞</span>
+          </div>
         </div>
       </GlassCard>
-    </div>
+    </section>
   );
-};
+}

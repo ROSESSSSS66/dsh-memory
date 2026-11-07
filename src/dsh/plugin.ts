@@ -12,9 +12,15 @@ import { MemoryCommands } from './commands.js';
 import { workspaceId } from '../core/scope.js';
 import { JobScheduler, recoverJobsOnStartup } from '../jobs/scheduler.js';
 import { registerJobHandler } from '../jobs/runner.js';
-import { distillSession } from '../evolution/extractor.js';
+import {
+  distillSession,
+  findEligibleDistillSession,
+} from '../evolution/extractor.js';
 import { runReflectJob } from '../evolution/reflector.js';
-import { findConsolidationClusters, consolidateCluster } from '../evolution/consolidator.js';
+import {
+  findConsolidationClusters,
+  consolidateCluster,
+} from '../evolution/consolidator.js';
 import { executeRepair } from '../evolution/repair.js';
 import { runStrategyEvolution, checkSentinelAndRollback } from '../evolution/lab.js';
 import {
@@ -26,7 +32,7 @@ import {
 } from '../evolution/maintenance.js';
 import { registerWebRoutes } from './web.js';
 import { backfillMissingEmbeddings } from '../core/vector.js';
-import { weaveZettelkastenLinks } from '../core/health.js';
+import { weaveZettelkastenLinks, autoHealMemoryHealth } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
 import type { Db } from '../types.js';
 
@@ -87,10 +93,11 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
 
     // 合并存储中的用户自定义动态配置 (LLM 配置、风控与隐私选项)
     const cfg = loadConfigFromDb(currentDb, initialCfg);
+    const getLiveCfg = () => loadConfigFromDb(currentDb, initialCfg);
 
     console.log('[dsh-memory] Plugin initialized with database at:', dbPath);
 
-    // 1.1 启动恢复与首次安装冷启动自动记忆初始化 (v0.4.0 Auto-Bootstrap)
+    // 1.1 启动恢复与首次安装冷启动自动记忆初始化 (v0.6.0 Autonomous Bootstrap & Auto-Heal)
     recoverJobsOnStartup(currentDb);
     try {
       const isDefaultDbPath = !initialCfg.dbPath && !initialCfg.dataDir;
@@ -111,16 +118,18 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
             }, links=${bootRes.linksWeaved})`
           );
         }
+        autoHealMemoryHealth(currentDb);
       }
       backfillMissingEmbeddings(currentDb, { limit: 200 });
     } catch {}
 
-    // 1.2 初始化离线任务调度器与处理器
+    // 1.2 初始化离线任务调度器与全自动处理器
     const scheduler = new JobScheduler(currentDb, cfg);
 
     registerJobHandler('distill', async (job, signal) => {
+      const liveCfg = getLiveCfg();
       const payload = job.payload ? JSON.parse(job.payload) : {};
-      const res = await distillSession(currentDb, cfg, { sessionId: payload.sessionId, signal });
+      const res = await distillSession(currentDb, liveCfg, { sessionId: payload.sessionId, signal });
       if (!res.success) {
         return { action: 'failed', error: res.error || 'distill_failed', nonRetryable: true };
       }
@@ -128,15 +137,17 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     });
 
     registerJobHandler('reflect', async (job, signal) => {
-      return runReflectJob(currentDb, cfg, job, signal);
+      const liveCfg = getLiveCfg();
+      return runReflectJob(currentDb, liveCfg, job, signal);
     });
 
     registerJobHandler('consolidate', async (job, signal) => {
+      const liveCfg = getLiveCfg();
       const payload = job.payload ? JSON.parse(job.payload) : {};
       const wsId = payload.workspaceId || workspaceId(process.cwd());
-      const clusters = findConsolidationClusters(currentDb, wsId, cfg);
+      const clusters = findConsolidationClusters(currentDb, wsId, liveCfg);
       for (const c of clusters) {
-        const res = await consolidateCluster(currentDb, cfg, c, { signal });
+        const res = await consolidateCluster(currentDb, liveCfg, c, { signal });
         if (!res.success) {
           return { action: 'failed', error: res.error || 'consolidate_failed', nonRetryable: true };
         }
@@ -145,28 +156,43 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     });
 
     registerJobHandler('maintain', async () => {
-      archiveColdMemories(currentDb, cfg);
+      const liveCfg = getLiveCfg();
+      archiveColdMemories(currentDb, liveCfg);
       expireCandidates(currentDb);
       autoPinMemories(currentDb);
       checkAndRepairFts(currentDb);
       backfillMissingEmbeddings(currentDb, { limit: 500 });
+      autoHealMemoryHealth(currentDb);
       weaveZettelkastenLinks(currentDb, { maxNewLinks: 25 });
       cleanOldTelemetry(currentDb);
       checkSentinelAndRollback(currentDb);
+
+      // 若线上自动收割样本达到阈值，全自动排队策略进化任务
+      try {
+        const sampleCnt =
+          currentDb.get<{ cnt: number }>('SELECT COUNT(*) as cnt FROM harvested_eval_samples')?.cnt || 0;
+        if (sampleCnt >= 5) {
+          const bucket6h = Math.floor(Date.now() / (6 * 3600_000));
+          scheduler.enqueue('evolve', `auto_evolve:${bucket6h}`, { auto: true });
+        }
+      } catch {}
+
       return { action: 'done' };
     });
 
     registerJobHandler('repair', async (job, signal) => {
+      const liveCfg = getLiveCfg();
       return executeRepair(
         currentDb,
         { id: job.id, key: job.key, payload: job.payload || '{}' },
         { signal },
-        cfg
+        liveCfg
       );
     });
 
     registerJobHandler('evolve', async () => {
-      runStrategyEvolution(currentDb, {}, cfg);
+      const liveCfg = getLiveCfg();
+      runStrategyEvolution(currentDb, {}, liveCfg);
       return { action: 'done' };
     });
 
@@ -400,11 +426,44 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
       });
     }
 
-    // 6.2 注册 turn-stopping 延迟调度监听器
+    // 6.2 注册 turn-stopping 全自动闭环调度监听器
     const unlistenTurnStopping =
       typeof ctx.on === 'function'
-        ? ctx.on('agent/turn-stopping', () => {
+        ? ctx.on('agent/turn-stopping', (evt: any) => {
             try {
+              const now = Date.now();
+              const liveCfg = getLiveCfg();
+              const sessId =
+                evt?.sessionId ||
+                evt?.agent?.session?.id ||
+                ctx?.agent?.session?.id;
+              const rawCwd =
+                evt?.agent?.cwd ||
+                evt?.agent?.session?.cwd ||
+                ctx?.agent?.cwd ||
+                process.cwd();
+              const wsId = workspaceId(rawCwd);
+
+              if (sessId) {
+                const eligible = findEligibleDistillSession(currentDb, liveCfg, true);
+                if (eligible) {
+                  scheduler.enqueue('distill', eligible.sessionId, {
+                    sessionId: eligible.sessionId,
+                  });
+                }
+              }
+              const clusters = findConsolidationClusters(currentDb, wsId, liveCfg);
+              if (clusters.length > 0) {
+                const bucket1h = Math.floor(now / 3600_000);
+                scheduler.enqueue('consolidate', `auto_consolidate:${wsId}:${bucket1h}`, {
+                  workspaceId: wsId,
+                });
+              }
+
+              // 每 10 分钟时间桶自动排队一次后台自愈与维护
+              const bucket10m = Math.floor(now / 600_000);
+              scheduler.enqueue('maintain', `auto_maintain:${bucket10m}`, { auto: true });
+
               scheduler.scheduleTurnStopping();
             } catch {}
           })

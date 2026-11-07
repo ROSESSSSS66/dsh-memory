@@ -1,515 +1,437 @@
-import * as React from 'react';
-import type {
-  OverviewResponse,
-  MemoryRecordUI,
-  LLMConfigUI,
-  WorkspaceViewMode,
-  ListDensityMode,
-} from './types.js';
-import { ensureMemoryStyle } from './styles.js';
-import { fetchOverview, fetchMemories, performAction, fetchLLMConfig } from './api.js';
+import React, { useState, useEffect, useCallback } from 'react';
+import { MEMORY_STYLES } from './styles.js';
 import { MemoryHeader } from './components/MemoryHeader.js';
-import { StatCards } from './components/StatCards.js';
-import { FilterToolbar } from './components/FilterToolbar.js';
-import { MemoryCard } from './components/MemoryCard.js';
-import { NewMemoryModal } from './components/NewMemoryModal.js';
-import { MemoryDetailModal } from './components/MemoryDetailModal.js';
-import { LLMConfigModal } from './components/LLMConfigModal.js';
-import { BackupModal } from './components/BackupModal.js';
-import { GraphView } from './components/GraphView.js';
-import { CoreMemoryView } from './components/CoreMemoryView.js';
-import { EvolutionView } from './components/EvolutionView.js';
-import { RecallSandboxView } from './components/RecallSandboxView.js';
-import { BatchBar } from './components/BatchBar.js';
-import { RefreshIcon } from './components/Icons.js';
-import {
-  type GlassVariant,
-  GlassThemeContext,
-  GlassCard,
-  GlassButton,
-} from './components/GlassUI.js';
+import { LLMConfigModal, type LLMConfigData } from './components/LLMConfigModal.js';
+import type { OverviewStatsData } from './components/StatCards.js';
+import type { MemoryItem } from './components/MemoryCard.js';
+import type { CoreMemoryBlock } from './components/CoreMemoryView.js';
+import type { JobLogItem, MemoryHealthReportData } from './components/EvolutionView.js';
 
-export const MemoryApp: React.FC = () => {
-  // Ensure styles are mounted
-  React.useEffect(() => {
-    ensureMemoryStyle();
+const API_PREFIX = '/api/dsh-memory';
+
+const CORE_LABELS: Record<string, string> = {
+  human: 'Human · 用户画像',
+  persona: 'Persona · 协作准则',
+  project: 'Project · 工程规范',
+};
+
+const TYPE_SHORT: Record<string, string> = {
+  semantic: '事实',
+  preference: '偏好',
+  procedural: '流程',
+  episodic: '情景',
+  failure: '教训',
+  belief: '推断',
+  goal: '目标',
+  meta: '元认知',
+};
+
+function formatRelativeTime(ts?: number | null): string {
+  if (!ts) return '—';
+  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (sec < 60) return '刚刚';
+  if (sec < 3600) return `${Math.floor(sec / 60)}m 前`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h 前`;
+  const d = Math.floor(sec / 86400);
+  if (d < 30) return `${d}d 前`;
+  return new Date(ts).toLocaleDateString();
+}
+
+export function MemoryApp() {
+  const [statsData, setStatsData] = useState<OverviewStatsData | null>(null);
+  const [healthData, setHealthData] = useState<MemoryHealthReportData | null>(null);
+  const [coreBlocks, setCoreBlocks] = useState<CoreMemoryBlock[]>([]);
+  const [coreTokens, setCoreTokens] = useState(0);
+  const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [recentJobs, setRecentJobs] = useState<JobLogItem[]>([]);
+  const [llmConfig, setLlmConfig] = useState<LLMConfigData | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    try {
+      const [stRes, hlRes, crRes, memRes, evoRes] = await Promise.all([
+        fetch(`${API_PREFIX}/stats`),
+        fetch(`${API_PREFIX}/health`),
+        fetch(`${API_PREFIX}/core`),
+        fetch(`${API_PREFIX}/memories?status=active&limit=40`),
+        fetch(`${API_PREFIX}/evolution`),
+      ]);
+
+      if (stRes.ok) {
+        const j = await stRes.json();
+        if (j.ok) setStatsData(j);
+      }
+      if (hlRes.ok) {
+        const j = await hlRes.json();
+        if (j.ok && j.health) setHealthData(j.health);
+      }
+      if (crRes.ok) {
+        const j = await crRes.json();
+        if (j.ok) {
+          setCoreBlocks(j.blocks || []);
+          setCoreTokens(j.totalTokens || 0);
+        }
+      }
+      if (memRes.ok) {
+        const j = await memRes.json();
+        if (j.ok) setMemories(j.items || []);
+      }
+      if (evoRes.ok) {
+        const j = await evoRes.json();
+        if (j.ok) setRecentJobs((j.recentJobs || []).slice(0, 6));
+      }
+    } catch {
+      // silent during startup or offline transitions
+    }
   }, []);
 
-  const [glassVariant, setGlassVariant] = React.useState<GlassVariant>('light');
-  const [overview, setOverview] = React.useState<OverviewResponse | null>(null);
-  const [memories, setMemories] = React.useState<MemoryRecordUI[]>([]);
-  const [loading, setLoading] = React.useState(true);
-  const [refreshing, setRefreshing] = React.useState(false);
-  const [toast, setToast] = React.useState<string | null>(null);
+  const fetchConfig = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_PREFIX}/config`);
+      if (!res.ok) return;
+      const json = await res.json();
+      if (json.ok && json.config) {
+        setLlmConfig(json.config);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
-  // Primary Workspace View Mode: 'memories' | 'core' | 'sandbox' | 'graph' | 'evolution'
-  const [viewMode, setViewMode] = React.useState<WorkspaceViewMode>('memories');
-  // List Density Mode: 'card' | 'compact'
-  const [density, setDensity] = React.useState<ListDensityMode>('card');
+  useEffect(() => {
+    fetchAll();
+    fetchConfig();
+    const timer = setInterval(() => {
+      fetchAll();
+    }, 8000);
+    return () => clearInterval(timer);
+  }, [fetchAll, fetchConfig]);
 
-  // Filters & Sorting
-  const [searchQuery, setSearchQuery] = React.useState('');
-  const [selectedType, setSelectedType] = React.useState('all');
-  const [selectedStatus, setSelectedStatus] = React.useState('all');
-  const [selectedScope, setSelectedScope] = React.useState('all');
-  const [sortBy, setSortBy] = React.useState('updated');
-
-  // Multi-Selection State
-  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
-
-  // Modals
-  const [isNewModalOpen, setIsNewModalOpen] = React.useState(false);
-  const [isConfigModalOpen, setIsConfigModalOpen] = React.useState(false);
-  const [isBackupModalOpen, setIsBackupModalOpen] = React.useState(false);
-  const [inspectingId, setInspectingId] = React.useState<string | null>(null);
-  const [llmConfig, setLlmConfig] = React.useState<LLMConfigUI | null>(null);
-
-  const showToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => {
-      setToast((curr) => (curr === msg ? null : curr));
-    }, 3200);
+  const handleSaveConfig = async (payload: any) => {
+    const res = await fetch(`${API_PREFIX}/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json();
+    if (json.ok && json.config) {
+      setLlmConfig(json.config);
+      fetchAll();
+    }
   };
 
-  const loadData = React.useCallback(
-    async (isRefresh = false) => {
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
+  const handleTestConnection = async (payload: {
+    baseURL: string;
+    model: string;
+    apiKey?: string;
+    apiKeyEnv: string;
+    protocol: 'chat/completions' | 'responses' | 'messages';
+  }) => {
+    const res = await fetch(`${API_PREFIX}/llm/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  };
 
-      try {
-        const [ovRes, listRes, cfgRes] = await Promise.all([
-          fetchOverview(),
-          fetchMemories({
-            q: searchQuery,
-            type: selectedType,
-            status: selectedStatus,
-            scope: selectedScope,
-            limit: 150,
-          }),
-          fetchLLMConfig().catch(() => null),
-        ]);
-        setOverview(ovRes);
-        setMemories(listRes.items);
-        if (cfgRes?.config) {
-          setLlmConfig(cfgRes.config);
-        }
-      } catch (err: any) {
-        console.error('[dsh-memory UI error]', err);
-      } finally {
-        setLoading(false);
-        setRefreshing(false);
-      }
-    },
-    [searchQuery, selectedType, selectedStatus, selectedScope]
+  const isLlmConfigured = Boolean(
+    llmConfig?.privacy?.offlineConsent &&
+      (llmConfig?.offlineLLM?.useDshLlm ||
+        llmConfig?.offlineLLM?.hasApiKey ||
+        llmConfig?.offlineLLM?.baseURL)
   );
 
-  // Load when filters change
-  React.useEffect(() => {
-    const timer = setTimeout(() => {
-      loadData();
-    }, 150);
-    return () => clearTimeout(timer);
-  }, [loadData]);
+  const activeCount = statsData?.stats.active ?? 0;
+  const totalCount = statsData?.stats.total ?? 0;
+  const candidateCount = statsData?.stats.candidate ?? 0;
 
-  // Handle individual actions
-  const handlePinToggle = async (id: string, currentPinned: boolean) => {
-    try {
-      await performAction(currentPinned ? 'unpin' : 'pin', { id });
-      showToast(currentPinned ? '已取消置顶' : '已置顶并固化至系统提示词');
-      loadData(true);
-    } catch (err: any) {
-      showToast(err?.message || '操作失败');
-    }
-  };
+  const avgTokens = statsData?.recentTelemetry.avgTokens ?? 0;
+  const dynamicBudget = statsData?.dynamicBudgetTokens ?? 1600;
+  const stableBudget = statsData?.stableBudgetTokens ?? 600;
+  const hardBudget = statsData?.hardBudgetTokens ?? 3200;
 
-  const handleFreezeToggle = async (id: string, currentFrozen: boolean) => {
-    try {
-      await performAction(currentFrozen ? 'unfreeze' : 'freeze', { id });
-      showToast(currentFrozen ? '已解除冻结' : '已进入冻结保护状态');
-      loadData(true);
-    } catch (err: any) {
-      showToast(err?.message || '操作失败');
-    }
-  };
+  const correctionRate = statsData?.recentTelemetry.correctionRate ?? 0;
+  const signalAccuracy = Number(Math.max(0, 100 - correctionRate).toFixed(1));
+  const injectionCount = statsData?.recentTelemetry.injectionCount ?? 0;
 
-  const handleForget = async (id: string) => {
-    if (!window.confirm('确认归档遗忘该记忆？遗忘后将不再被在线召回。')) return;
-    try {
-      await performAction('forget', { id });
-      showToast('记忆已遗忘并归档');
-      loadData(true);
-    } catch (err: any) {
-      showToast(err?.message || '操作失败');
-    }
-  };
+  const callsToday = statsData?.ledger.callsToday ?? 0;
+  const maxDailyCalls = statsData?.ledger.maxDailyCalls ?? 40;
+  const tokensToday = statsData?.ledger.tokensToday ?? 0;
 
-  const handleRestore = async (id: string) => {
-    try {
-      await performAction('restore', { id });
-      showToast('记忆已成功恢复为活跃状态！');
-      loadData(true);
-    } catch (err: any) {
-      showToast(err?.message || '恢复失败');
-    }
-  };
-
-  const handleConfirm = async (id: string) => {
-    try {
-      await performAction('confirm', { id });
-      showToast('已强化有效性与置信度评分！');
-      loadData(true);
-    } catch (err: any) {
-      showToast(err?.message || '操作失败');
-    }
-  };
-
-  const handleApprove = async (id: string) => {
-    try {
-      await performAction('approve', { id });
-      showToast('候选记忆已审批入库并生效！');
-      loadData(true);
-    } catch (err: any) {
-      showToast(err?.message || '审批失败');
-    }
-  };
-
-  const handleCreateMemory = async (data: {
-    content: string;
-    summary?: string;
-    slot_key?: string;
-    importance?: number;
-    type: string;
-    scope: string;
-    pinned: boolean;
-  }) => {
-    await performAction('create', data);
-    showToast('新记忆已保存并成功入库！');
-    loadData(true);
-  };
-
-  // Multi-Selection handlers
-  const handleSelectToggle = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const handleToggleSelectAll = () => {
-    if (selectedIds.size === memories.length) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(memories.map((m) => m.id)));
-    }
-  };
-
-  const handleBatchAction = async (
-    subAction: 'pin' | 'unpin' | 'freeze' | 'unfreeze' | 'forget' | 'restore' | 'approve' | 'confirm'
-  ) => {
-    if (selectedIds.size === 0) return;
-    try {
-      const res = await performAction('batch', {
-        subAction,
-        ids: Array.from(selectedIds),
-      });
-      showToast(`批量操作成功：已更新 ${res.affected} 条记忆`);
-      setSelectedIds(new Set());
-      loadData(true);
-    } catch (err: any) {
-      showToast(err?.message || '批量操作失败');
-    }
-  };
-
-  const handleBatchExport = () => {
-    const selectedList = memories.filter((m) => selectedIds.has(m.id));
-    if (selectedList.length === 0) return;
-    const jsonStr = JSON.stringify(
-      { ok: true, total: selectedList.length, memories: selectedList },
-      null,
-      2
-    );
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `dsh-memories-selected-${selectedList.length}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast(`已导出 ${selectedList.length} 条选中的记忆`);
-  };
-
-  // Sorting
-  const sortedMemories = React.useMemo(() => {
-    const list = [...memories];
-    if (sortBy === 'pinned') {
-      list.sort(
-        (a, b) =>
-          (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updated_at - a.updated_at
-      );
-    } else if (sortBy === 'importance') {
-      list.sort(
-        (a, b) =>
-          (b.importance ?? 5) - (a.importance ?? 5) || b.updated_at - a.updated_at
-      );
-    } else if (sortBy === 'utility') {
-      list.sort(
-        (a, b) =>
-          (b.utility ?? 0) - (a.utility ?? 0) || b.updated_at - a.updated_at
-      );
-    } else if (sortBy === 'use_count') {
-      list.sort((a, b) => b.use_count - a.use_count || b.updated_at - a.updated_at);
-    } else if (sortBy === 'confidence') {
-      list.sort((a, b) => b.confidence - a.confidence || b.updated_at - a.updated_at);
-    } else if (sortBy === 'created') {
-      list.sort((a, b) => b.created_at - a.created_at);
-    } else {
-      // updated (pinned first)
-      list.sort(
-        (a, b) =>
-          (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updated_at - a.updated_at
-      );
-    }
-    return list;
-  }, [memories, sortBy]);
-
-  // Compute category counts for tab badges
-  const st = overview?.stats;
-  const counts = {
-    all: st?.total ?? 0,
-    preference: st?.byType['preference'] ?? 0,
-    semantic: (st?.byType['semantic'] ?? 0) + (st?.byType['fact'] ?? 0),
-    procedural: (st?.byType['procedural'] ?? 0) + (st?.byType['procedure'] ?? 0),
-    experience:
-      (st?.byType['episodic'] ?? 0) +
-      (st?.byType['failure'] ?? 0) +
-      (st?.byType['belief'] ?? 0) +
-      (st?.byType['goal'] ?? 0) +
-      (st?.byType['meta'] ?? 0),
-    candidate: st?.byStatus['candidate'] ?? 0,
-    archived: st?.byStatus['archived'] ?? 0,
-    pinned: st?.pinnedCount ?? 0,
-  };
+  const stableShare = Math.min(100, (coreTokens / Math.max(1, hardBudget)) * 100);
+  const dynamicShare = Math.min(
+    100 - stableShare,
+    (avgTokens / Math.max(1, hardBudget)) * 100
+  );
 
   return (
-    <GlassThemeContext.Provider
-      value={{ variant: glassVariant, setVariant: setGlassVariant }}
-    >
-      <div className="dshm-root" data-glass-variant={glassVariant}>
-        {/* Ambient Mesh Glow Orbs for Glassmorphism */}
-        <div className="dshm-ambient-orb is-orb-1" aria-hidden="true" />
-        <div className="dshm-ambient-orb is-orb-2" aria-hidden="true" />
-        <div className="dshm-ambient-orb is-orb-3" aria-hidden="true" />
+    <div className="dshm-root">
+      <style>{MEMORY_STYLES}</style>
 
-        <div className="dshm-container">
-          {/* Toast notification */}
-          {toast && (
-            <div
-              className="dshm-toast glass-base glass-dark"
-              style={{
-                position: 'fixed',
-                top: 'auto',
-                left: 'auto',
-                bottom: 24,
-                right: 24,
-                width: 'fit-content',
-                maxWidth: 'min(520px, calc(100vw - 48px))',
-                height: 'auto',
-                minHeight: 0,
-                transform: 'none',
-                zIndex: 100000,
-              }}
-            >
-              <span className="dshm-toast-icon">✨</span>
-              <span className="dshm-toast-text">{toast}</span>
+      <div className="dshm-studio">
+        {/* 1. Studio Editorial Header (ONLY ONE BUTTON: 模型配置) */}
+        <MemoryHeader
+          onOpenConfig={() => setConfigOpen(true)}
+          llmConfigured={isLlmConfigured}
+          llmModelName={
+            llmConfig?.offlineLLM?.useDshLlm
+              ? 'DSH Host'
+              : llmConfig?.offlineLLM?.model
+          }
+          healthGrade={healthData?.grade}
+          healthScore={healthData?.score}
+          strategyVersion={statsData?.activeStrategyVersion ?? 1}
+        />
+
+        {/* 2. Claude Studio 3x2 Telemetry Panel */}
+        <section className="dshm-usage-panel" aria-label="系统概览">
+          <div className="dshm-usage-head">
+            <span className="dshm-usage-head-title">Overview</span>
+            <span className="dshm-usage-head-caption">
+              本地七路混合快环 &lt; 1ms · 每 8s 自动同步
+            </span>
+          </div>
+
+          <div className="dshm-stat-grid">
+            <div className="dshm-stat-tile">
+              <span className="dshm-stat-tile-label">活跃记忆</span>
+              <div className="dshm-stat-tile-value-row">
+                <span className="dshm-stat-tile-value">{activeCount}</span>
+                <span className="dshm-stat-tile-sub">
+                  共 {totalCount} · 观察 {candidateCount}
+                </span>
+              </div>
+            </div>
+
+            <div className="dshm-stat-tile">
+              <span className="dshm-stat-tile-label">健康医生</span>
+              <div className="dshm-stat-tile-value-row">
+                <span className="dshm-stat-tile-value">
+                  {healthData ? `${healthData.grade} · ${healthData.score}` : 'A+ · 100'}
+                </span>
+                <span className="dshm-stat-tile-sub">
+                  {healthData?.ftsConsistent === false ? '自愈同步中' : 'FTS5 同步'}
+                </span>
+              </div>
+            </div>
+
+            <div className="dshm-stat-tile">
+              <span className="dshm-stat-tile-label">单轮动态注入</span>
+              <div className="dshm-stat-tile-value-row">
+                <span className="dshm-stat-tile-value">{avgTokens} tok</span>
+                <span className="dshm-stat-tile-sub">/ {dynamicBudget} 上限</span>
+              </div>
+            </div>
+
+            <div className="dshm-stat-tile">
+              <span className="dshm-stat-tile-label">常驻稳定层</span>
+              <div className="dshm-stat-tile-value-row">
+                <span className="dshm-stat-tile-value">{coreTokens} tok</span>
+                <span className="dshm-stat-tile-sub">/ {stableBudget} 预算</span>
+              </div>
+            </div>
+
+            <div className="dshm-stat-tile">
+              <span className="dshm-stat-tile-label">归因信噪比</span>
+              <div className="dshm-stat-tile-value-row">
+                <span className="dshm-stat-tile-value">{signalAccuracy}%</span>
+                <span className="dshm-stat-tile-sub">累计 {injectionCount} 轮</span>
+              </div>
+            </div>
+
+            <div className="dshm-stat-tile">
+              <span className="dshm-stat-tile-label">今日慢环配额</span>
+              <div className="dshm-stat-tile-value-row">
+                <span className="dshm-stat-tile-value">
+                  {callsToday} / {maxDailyCalls}
+                </span>
+                <span className="dshm-stat-tile-sub">
+                  {(tokensToday / 1000).toFixed(1)}k tok
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Context Budget Yardstick */}
+          <div className="dshm-yardstick">
+            <div className="dshm-yardstick-bar">
+              <div
+                className="dshm-yardstick-seg-stable"
+                style={{ width: `${stableShare}%` }}
+              />
+              <div
+                className="dshm-yardstick-seg-dynamic"
+                style={{ width: `${dynamicShare}%` }}
+              />
+            </div>
+            <div className="dshm-yardstick-legend">
+              <span>
+                常驻稳定层 {coreTokens}t · 动态检索层 {avgTokens}t
+              </span>
+              <span>总上下文硬上限 {hardBudget} tok</span>
+            </div>
+          </div>
+        </section>
+
+        {/* 3. Core Memory (System Prompt Stable Layer) */}
+        {coreBlocks.length > 0 && (
+          <section className="dshm-section" aria-label="常驻核心记忆">
+            <div className="dshm-section-head">
+              <span className="dshm-section-label">常驻核心记忆 · Core Memory</span>
+              <span className="dshm-section-sub">智能体对话中自动演进同步</span>
+            </div>
+
+            <div className="dshm-core-grid">
+              {coreBlocks.slice(0, 3).map((b) => (
+                <div key={b.block} className="dshm-core-card">
+                  <div className="dshm-core-card-head">
+                    <span className="dshm-core-card-title">
+                      {CORE_LABELS[b.block] || b.block}
+                    </span>
+                    <span className="dshm-core-card-tok">{b.tokens} tok</span>
+                  </div>
+                  <div className="dshm-core-card-body">
+                    {b.content || '等待智能体自动提炼填充...'}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* 4. Active Memories (Claude Code Process-Column Style) */}
+        <section className="dshm-section" aria-label="活跃记忆流">
+          <div className="dshm-section-head">
+            <span className="dshm-section-label">活跃记忆流 · Active Memories</span>
+            <span className="dshm-section-sub">
+              {memories.length} 条生效中 · 点击任意行展开详情
+            </span>
+          </div>
+
+          {memories.length === 0 ? (
+            <div className="dshm-empty-box">
+              全自动记忆引擎已就绪。在对话过程中，系统将自动捕获事实、开发偏好与排错经验，并在后台完成冲突消解与沉淀。
+            </div>
+          ) : (
+            <div className="dshm-process-card">
+              {memories.map((m) => (
+                <details key={m.id} className="dshm-process-item">
+                  <summary className="dshm-process-summary">
+                    <div className="dshm-process-left">
+                      <span
+                        className="dshm-process-kind"
+                        data-pinned={m.pinned ? '1' : '0'}
+                      >
+                        {m.pinned ? '★ ' : ''}
+                        {TYPE_SHORT[m.type] || m.type}
+                      </span>
+                      <span className="dshm-process-title">
+                        {m.summary || m.content}
+                      </span>
+                    </div>
+
+                    <div className="dshm-process-right">
+                      {m.slot_key && (
+                        <span className="dshm-process-slot">{m.slot_key}</span>
+                      )}
+                      <span>{Math.round((m.utility ?? 0.5) * 100)}%</span>
+                      <span>{formatRelativeTime(m.updated_at)}</span>
+                      <span className="dshm-process-chevron" aria-hidden="true">
+                        ›
+                      </span>
+                    </div>
+                  </summary>
+
+                  <div className="dshm-process-details">
+                    <div className="dshm-process-content">{m.content}</div>
+                    <div className="dshm-process-meta-bar">
+                      <span>ID: {m.id.slice(-8)}</span>
+                      <span>版本: v{m.version}</span>
+                      <span>
+                        作用域: {m.scope === 'global' ? '全局' : '工作区'}
+                      </span>
+                      <span>置信度: {Math.round((m.confidence ?? 0.8) * 100)}%</span>
+                      <span>累计召回: {m.use_count} 次</span>
+                      <span>开销: {m.token_cost} tok</span>
+                    </div>
+                  </div>
+                </details>
+              ))}
             </div>
           )}
+        </section>
 
-          {/* 1. GlassNavbar Header with 5-Tab Workspace Navigation & Quick Actions */}
-          <MemoryHeader
-            onRefresh={() => loadData(true)}
-            onNewMemory={() => setIsNewModalOpen(true)}
-            onOpenConfig={() => setIsConfigModalOpen(true)}
-            onOpenBackup={() => setIsBackupModalOpen(true)}
-            viewMode={viewMode}
-            onViewModeChange={setViewMode}
-            llmConfig={llmConfig}
-            isRefreshing={refreshing}
-            totalMemories={counts.all}
-            pendingRepairsCount={overview?.pendingRepairsCount || 0}
-            coreMemoryCount={overview?.coreMemoryCount || 0}
-          />
+        {/* 5. Autonomous Slow-Loop Activity */}
+        {recentJobs.length > 0 && (
+          <section className="dshm-section" aria-label="后台自治流水">
+            <div className="dshm-section-head">
+              <span className="dshm-section-label">后台自治流水 · Slow-Loop Jobs</span>
+              <span className="dshm-section-sub">对话间隙自动调度</span>
+            </div>
 
-          {/* 2. Top Bento Stat Tiles (GlassCard) */}
-          <StatCards
-            overview={overview}
-            onFilterSelect={(status, type) => {
-              setViewMode('memories');
-              if (status !== undefined) setSelectedStatus(status);
-              if (type !== undefined) setSelectedType(type);
-            }}
-            onNavigateView={setViewMode}
-          />
-
-          {/* 3. Main Workspace Views */}
-          {viewMode === 'core' ? (
-            <CoreMemoryView
-              onToast={showToast}
-              onInspect={(id) => setInspectingId(id)}
-              onUpdated={() => loadData(true)}
-            />
-          ) : viewMode === 'sandbox' ? (
-            <RecallSandboxView
-              onToast={showToast}
-              onInspect={(id) => setInspectingId(id)}
-            />
-          ) : viewMode === 'graph' ? (
-            <GraphView
-              onInspect={(id) => setInspectingId(id)}
-              onToast={showToast}
-            />
-          ) : viewMode === 'evolution' ? (
-            <EvolutionView
-              onToast={showToast}
-              onInspect={(id) => setInspectingId(id)}
-              onUpdated={() => loadData(true)}
-            />
-          ) : (
-            <>
-              {/* 3.1. Filter Toolbar (GlassCard + GlassInput) */}
-              <FilterToolbar
-                searchQuery={searchQuery}
-                onSearchChange={setSearchQuery}
-                selectedType={selectedType}
-                onTypeChange={setSelectedType}
-                selectedStatus={selectedStatus}
-                onStatusChange={setSelectedStatus}
-                selectedScope={selectedScope}
-                onScopeChange={setSelectedScope}
-                sortBy={sortBy}
-                onSortChange={setSortBy}
-                density={density}
-                onDensityChange={setDensity}
-                counts={counts}
-                totalLoaded={memories.length}
-                isAllSelected={
-                  memories.length > 0 && selectedIds.size === memories.length
-                }
-                onToggleSelectAll={handleToggleSelectAll}
-              />
-
-              {/* 3.2. Memory Cards / Compact Table List */}
-              {loading ? (
-                <GlassCard variant={glassVariant} interactive={false} className="dshm-loading-state">
-                  <div className="dshm-spin">
-                    <RefreshIcon size={24} />
+            <div className="dshm-process-card">
+              {recentJobs.map((job) => (
+                <div key={job.id} className="dshm-job-row">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                    <span
+                      style={{
+                        fontFamily: 'var(--dshm-font-code)',
+                        fontSize: 11,
+                        color: 'var(--dshm-ink-3)',
+                        width: 76,
+                        flex: 'none',
+                      }}
+                    >
+                      {job.kind}
+                    </span>
+                    <span
+                      style={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        color: 'var(--dshm-ink-2)',
+                      }}
+                    >
+                      {job.key}
+                    </span>
                   </div>
-                  <div>正在加载长期记忆库…</div>
-                </GlassCard>
-              ) : sortedMemories.length === 0 ? (
-                <GlassCard variant={glassVariant} interactive={false} className="dshm-empty-state">
-                  <div className="dshm-empty-icon">📂</div>
-                  <h3 className="dshm-empty-title">暂无匹配的长期记忆</h3>
-                  <p className="dshm-empty-desc">
-                    {searchQuery
-                      ? `未找到与 “${searchQuery}” 相关的记忆，请尝试更换关键词。`
-                      : '当前分类下暂无记忆条目。您可以点击上方“记录记忆”手动录入，或在日常会话中让系统自动提炼。'}
-                  </p>
-                  <GlassButton
-                    type="button"
-                    variant={glassVariant}
-                    intent="primary"
-                    className="dshm-btn dshm-btn-primary"
-                    onClick={() => setIsNewModalOpen(true)}
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      flex: 'none',
+                      fontSize: 11.5,
+                      color:
+                        job.status === 'done'
+                          ? 'var(--dshm-valley-green)'
+                          : job.status === 'failed'
+                            ? 'var(--dshm-danger)'
+                            : 'var(--dshm-ink-3)',
+                    }}
                   >
-                    + 记录第一条记忆
-                  </GlassButton>
-                </GlassCard>
-              ) : (
-                <div
-                  className={
-                    density === 'compact' ? 'dshm-compact-list' : 'dshm-card-list'
-                  }
-                >
-                  {density === 'compact' && (
-                    <div className="dshm-compact-thead glass-base glass-dark">
-                      <span className="dshm-th-left">类别 / 槽位 / 状态</span>
-                      <span className="dshm-th-body">记忆正文 (Memory Content)</span>
-                      <span className="dshm-th-right">置信度 / 命中 / 更新时间 / 操作</span>
-                    </div>
-                  )}
-                  {sortedMemories.map((mem) => (
-                    <MemoryCard
-                      key={mem.id}
-                      memory={mem}
-                      density={density}
-                      selected={selectedIds.has(mem.id)}
-                      onSelectToggle={handleSelectToggle}
-                      onPinToggle={handlePinToggle}
-                      onFreezeToggle={handleFreezeToggle}
-                      onForget={handleForget}
-                      onRestore={handleRestore}
-                      onConfirm={handleConfirm}
-                      onApprove={handleApprove}
-                      onInspect={(id) => setInspectingId(id)}
-                      onToast={showToast}
-                    />
-                  ))}
+                    <span>{job.status}</span>
+                    <span style={{ color: 'var(--dshm-ink-4)' }}>
+                      {formatRelativeTime(job.created_at)}
+                    </span>
+                  </div>
                 </div>
-              )}
-            </>
-          )}
-
-          {/* 4. Floating Batch Action Bar (in memories view) */}
-          {viewMode === 'memories' && (
-            <BatchBar
-              selectedCount={selectedIds.size}
-              onClear={() => setSelectedIds(new Set())}
-              onBatchPin={() => handleBatchAction('pin')}
-              onBatchUnpin={() => handleBatchAction('unpin')}
-              onBatchFreeze={() => handleBatchAction('freeze')}
-              onBatchForget={() => handleBatchAction('forget')}
-              onBatchRestore={() => handleBatchAction('restore')}
-              onBatchApprove={() => handleBatchAction('approve')}
-              onBatchConfirm={() => handleBatchAction('confirm')}
-              onBatchExport={handleBatchExport}
-            />
-          )}
-
-          {/* 5. GlassModal Modals */}
-          <NewMemoryModal
-            isOpen={isNewModalOpen}
-            onClose={() => setIsNewModalOpen(false)}
-            onSubmit={handleCreateMemory}
-          />
-
-          <MemoryDetailModal
-            memoryId={inspectingId}
-            onClose={() => setInspectingId(null)}
-            onToast={showToast}
-            onMemoryUpdated={() => loadData(true)}
-          />
-
-          <LLMConfigModal
-            isOpen={isConfigModalOpen}
-            onClose={() => setIsConfigModalOpen(false)}
-            config={llmConfig}
-            onSaved={(updated) => {
-              setLlmConfig(updated);
-              loadData(true);
-            }}
-            onToast={showToast}
-          />
-
-          <BackupModal
-            isOpen={isBackupModalOpen}
-            onClose={() => setIsBackupModalOpen(false)}
-            onToast={showToast}
-            onSuccess={() => loadData(true)}
-          />
-        </div>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
-    </GlassThemeContext.Provider>
+
+      {/* Single Action Sheet: Model Configuration */}
+      <LLMConfigModal
+        open={configOpen}
+        config={llmConfig}
+        onClose={() => setConfigOpen(false)}
+        onSave={handleSaveConfig}
+        onTestConnection={handleTestConnection}
+      />
+    </div>
   );
-};
+}

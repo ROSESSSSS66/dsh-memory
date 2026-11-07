@@ -1,649 +1,527 @@
-import * as React from 'react';
-import {
-  getMemoryTypeMeta,
-  type SandboxResponseUI,
-  type ReconcileResponseUI,
-} from '../types.js';
-import { fetchSandboxData, runReconcile } from '../api.js';
-import {
-  SearchIcon,
-  SparklesIcon,
-  RefreshIcon,
-  CopyIcon,
-  EyeIcon,
-  CodeIcon,
-  ActivityIcon,
-  TargetIcon,
-  CheckIcon,
-} from './Icons.js';
-import { GlassCard, GlassButton, GlassInput, useGlassVariant } from './GlassUI.js';
+import React, { useState, useEffect, useCallback } from 'react';
+import { GlassCard, GlassBadge, GlassInput } from './GlassUI.js';
+import type { MemoryItem } from './MemoryCard.js';
 
-interface RecallSandboxViewProps {
-  onToast: (msg: string) => void;
-  onInspect: (id: string) => void;
+export interface RecallSimulationData {
+  query: string;
+  latencyMs: number;
+  dynamicTokens: number;
+  block: string;
+  plan: {
+    tokens: string[];
+    contentTokens: string[];
+    entities: string[];
+    intents: Record<string, boolean>;
+    temporalBrowse: boolean;
+    preferenceBrowse: boolean;
+  };
+  items: Array<{
+    memory: MemoryItem;
+    form: 'full' | 'summary';
+    score: number;
+    tokens: number;
+    matchedChannels: string[];
+  }>;
 }
 
-const PRESET_QUERIES = [
-  '我的代码风格与偏好习惯有哪些？',
-  '项目构建与运行测试的标准流程是什么？',
-  '之前遇到报错或异常是怎么排查修复的？',
-  '最近在架构演进上做了哪些关键决策？',
-];
+export interface InjectionAuditItem {
+  id: number;
+  session_id: string;
+  turn: number;
+  memory_id: string;
+  layer: string;
+  rank: number;
+  tokens: number;
+  form: string;
+  strategy_v: number;
+  outcome: number | null;
+  created_at: number;
+  memory_type: string | null;
+  memory_content: string | null;
+  memory_summary: string | null;
+  slot_key: string | null;
+}
 
-const CHANNEL_LABELS: Record<string, { label: string; cls: string }> = {
-  lexical: { label: 'BM25 全文', cls: 'is-blue' },
-  fts: { label: 'BM25 全文', cls: 'is-blue' },
-  entity: { label: 'Entity 实体', cls: 'is-emerald' },
-  typed: { label: 'Typed 类型', cls: 'is-amber' },
-  slot: { label: 'Slot 槽位', cls: 'is-amber' },
-  temporal: { label: 'Temporal 时间', cls: 'is-cyan' },
-  graph: { label: 'Graph 拓扑', cls: 'is-cyan' },
-  preference: { label: 'Preference 偏好', cls: 'is-purple' },
-  vector: { label: 'Vector 向量', cls: 'is-purple' },
-  vec: { label: 'Vector 向量', cls: 'is-purple' },
+export interface RecallSandboxViewProps {
+  apiPrefix: string;
+  onSelectMemory?: (memory: MemoryItem) => void;
+  onDataMutated?: () => void;
+}
+
+const CHANNEL_BADGE: Record<
+  string,
+  { label: string; variant: 'cyan' | 'purple' | 'emerald' | 'amber' | 'accent' | 'rose' }
+> = {
+  lexical: { label: 'BM25 词法', variant: 'cyan' },
+  entity: { label: '代码实体', variant: 'accent' },
+  tag: { label: 'Slot/标签', variant: 'amber' },
+  vector: { label: '128D 向量', variant: 'purple' },
+  graph: { label: '关系图谱', variant: 'emerald' },
+  time: { label: '时间衰减', variant: 'rose' },
 };
 
-export const RecallSandboxView: React.FC<RecallSandboxViewProps> = ({
-  onToast,
-  onInspect,
-}) => {
-  const variant = useGlassVariant();
-  const [data, setData] = React.useState<SandboxResponseUI | null>(null);
-  const [loading, setLoading] = React.useState(true);
-  const [simulating, setSimulating] = React.useState(false);
-  const [query, setQuery] = React.useState('');
-  const [activePromptTab, setActivePromptTab] = React.useState<'dynamic' | 'stable'>('dynamic');
+export function RecallSandboxView({
+  apiPrefix,
+  onSelectMemory,
+}: RecallSandboxViewProps) {
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [stableLayer, setStableLayer] = useState<{
+    text: string;
+    stableTokens: number;
+    stableBudgetTokens: number;
+    visibleCount: number;
+  } | null>(null);
+  const [dynamicBudget, setDynamicBudget] = useState(1600);
+  const [hardBudget, setHardBudget] = useState(3200);
+  const [strategyVersion, setStrategyVersion] = useState(1);
+  const [simulation, setSimulation] = useState<RecallSimulationData | null>(null);
+  const [injections, setInjections] = useState<InjectionAuditItem[]>([]);
 
-  // Mem0 Reconcile Playground state
-  const [reconcileInput, setReconcileInput] = React.useState('');
-  const [reconcileSlotKey, setReconcileSlotKey] = React.useState('');
-  const [reconcileType, setReconcileType] = React.useState<'semantic' | 'preference' | 'procedural'>('semantic');
-  const [reconcilePreview, setReconcilePreview] = React.useState<ReconcileResponseUI | null>(null);
-  const [reconciling, setReconciling] = React.useState(false);
-
-  const loadSandbox = React.useCallback(async (testQuery?: string) => {
-    if (testQuery !== undefined) setSimulating(true);
-    else setLoading(true);
-    try {
-      const res = await fetchSandboxData(testQuery);
-      setData(res);
-      if (testQuery && res.recallSimulation) {
-        setActivePromptTab('dynamic');
-      } else if (!testQuery) {
-        setActivePromptTab('stable');
+  const fetchSandbox = useCallback(
+    async (simQuery?: string, silent = false) => {
+      if (!silent) setLoading(true);
+      try {
+        const res = await fetch(`${apiPrefix}/sandbox`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: simQuery ?? '' }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          setStableLayer(json.stableLayer || null);
+          setDynamicBudget(json.dynamicBudgetTokens || 1600);
+          setHardBudget(json.hardBudgetTokens || 3200);
+          setStrategyVersion(json.strategyVersion || 1);
+          setSimulation(json.recallSimulation || null);
+          setInjections(json.recentInjections || []);
+        }
+      } catch {
+        // ignore network errors
+      } finally {
+        if (!silent) setLoading(false);
       }
-    } catch (err: any) {
-      onToast(err?.message || '加载召回沙盒失败');
-    } finally {
-      setLoading(false);
-      setSimulating(false);
-    }
-  }, [onToast]);
-
-  React.useEffect(() => {
-    loadSandbox();
-  }, [loadSandbox]);
-
-  const handleRunQuery = (e?: React.FormEvent, overrideQuery?: string) => {
-    if (e) e.preventDefault();
-    const q = overrideQuery !== undefined ? overrideQuery : query;
-    if (overrideQuery !== undefined) setQuery(overrideQuery);
-    loadSandbox(q);
-  };
-
-  const handleCopyPrompt = (text: string, label: string) => {
-    if (!text) return;
-    navigator.clipboard?.writeText(text);
-    onToast(`已复制 ${label} Prompt XML 到剪贴板`);
-  };
-
-  const handleReconcileTest = async (dryRun: boolean) => {
-    if (!reconcileInput.trim() || reconcileInput.trim().length < 4) {
-      onToast('请输入至少 4 个字符的陈述内容');
-      return;
-    }
-    setReconciling(true);
-    try {
-      const res = await runReconcile({
-        content: reconcileInput.trim(),
-        type: reconcileType,
-        slot_key: reconcileSlotKey.trim() || undefined,
-        dryRun,
-      });
-      setReconcilePreview(res);
-      if (!dryRun) {
-        onToast(`已执行动态调和 [${res.decision.action}]：${res.decision.reason}`);
-        loadSandbox(query || undefined);
-      }
-    } catch (err: any) {
-      onToast(err?.message || '调和模拟失败');
-    } finally {
-      setReconciling(false);
-    }
-  };
-
-  if (loading && !data) {
-    return (
-      <GlassCard variant={variant} interactive={false} className="dshm-loading-state">
-        <div className="dshm-spin">
-          <RefreshIcon size={22} />
-        </div>
-        <div>正在初始化召回沙盒与上下文透视器…</div>
-      </GlassCard>
-    );
-  }
-
-  const stableTokens = data?.stableLayer.stableTokens ?? 0;
-  const stableBudget = data?.stableLayer.stableBudgetTokens ?? 600;
-  const dynamicTokens = data?.recallSimulation?.dynamicTokens ?? 0;
-  const dynamicBudget = data?.dynamicBudgetTokens ?? 1600;
-  const totalBudget = stableBudget + dynamicBudget;
-  const totalUsed = stableTokens + dynamicTokens;
-
-  const stablePct = Math.min(100, Math.round((stableTokens / Math.max(1, totalBudget)) * 100));
-  const dynamicPct = Math.min(
-    100 - stablePct,
-    Math.round((dynamicTokens / Math.max(1, totalBudget)) * 100)
+    },
+    [apiPrefix]
   );
 
-  const sim = data?.recallSimulation;
-  const promptText =
-    activePromptTab === 'dynamic'
-      ? sim?.block || '<!-- 请在上方输入测试提问，触发动态召回后在此实时预览 <memory_context layer="dynamic"> 渲染结果 -->'
-      : data?.stableLayer.text || '<!-- 当前尚无置顶记忆或 Core Memory 块，稳定层为空 -->';
+  // Debounced live recall simulation on input change
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchSandbox(query.trim(), false);
+    }, 240);
+    return () => clearTimeout(timer);
+  }, [query, fetchSandbox]);
 
-  const renderOutcomeBadge = (outcome: number | null) => {
-    if (outcome === null || outcome === undefined) {
-      return <span className="dshm-audit-outcome is-neutral">待归因</span>;
-    }
-    if (outcome >= 0.8) {
-      return <span className="dshm-audit-outcome is-positive">+{outcome.toFixed(1)} 确认有效</span>;
-    }
-    if (outcome > 0) {
-      return <span className="dshm-audit-outcome is-ok">+{outcome.toFixed(1)} 正常推进</span>;
-    }
-    if (outcome <= -0.8) {
-      return <span className="dshm-audit-outcome is-negative">{outcome.toFixed(1)} 用户纠正</span>;
-    }
-    return <span className="dshm-audit-outcome is-warn">{outcome.toFixed(1)} 工具异常</span>;
-  };
+  // Automatic background telemetry refresh
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchSandbox(query.trim(), true);
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [query, fetchSandbox]);
+
+  const stableTok = stableLayer?.stableTokens ?? 0;
+  const stableMax = stableLayer?.stableBudgetTokens ?? 600;
+  const dynTok = simulation?.dynamicTokens ?? 0;
+  const totalTok = stableTok + dynTok;
+
+  const stablePct = Math.min(100, Math.round((stableTok / Math.max(1, hardBudget)) * 100));
+  const dynPct = Math.min(100, Math.round((dynTok / Math.max(1, hardBudget)) * 100));
 
   return (
-    <div className="dshm-sandbox-container">
-      {/* 1. Letta ADE Style: Context Window Budget Allocation Bar */}
-      <GlassCard variant={variant} interactive={false} className="dshm-evo-panel">
-        <div className="dshm-evo-panel-header">
-          <div className="dshm-evo-panel-title-group">
-            <div className="dshm-stat-icon-wrapper dshm-icon-indigo">
-              <CodeIcon size={16} />
-            </div>
-            <div>
-              <h3 className="dshm-evo-panel-title">
-                Context Window 注入水位透视器 (Letta ADE Inspector)
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Context Window Watermark Inspector */}
+      <GlassCard style={{ padding: '18px 20px' }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 12,
+            marginBottom: 12,
+          }}
+        >
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <h3
+                style={{
+                  margin: 0,
+                  fontFamily: 'var(--dsh-claude-font-serif)',
+                  fontSize: 15.5,
+                  fontWeight: 600,
+                }}
+              >
+                上下文窗口预算水位仪 & 实时召回检视器 (Context Budget & Live Recall Inspector)
               </h3>
-              <span className="dshm-evo-panel-subtitle">
-                实时监控常驻稳定层 (`layer=&quot;stable&quot;`) 与按需动态召回层 (`layer=&quot;dynamic&quot;`) 的 Token 占用比例与实际注入 XML
-              </span>
+              <GlassBadge variant="accent">Strategy v{strategyVersion}</GlassBadge>
+              {simulation && (
+                <GlassBadge variant="emerald">
+                  热路径耗时 {simulation.latencyMs.toFixed(1)} ms
+                </GlassBadge>
+              )}
             </div>
+            <p
+              style={{
+                margin: '4px 0 0',
+                fontSize: 12,
+                color: 'var(--dshm-text-secondary)',
+              }}
+            >
+              严格执行双层硬预算装箱（稳定层 ≤ {stableMax} tok，动态层 ≤ {dynamicBudget}{' '}
+              tok，总硬顶 ≤ {hardBudget} tok），输入任意问题即可实时透视六路召回与 XML 注入块。
+            </p>
           </div>
-          <div className="dshm-evo-panel-actions">
-            <span className="dshm-tag dshm-tag-slot">
-              Strategy v{data?.strategyVersion ?? 1}
-            </span>
-            <span className="dshm-tag dshm-tag-scope">
-              总占用: {totalUsed} / {totalBudget} Tokens ({Math.round((totalUsed / Math.max(1, totalBudget)) * 100)}%)
-            </span>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 11, color: 'var(--dshm-text-muted)' }}>
+              当前总注入 Token
+            </div>
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 600,
+                fontFamily: 'var(--dsh-claude-font-code)',
+                fontVariantNumeric: 'tabular-nums',
+                color: totalTok > hardBudget ? 'var(--dshm-rose)' : 'var(--dshm-text-primary)',
+              }}
+            >
+              {totalTok} / {hardBudget} tok
+            </div>
           </div>
         </div>
 
-        {/* Stacked Multi-Segment Progress Bar */}
-        <div className="dshm-ctx-meter">
-          <div className="dshm-ctx-bar-track">
-            <div
-              className="dshm-ctx-bar-seg is-stable"
-              style={{ width: `${stablePct}%` }}
-              title={`常驻稳定层: ${stableTokens} / ${stableBudget} Tokens`}
-            />
-            <div
-              className="dshm-ctx-bar-seg is-dynamic"
-              style={{ width: `${dynamicPct}%` }}
-              title={`动态召回层: ${dynamicTokens} / ${dynamicBudget} Tokens`}
-            />
-          </div>
-          <div className="dshm-ctx-legend">
-            <span className="dshm-ctx-legend-item">
-              <i className="dshm-ctx-dot is-stable" />
-              <strong>常驻稳定层 (Core + Pinned):</strong> {stableTokens} / {stableBudget} tok ({data?.stableLayer.visibleCount ?? 0} 条)
+        {/* Stacked Progress Bar */}
+        <div
+          className="dshm-progress-track"
+          style={{
+            height: 8,
+            display: 'flex',
+            background: 'var(--dsh-claude-inset)',
+            border: '1px solid var(--dshm-glass-border)',
+          }}
+        >
+          <div
+            style={{
+              width: `${stablePct}%`,
+              background: 'var(--dshm-accent)',
+              transition: 'width 0.3s ease',
+            }}
+            title={`Stable Layer: ${stableTok} tokens`}
+          />
+          <div
+            style={{
+              width: `${dynPct}%`,
+              background: 'var(--dshm-cyan)',
+              transition: 'width 0.3s ease',
+            }}
+            title={`Dynamic Layer: ${dynTok} tokens`}
+          />
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            fontSize: 11,
+            color: 'var(--dshm-text-muted)',
+            marginTop: 6,
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          <span>
+            <strong style={{ color: 'var(--dshm-accent)' }}>■ 稳定层 (Stable):</strong>{' '}
+            {stableTok} / {stableMax} tok ({stableLayer?.visibleCount ?? 0} 条常驻)
+          </span>
+          <span>
+            <strong style={{ color: 'var(--dshm-cyan)' }}>■ 动态层 (Dynamic):</strong>{' '}
+            {dynTok} / {dynamicBudget} tok ({simulation?.items.length ?? 0} 条装入)
+          </span>
+          <span>剩余裕量: {Math.max(0, hardBudget - totalTok)} tok</span>
+        </div>
+
+        {/* Instant Live Query Input (No Manual Submit Button Needed) */}
+        <div style={{ marginTop: 14, position: 'relative' }}>
+          <GlassInput
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="输入任意测试问题实时检视六路召回（例如：项目数据库是什么版本？ / 为什么连接池超时？ / 代码规范偏好）..."
+          />
+          {loading && (
+            <span
+              style={{
+                position: 'absolute',
+                right: 12,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                fontSize: 11,
+                color: 'var(--dshm-text-muted)',
+              }}
+            >
+              计算中...
             </span>
-            <span className="dshm-ctx-legend-item">
-              <i className="dshm-ctx-dot is-dynamic" />
-              <strong>动态召回层 (6-Channel RRF):</strong> {dynamicTokens} / {dynamicBudget} tok ({sim?.items.length ?? 0} 条)
-            </span>
-            <span className="dshm-ctx-legend-item">
-              <i className="dshm-ctx-dot is-free" />
-              <strong>剩余可用预算:</strong> {Math.max(0, totalBudget - totalUsed)} tok
-            </span>
-          </div>
+          )}
         </div>
       </GlassCard>
 
-      {/* 2. Interactive 6-Channel Recall Playground + Prompt Preview */}
-      <div className="dshm-sandbox-grid">
-        {/* Left: Query Simulator & Multi-Channel Recall Hits */}
-        <GlassCard variant={variant} interactive={false} className="dshm-evo-panel">
-          <div className="dshm-evo-panel-header">
-            <div className="dshm-evo-panel-title-group">
-              <div className="dshm-stat-icon-wrapper dshm-icon-blue">
-                <TargetIcon size={16} />
-              </div>
-              <div>
-                <h3 className="dshm-evo-panel-title">6 路融合召回调试沙盒 (Recall Playground)</h3>
-                <span className="dshm-evo-panel-subtitle">
-                  输入模拟用户提问，透视分词意图解析、6 路通道命中（BM25 / Entity / Typed / Temporal / Preference / Vector）与 RRF 融合排序
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <form className="dshm-sandbox-search-form" onSubmit={(e) => handleRunQuery(e)}>
-            <GlassInput
-              type="text"
-              variant={variant}
-              wrapperClassName="dshm-search-box"
-              className="dshm-search-input"
-              leftIcon={<SearchIcon size={14} />}
-              placeholder="输入任意测试问题，检验哪些长期记忆会被检索召回…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            <GlassButton
-              type="submit"
-              variant={variant}
-              intent="primary"
-              className="dshm-btn dshm-btn-primary"
-              disabled={simulating || !query.trim()}
+      {/* Simulation Output */}
+      {simulation && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(380px, 1fr))',
+            gap: 14,
+          }}
+        >
+          {/* Left: Query Plan & Ranked Candidates */}
+          <GlassCard style={{ padding: '18px 20px' }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: 10,
+              }}
             >
-              <SparklesIcon size={13} />
-              <span>{simulating ? '检索中…' : '模拟召回'}</span>
-            </GlassButton>
-          </form>
-
-          {/* Preset Quick Queries */}
-          <div className="dshm-sandbox-presets">
-            <span className="dshm-sandbox-preset-label">快速测试：</span>
-            {PRESET_QUERIES.map((pq) => (
-              <GlassButton
-                key={pq}
-                type="button"
-                variant={variant}
-                size="sm"
-                className="dshm-chip-btn"
-                onClick={() => handleRunQuery(undefined, pq)}
-              >
-                {pq}
-              </GlassButton>
-            ))}
-          </div>
-
-          {/* Query Plan Breakdown */}
-          {sim && (
-            <div className="dshm-plan-box">
-              <div className="dshm-plan-row">
-                <span className="dshm-plan-label">检索耗时:</span>
-                <span className="dshm-tag dshm-tag-fact">{sim.latencyMs} ms</span>
-                <span className="dshm-plan-label">识别意图:</span>
-                {sim.plan.intents.preference && (
-                  <span className="dshm-tag dshm-tag-preference">偏好意图 (Preference)</span>
+              <h4 className="dshm-section-title" style={{ margin: 0 }}>
+                六路融合与效用装箱结果 ({simulation.items.length} 条命中)
+              </h4>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {simulation.plan.entities.map((ent, idx) => (
+                  <GlassBadge key={idx} variant="accent">
+                    实体: {ent}
+                  </GlassBadge>
+                ))}
+                {simulation.plan.preferenceBrowse && (
+                  <GlassBadge variant="purple">偏好泛化意图</GlassBadge>
                 )}
-                {sim.plan.intents.procedural && (
-                  <span className="dshm-tag dshm-tag-procedure">流程排障 (Procedural)</span>
+                {simulation.plan.temporalBrowse && (
+                  <GlassBadge variant="amber">时间回溯意图</GlassBadge>
                 )}
-                {sim.plan.intents.temporal && (
-                  <span className="dshm-tag dshm-tag-episodic">时间回溯 (Temporal)</span>
-                )}
-                {sim.plan.intents.causal && (
-                  <span className="dshm-tag dshm-tag-failure">因果溯源 (Causal)</span>
-                )}
-                {!sim.plan.intents.preference &&
-                  !sim.plan.intents.procedural &&
-                  !sim.plan.intents.temporal &&
-                  !sim.plan.intents.causal && (
-                    <span className="dshm-tag dshm-tag-scope">通用语义检索</span>
-                  )}
               </div>
-              {sim.plan.contentTokens.length > 0 && (
-                <div className="dshm-plan-row">
-                  <span className="dshm-plan-label">核心分词:</span>
-                  <div className="dshm-plan-tokens">
-                    {sim.plan.contentTokens.slice(0, 12).map((tk) => (
-                      <code key={tk} className="dshm-token-chip">
-                        {tk}
-                      </code>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
-          )}
 
-          {/* Recalled Items List */}
-          {!sim ? (
-            <div className="dshm-evo-empty">
-              点击上方快速测试问题或输入自定义提问，即可查看 6 路召回命中明细与各通道得分。
-            </div>
-          ) : sim.items.length === 0 ? (
-            <div className="dshm-evo-empty">
-              未召回任何动态记忆（可能记忆已常驻于稳定层被去重，或未达到绝对相关性防污染门槛）。
-            </div>
-          ) : (
-            <div className="dshm-sandbox-hit-list">
-              {sim.items.map((item, idx) => {
-                const meta = getMemoryTypeMeta(item.memory.type);
-                return (
-                  <GlassCard
+            {simulation.items.length === 0 ? (
+              <div
+                className="dshm-hint"
+                style={{ padding: '24px 0', textAlign: 'center' }}
+              >
+                未命中满足准入阈值的动态记忆（或已被稳定层去重覆盖），触发静默跳过保护。
+              </div>
+            ) : (
+              <div className="dshm-timeline">
+                {simulation.items.map((item, idx) => (
+                  <div
                     key={item.memory.id}
-                    variant={variant}
-                    className="dshm-sandbox-hit-card"
-                    onClick={() => onInspect(item.memory.id)}
+                    className="dshm-timeline-item"
+                    style={{
+                      cursor: onSelectMemory ? 'pointer' : 'default',
+                      gap: 6,
+                    }}
+                    onClick={() => onSelectMemory?.(item.memory)}
                   >
-                    <div className="dshm-sandbox-hit-top">
-                      <div className="dshm-card-badges">
-                        <span className="dshm-hit-rank">#{idx + 1}</span>
-                        <span className={`dshm-tag ${meta.tagClass}`}>{meta.label}</span>
-                        <span className="dshm-tag dshm-tag-slot">
-                          RRF: {item.score.toFixed(3)}
-                        </span>
-                        <span className="dshm-tag dshm-tag-scope">
-                          {item.form === 'summary' ? '摘要注入' : '全文注入'} · {item.tokens} tok
-                        </span>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        flexWrap: 'wrap',
+                        gap: 6,
+                      }}
+                    >
+                      <div
+                        style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <GlassBadge variant="accent">#{idx + 1}</GlassBadge>
+                        <GlassBadge variant="cyan">{item.memory.type}</GlassBadge>
+                        <GlassBadge
+                          variant={item.form === 'full' ? 'emerald' : 'neutral'}
+                        >
+                          {item.form === 'full' ? '全文装入' : '摘要装入'} ({item.tokens}t)
+                        </GlassBadge>
                       </div>
-                      <div className="dshm-hit-channels">
+                      <span
+                        style={{
+                          fontFamily: 'var(--dsh-claude-font-code)',
+                          fontSize: 12,
+                          fontWeight: 600,
+                          color: 'var(--dshm-emerald)',
+                          fontVariantNumeric: 'tabular-nums',
+                        }}
+                      >
+                        Score: {item.score.toFixed(3)}
+                      </span>
+                    </div>
+
+                    <div
+                      style={{
+                        fontSize: 12.5,
+                        color: 'var(--dshm-text-primary)',
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      {item.form === 'full'
+                        ? item.memory.content
+                        : item.memory.summary || item.memory.content}
+                    </div>
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        flexWrap: 'wrap',
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                         {item.matchedChannels.map((ch) => {
-                          const chMeta = CHANNEL_LABELS[ch] || { label: ch, cls: 'is-blue' };
+                          const cb = CHANNEL_BADGE[ch] || {
+                            label: ch,
+                            variant: 'cyan' as const,
+                          };
                           return (
-                            <span
-                              key={ch}
-                              className={`dshm-channel-hit-pill ${chMeta.cls}`}
-                            >
-                              {chMeta.label}
-                            </span>
+                            <GlassBadge key={ch} variant={cb.variant}>
+                              {cb.label}
+                            </GlassBadge>
                           );
                         })}
                       </div>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          color: 'var(--dshm-text-muted)',
+                          fontVariantNumeric: 'tabular-nums',
+                        }}
+                      >
+                        Utility {(item.memory.utility * 100).toFixed(0)}% · Conf{' '}
+                        {(item.memory.confidence * 100).toFixed(0)}%
+                      </span>
                     </div>
-                    <div className="dshm-sandbox-hit-content">
-                      {item.form === 'summary' && item.memory.summary
-                        ? item.memory.summary
-                        : item.memory.content}
+                  </div>
+                ))}
+              </div>
+            )}
+          </GlassCard>
+
+          {/* Right: Exact XML Injection Preview */}
+          <GlassCard style={{ padding: '18px 20px' }}>
+            <h4 className="dshm-section-title">
+              动态层 XML 注入块预览 (&lt;memory_context&gt; · {simulation.dynamicTokens} tokens)
+            </h4>
+            <div
+              className="dshm-code-box"
+              style={{
+                maxHeight: 340,
+                overflowY: 'auto',
+                fontSize: 11.5,
+              }}
+            >
+              {simulation.block ||
+                '<!-- 空块：无动态记忆需要注入，在线热路径零额外 Token 开销 -->'}
+            </div>
+          </GlassCard>
+        </div>
+      )}
+
+      {/* Stable Layer & Recent Online Injections Audit */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(380px, 1fr))',
+          gap: 14,
+        }}
+      >
+        <GlassCard style={{ padding: '18px 20px' }}>
+          <h4 className="dshm-section-title">
+            常驻稳定层渲染块预览 (System Prompt Stable Section · {stableTok} tokens)
+          </h4>
+          <div
+            className="dshm-code-box"
+            style={{
+              maxHeight: 300,
+              overflowY: 'auto',
+              fontSize: 11.5,
+            }}
+          >
+            {stableLayer?.text || '（当前工作区暂无常驻稳定层内容）'}
+          </div>
+        </GlassCard>
+
+        <GlassCard style={{ padding: '18px 20px' }}>
+          <h4 className="dshm-section-title">
+            在线对话注入与归因审计流水 (Recent Turn Injections · {injections.length})
+          </h4>
+          {injections.length === 0 ? (
+            <div
+              className="dshm-hint"
+              style={{ padding: '24px 0', textAlign: 'center' }}
+            >
+              暂无历史对话轮次的记忆注入审计流水。
+            </div>
+          ) : (
+            <div
+              className="dshm-timeline"
+              style={{ maxHeight: 300, overflowY: 'auto' }}
+            >
+              {injections.map((inj) => (
+                <div key={inj.id} className="dshm-timeline-item">
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 6,
+                    }}
+                  >
+                    <div
+                      style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                      <GlassBadge
+                        variant={inj.layer === 'stable' ? 'accent' : 'cyan'}
+                      >
+                        {inj.layer} #{inj.rank}
+                      </GlassBadge>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontFamily: 'var(--dsh-claude-font-code)',
+                          color: 'var(--dshm-text-muted)',
+                        }}
+                      >
+                        Turn #{inj.turn} · {inj.tokens}t ({inj.form})
+                      </span>
                     </div>
-                  </GlassCard>
-                );
-              })}
+                    {inj.outcome !== null ? (
+                      <GlassBadge
+                        variant={
+                          inj.outcome > 0
+                            ? 'emerald'
+                            : inj.outcome < 0
+                              ? 'rose'
+                              : 'neutral'
+                        }
+                      >
+                        Outcome: {inj.outcome > 0 ? `+${inj.outcome}` : inj.outcome}
+                      </GlassBadge>
+                    ) : (
+                      <GlassBadge variant="neutral">待归因</GlassBadge>
+                    )}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--dshm-text-secondary)',
+                      marginTop: 2,
+                    }}
+                  >
+                    {inj.memory_summary || inj.memory_content || inj.memory_id}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </GlassCard>
-
-        {/* Right: Live System Prompt XML Preview */}
-        <GlassCard variant={variant} interactive={false} className="dshm-evo-panel">
-          <div className="dshm-evo-panel-header">
-            <div className="dshm-evo-panel-title-group">
-              <div className="dshm-stat-icon-wrapper dshm-icon-emerald">
-                <CodeIcon size={16} />
-              </div>
-              <div>
-                <h3 className="dshm-evo-panel-title">系统提示词 XML 实时预览</h3>
-                <span className="dshm-evo-panel-subtitle">
-                  实际注入给大模型的 `&lt;memory_context&gt;` 结构化上下文块
-                </span>
-              </div>
-            </div>
-            <div className="dshm-evo-panel-actions">
-              <div className="dshm-segmented-control">
-                <button
-                  type="button"
-                  className={`dshm-segment-btn ${activePromptTab === 'dynamic' ? 'is-active' : ''}`}
-                  onClick={() => setActivePromptTab('dynamic')}
-                >
-                  动态层 ({dynamicTokens}t)
-                </button>
-                <button
-                  type="button"
-                  className={`dshm-segment-btn ${activePromptTab === 'stable' ? 'is-active' : ''}`}
-                  onClick={() => setActivePromptTab('stable')}
-                >
-                  稳定层 ({stableTokens}t)
-                </button>
-              </div>
-              <GlassButton
-                type="button"
-                variant={variant}
-                className="dshm-btn dshm-btn-secondary"
-                onClick={() =>
-                  handleCopyPrompt(
-                    promptText,
-                    activePromptTab === 'dynamic' ? '动态召回层' : '常驻稳定层'
-                  )
-                }
-              >
-                <CopyIcon size={13} />
-                <span>复制 XML</span>
-              </GlassButton>
-            </div>
-          </div>
-
-          <pre className="dshm-prompt-preview-code">{promptText}</pre>
-        </GlassCard>
       </div>
-
-      {/* 2.5. Mem0 Dynamic Reconciliation Playground (ADD / UPDATE / DELETE / NOOP) */}
-      <GlassCard variant={variant} interactive={false} className="dshm-evo-panel">
-        <div className="dshm-evo-panel-header">
-          <div className="dshm-evo-panel-title-group">
-            <div className="dshm-stat-icon-wrapper dshm-icon-purple">
-              <SparklesIcon size={16} />
-            </div>
-            <div>
-              <h3 className="dshm-evo-panel-title">
-                Mem0 动态冲突调和器沙盒 (Reconcile Decision Playground)
-              </h3>
-              <span className="dshm-evo-panel-subtitle">
-                输入新事实或否定陈述，预览调和器如何自动判定 `ADD`（新增）、`UPDATE`（覆写旧槽位）、`DELETE`（否定归档）或 `NOOP`（幂等跳过）
-              </span>
-            </div>
-          </div>
-          <div className="dshm-evo-panel-actions">
-            <select
-              className="dshm-select"
-              value={reconcileType}
-              onChange={(e) => setReconcileType(e.target.value as any)}
-            >
-              <option value="semantic">事实知识 (Semantic)</option>
-              <option value="preference">偏好习惯 (Preference)</option>
-              <option value="procedural">流程规范 (Procedural)</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="dshm-sandbox-search-form">
-          <GlassInput
-            type="text"
-            variant={variant}
-            wrapperClassName="dshm-search-box"
-            className="dshm-search-input"
-            placeholder="例如：不要再使用 Webpack 了，改用 Vite 构建（或输入任意待调和的新事实）…"
-            value={reconcileInput}
-            onChange={(e) => setReconcileInput(e.target.value)}
-          />
-          <GlassInput
-            type="text"
-            variant={variant}
-            placeholder="可选槽位 (如 pkg_manager)"
-            value={reconcileSlotKey}
-            onChange={(e) => setReconcileSlotKey(e.target.value)}
-          />
-          <GlassButton
-            type="button"
-            variant={variant}
-            className="dshm-btn dshm-btn-secondary"
-            disabled={reconciling || !reconcileInput.trim()}
-            onClick={() => handleReconcileTest(true)}
-          >
-            <EyeIcon size={13} />
-            <span>预览决策 (Dry-Run)</span>
-          </GlassButton>
-          <GlassButton
-            type="button"
-            variant={variant}
-            intent="primary"
-            className="dshm-btn dshm-btn-primary"
-            disabled={reconciling || !reconcileInput.trim()}
-            onClick={() => handleReconcileTest(false)}
-          >
-            <CheckIcon size={13} />
-            <span>应用调和入库</span>
-          </GlassButton>
-        </div>
-
-        {reconcilePreview && (
-          <div className="dshm-plan-box">
-            <div className="dshm-plan-row">
-              <span className="dshm-plan-label">调和判定动作:</span>
-              <span
-                className={`dshm-tag ${
-                  reconcilePreview.decision.action === 'ADD'
-                    ? 'dshm-tag-fact'
-                    : reconcilePreview.decision.action === 'UPDATE'
-                      ? 'dshm-tag-procedure'
-                      : reconcilePreview.decision.action === 'DELETE'
-                        ? 'dshm-tag-failure'
-                        : 'dshm-tag-scope'
-                }`}
-              >
-                {reconcilePreview.decision.action}
-              </span>
-              <span className="dshm-plan-label">判定置信度:</span>
-              <span className="dshm-tag dshm-tag-slot">
-                {(reconcilePreview.decision.confidence * 100).toFixed(0)}%
-              </span>
-              <span className="dshm-plan-label">原因说明:</span>
-              <span>{reconcilePreview.decision.reason}</span>
-              {reconcilePreview.decision.targetId && (
-                <GlassButton
-                  type="button"
-                  variant={variant}
-                  size="sm"
-                  className="dshm-chip-btn"
-                  onClick={() => onInspect(reconcilePreview.decision.targetId!)}
-                >
-                  目标记忆: {reconcilePreview.decision.targetId.slice(0, 12)}
-                </GlassButton>
-              )}
-            </div>
-          </div>
-        )}
-      </GlassCard>
-
-      {/* 3. Mem0 OpenMemory Style: Live Injection & Attribution Audit Log */}
-      <GlassCard variant={variant} interactive={false} className="dshm-evo-panel">
-        <div className="dshm-evo-panel-header">
-          <div className="dshm-evo-panel-title-group">
-            <div className="dshm-stat-icon-wrapper dshm-icon-amber">
-              <ActivityIcon size={16} />
-            </div>
-            <div>
-              <h3 className="dshm-evo-panel-title">
-                实时召回与归因审计流 (Mem0 OpenMemory Access Audit)
-              </h3>
-              <span className="dshm-evo-panel-subtitle">
-                记录每次对话 Turn 实际注入的记忆条目、Token 开销以及下一轮用户反馈归因结果 (`outcome`)
-              </span>
-            </div>
-          </div>
-          <GlassButton
-            type="button"
-            variant={variant}
-            className="dshm-btn dshm-btn-secondary"
-            onClick={() => loadSandbox(query || undefined)}
-          >
-            <RefreshIcon size={13} />
-            <span>刷新审计流</span>
-          </GlassButton>
-        </div>
-
-        {!data?.recentInjections || data.recentInjections.length === 0 ? (
-          <div className="dshm-evo-empty">
-            暂无历史对话注入审计记录。当 Agent 在对话中自动召回长期记忆后，此表会实时记录每次命中与效用反馈。
-          </div>
-        ) : (
-          <div className="dshm-table-container">
-            <table className="dshm-data-table">
-              <thead>
-                <tr>
-                  <th>时间 / 会话轮次</th>
-                  <th>命中记忆内容</th>
-                  <th>类型 / 槽位</th>
-                  <th>注入层级 & 形态</th>
-                  <th>Token 开销</th>
-                  <th>反馈归因 (Outcome)</th>
-                  <th className="is-right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.recentInjections.map((row) => {
-                  const meta = getMemoryTypeMeta(row.memory_type || 'semantic');
-                  return (
-                    <tr
-                      key={row.id}
-                      className="dshm-table-row"
-                      onClick={() => onInspect(row.memory_id)}
-                    >
-                      <td className="dshm-td-mono">
-                        <div>{new Date(row.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
-                        <div className="dshm-td-sub">
-                          {row.session_id.slice(0, 10)} · T{row.turn}
-                        </div>
-                      </td>
-                      <td className="dshm-td-content">
-                        <div className="dshm-td-clamp">
-                          {row.memory_summary || row.memory_content || row.memory_id}
-                        </div>
-                      </td>
-                      <td>
-                        <span className={`dshm-tag ${meta.tagClass}`}>{meta.shortLabel} · {meta.label}</span>
-                        {row.slot_key && (
-                          <div className="dshm-td-sub dshm-td-mono">{row.slot_key}</div>
-                        )}
-                      </td>
-                      <td>
-                        <span className="dshm-tag dshm-tag-scope">
-                          {row.layer} / {row.form} (#{row.rank})
-                        </span>
-                      </td>
-                      <td className="dshm-td-mono">{row.tokens} tok</td>
-                      <td>{renderOutcomeBadge(row.outcome)}</td>
-                      <td className="is-right">
-                        <GlassButton
-                          type="button"
-                          variant={variant}
-                          size="icon"
-                          className="dshm-action-btn"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onInspect(row.memory_id);
-                          }}
-                          title="查看记忆详情"
-                        >
-                          <EyeIcon size={13} />
-                        </GlassButton>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </GlassCard>
     </div>
   );
-};
+}
