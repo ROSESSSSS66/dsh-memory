@@ -238,7 +238,7 @@ export function readSessionFile(filePath: string): { header: any; rawLines: stri
     const decompressedChunks: Buffer[] = [];
     for (const frame of frames) {
       try {
-        const chunk = (zlib as any).zstdDecompressSync(buf.subarray(frame.start, frame.end));
+        const chunk = (zlib as any).zstdDecompressSync(buf.subarray(frame.start, frame.end), { maxOutputLength: 64 * 1024 * 1024 });
         decompressedChunks.push(chunk);
       } catch (err: any) {
         console.warn(`[dsh-memory] Frame decompress failed in ${filePath}:`, err?.message || err);
@@ -254,6 +254,7 @@ export function readSessionFile(filePath: string): { header: any; rawLines: stri
         if (typeof flushOpt === 'number') {
           const recovered = (zlib as any).zstdDecompressSync(tornBuf, {
             finishFlush: flushOpt,
+            maxOutputLength: 64 * 1024 * 1024,
           });
           if (recovered && recovered.length > 0) {
             decompressedChunks.push(recovered);
@@ -397,6 +398,7 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
       text: string | null;
     }> = [];
 
+    const toolCallNames = new Map<string, string>();
     for (const line of rawLines) {
       stats.rawEvents++;
 
@@ -467,6 +469,8 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
         role = 'tool';
         origin_kind = 'tool';
         tool_name = ev.data?.name || null;
+        const callId = ev.data?.id || ev.data?.callId || ev.data?.toolCallId;
+        if (callId && tool_name) toolCallNames.set(String(callId), tool_name);
         if (typeof ev.data?.arguments === 'string') {
           rawText = ev.data.arguments;
         } else if (ev.data?.arguments) {
@@ -478,6 +482,10 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
         role = 'tool';
         origin_kind = 'tool';
         tool_name = ev.data?.name || null;
+        const callId = ev.data?.id || ev.data?.callId || ev.data?.toolCallId;
+        if (callId && tool_name) toolCallNames.set(String(callId), tool_name);
+        const resCallId = ev.data?.id || ev.data?.callId || ev.data?.toolCallId;
+        tool_name = ev.data?.name || (resCallId ? toolCallNames.get(String(resCallId)) || null : null);
         is_error = ev.data?.isError || ev.data?.is_error || ev.data?.status === 'error' ? 1 : 0;
         const content = ev.data?.message?.content || ev.data?.content;
         if (Array.isArray(content)) {
@@ -578,7 +586,7 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
           stats.newEventsAdded++;
         }
 
-        if (isInserted || (rawEvent.role === 'user' && rawEvent.origin_kind === 'user')) {
+        if (isInserted) {
           try {
             const initialMemCount = db.get<{ cnt: number }>('SELECT COUNT(*) as cnt FROM memories')?.cnt || 0;
             runRules(db, rawEvent, cfg, time);

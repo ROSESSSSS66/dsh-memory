@@ -492,7 +492,7 @@ export function approveRepairProposal(
       saveVersionSnapshot(db, target, 'repair_invalidate', approvedBy, now);
       db.run(
         `UPDATE memories
-         SET status = 'archived', updated_at = ?
+         SET status = 'archived', version = version + 1, updated_at = ?
          WHERE id = ?`,
         [now, target.id]
       );

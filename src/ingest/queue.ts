@@ -15,6 +15,7 @@ export class IngestQueue {
   private batchSize: number;
   private flushIntervalMs: number;
   private isFlushing = false;
+  private activeFlushPromise: Promise<number> | null = null;
   private isClosed = false;
 
   constructor(db: Db, cfg: PluginConfig = DEFAULTS, options: IngestQueueOptions = {}) {
@@ -47,7 +48,15 @@ export class IngestQueue {
   }
 
   public async flush(): Promise<number> {
-    if (this.isFlushing || this.buffer.length === 0) {
+    if (this.isFlushing) {
+      return this.activeFlushPromise ?? 0;
+    }
+    if (this.buffer.length === 0) {
+      return 0;
+    }
+    this.isFlushing = true;
+    const run = async (): Promise<number> => {
+    if (false) {
       return 0;
     }
     this.isFlushing = true;
@@ -92,13 +101,17 @@ export class IngestQueue {
       return insertedCount;
     } finally {
       this.isFlushing = false;
-      if (this.buffer.length >= this.batchSize) {
+      this.activeFlushPromise = null;
+      if (!this.isClosed && this.buffer.length >= this.batchSize) {
         // 若在清空期间又积累了足够事件，继续下一次 flush
         setTimeout(() => {
           this.flush().catch(() => {});
         }, 0);
       }
     }
+    };
+    this.activeFlushPromise = run();
+    return this.activeFlushPromise;
   }
 
   public size(): number {
@@ -111,6 +124,11 @@ export class IngestQueue {
       clearInterval(this.timer);
       this.timer = null;
     }
-    await this.flush();
+    if (this.activeFlushPromise) {
+      try { await this.activeFlushPromise; } catch {}
+    }
+    while (this.buffer.length > 0) {
+      await this.flush();
+    }
   }
 }

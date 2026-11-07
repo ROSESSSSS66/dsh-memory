@@ -58,8 +58,11 @@ export function MemoryApp() {
   const [recentJobs, setRecentJobs] = useState<JobLogItem[]>([]);
   const [llmConfig, setLlmConfig] = useState<LLMConfigData | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const fetchingRef = React.useRef(false);
 
   const fetchAll = useCallback(async () => {
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
     try {
       const [stRes, hlRes, crRes, memRes, evoRes] = await Promise.all([
         fetch(`${API_PREFIX}/stats`),
@@ -102,6 +105,8 @@ export function MemoryApp() {
       }
     } catch {
       // silent during startup or offline transitions
+    } finally {
+      fetchingRef.current = false;
     }
   }, []);
 
@@ -109,7 +114,9 @@ export function MemoryApp() {
     try {
       const res = await fetch(`${API_PREFIX}/config`);
       if (!res.ok) return;
-      const json = await res.json();
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Save failed');
       if (json.ok && json.config) {
         setLlmConfig(json.config);
       }
@@ -133,7 +140,9 @@ export function MemoryApp() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Save failed');
     if (json.ok && json.config) {
       setLlmConfig(json.config);
       fetchAll();

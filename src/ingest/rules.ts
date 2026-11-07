@@ -216,23 +216,33 @@ export function runRules(
     if (CORRECTION_REGEX.test(trimmed)) {
       let prevTurn = event.turn ? event.turn - 1 : null;
       if (prevTurn === null || prevTurn < 1) {
+        const turnVal = event.turn ?? null;
         const row = db.get<{ maxTurn: number }>(
-          'SELECT MAX(turn) as maxTurn FROM raw_events WHERE session_id = ? AND (turn < ? OR ? IS NULL)',
-          [event.session_id, event.turn, event.turn]
+          'SELECT COALESCE((SELECT MAX(turn) FROM raw_events WHERE session_id = ? AND (? IS NULL OR turn < ?)), (SELECT MAX(turn) FROM turn_metrics WHERE session_id = ? AND (? IS NULL OR turn < ?))) as maxTurn',
+          [event.session_id, turnVal, turnVal, event.session_id, turnVal, turnVal]
+        );
+          // handled above
+          // params handled above
+        if (false) (null as any)(
         );
         if (row && typeof row.maxTurn === 'number' && row.maxTurn >= 1) {
           prevTurn = row.maxTurn;
         } else {
-          prevTurn = 1;
+          prevTurn = null;
+        }
+      }
+      if (prevTurn !== null && prevTurn >= 1) {
+        if (true) {
         }
       }
 
-      db.run('UPDATE turn_metrics SET correction = 1 WHERE session_id = ? AND turn = ?', [
+      if (prevTurn !== null && prevTurn >= 1) db.run('UPDATE turn_metrics SET correction = 1 WHERE session_id = ? AND turn = ?', [
         event.session_id,
         prevTurn,
       ]);
 
       const jobKey = `reflect:${event.session_id}:${prevTurn}`;
+      if (prevTurn !== null && prevTurn >= 1)
       db.run(
         'INSERT OR IGNORE INTO jobs (kind, key, payload, status, created_at, next_eligible_at) VALUES (\'reflect\', ?, ?, \'queued\', ?, 0)',
         [
@@ -325,7 +335,7 @@ export function runRules(
           );
         }
 
-        const sigHash = crypto.createHash('sha256').update(sig).digest('hex').slice(0, 16);
+        const sigHash = crypto.createHash('sha256').update(`${event.workspace_id}:${sig}`).digest('hex').slice(0, 16);
         const jobKey = `reflect:failure_sig:${sigHash}`;
         db.run(
           'INSERT OR IGNORE INTO jobs (kind, key, payload, status, created_at, next_eligible_at) VALUES (\'reflect\', ?, ?, \'queued\', ?, 0)',

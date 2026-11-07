@@ -27,6 +27,13 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src/core/migrations",
+    "scripts/postinstall.mjs",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -76,6 +83,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
+    "esbuild": "^0.24.0",
     "react": "^19.3.1",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",

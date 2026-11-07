@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Db, MemoryRecord } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import { ftsText, contentHash } from '../core/text.js';
+import { workspaceId } from '../core/scope.js';
 import { openDb } from '../core/db.js';
 import {
   backfillMissingEmbeddings,
@@ -64,7 +65,7 @@ export function archiveColdMemories(
       // 改为 archived
       db.run(
         `UPDATE memories
-         SET status = 'archived', updated_at = ?
+         SET status = 'archived', version = version + 1, updated_at = ?
          WHERE id = ?`,
         [now, mem.id]
       );
@@ -519,7 +520,7 @@ export function pruneInvalidMemories(
   const wsFilter = options.workspaceId
     ? `AND (workspace_id = ? OR scope IN ('user', 'global'))`
     : '';
-  const params: unknown[] = options.workspaceId ? [options.workspaceId] : [];
+  const params: unknown[] = options.workspaceId ? [workspaceId(options.workspaceId)] : [];
 
   const rows = db.all<MemoryRecord>(
     `SELECT * FROM memories
@@ -631,7 +632,7 @@ export async function curateMemoriesWithLLM(
   const wsFilter = options.workspaceId
     ? `AND (workspace_id = ? OR scope IN ('user', 'global'))`
     : '';
-  const params: unknown[] = options.workspaceId ? [options.workspaceId] : [];
+  const params: unknown[] = options.workspaceId ? [workspaceId(options.workspaceId)] : [];
 
   const candidates = db.all<MemoryRecord>(
     `SELECT * FROM memories
@@ -759,7 +760,35 @@ export async function curateMemoriesWithLLM(
       const editRes = editContent(db, target.id, upd.text, undefined, 'llm', now);
       if (!editRes.ok) continue;
 
-      const nextSlot = upd.slot_key !== undefined ? upd.slot_key : target.slot_key;
+      let nextSlot = upd.slot_key !== undefined ? upd.slot_key : target.slot_key;
+      // 先吸收并取代被合并的冗余兄弟记忆，释放潜在槽位占用
+      for (const absId of upd.absorb_ids || []) {
+        const absMem = reviewedMap.get(absId);
+        if (!absMem || absMem.id === target.id || absMem.status === 'frozen') continue;
+        saveVersionSnapshot(db, absMem, 'llm_curate_merged', 'llm', now);
+        db.run(
+          `UPDATE memories SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+          [now, now, now, absMem.id]
+        );
+        removeCachedRuntimeEmbedding(absMem.id);
+        addRelation(db, target.id, absMem.id, 'supersedes', now);
+      }
+      if (nextSlot) {
+        const slotConflict = db.get<MemoryRecord>(
+          `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id != ?`,
+          [target.scope, target.workspace_id || '', target.session_id || '', nextSlot, target.id]
+        );
+        if (slotConflict) {
+          if (slotConflict.status === 'frozen') {
+            nextSlot = target.slot_key === nextSlot ? null : target.slot_key;
+          } else {
+            saveVersionSnapshot(db, slotConflict, 'llm_curate_slot_supersede', 'llm', now);
+            db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ? WHERE id = ?`, [now, now, now, slotConflict.id]);
+            removeCachedRuntimeEmbedding(slotConflict.id);
+            addRelation(db, target.id, slotConflict.id, 'supersedes', now);
+          }
+        }
+      }
       const nextType = upd.type || target.type;
       const newHash = contentHash(nextType, upd.text);
       const newVec = computeLocalEmbedding(
@@ -789,7 +818,7 @@ export async function curateMemoriesWithLLM(
       llmUpdated++;
 
       // 吸收并取代被合并的冗余兄弟记忆
-      for (const absId of upd.absorb_ids || []) {
+      for (const absId of ([] as string[])) {
         const absMem = reviewedMap.get(absId);
         if (!absMem || absMem.id === target.id || absMem.status === 'frozen') continue;
         saveVersionSnapshot(db, absMem, 'llm_curate_merged', 'llm', now);

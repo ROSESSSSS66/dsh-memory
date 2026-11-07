@@ -108,12 +108,21 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
       const match = rawContent.match(/^[^。！？\n.!?]+[。！？\n.!?]?/);
       rawSummary = match ? match[0].trim() : rawContent.slice(0, 80);
     }
+    if (redactSecrets(rawSummary).hasSensitive) {
+      return { action: 'rejected', reason: 'sensitive_content_detected' };
+    }
     const summaryTokens = estimateTokens(rawSummary);
     if (summaryTokens > DEFAULTS.maxSummaryTokens) {
       rawSummary = rawSummary.slice(0, 100);
     }
 
     if (!c.sources || !Array.isArray(c.sources) || c.sources.length === 0) {
+      return { action: 'rejected', reason: 'sources_required' };
+    }
+    if (c.sources.some((s) => s.excerpt && redactSecrets(s.excerpt).hasSensitive)) {
+      return { action: 'rejected', reason: 'sensitive_content_detected' };
+    }
+    if (false) {
       return { action: 'rejected', reason: 'sources_required' };
     }
 
@@ -212,6 +221,30 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
             return { action: 'conflict_pending', id: candId, withId: existingSlot.id };
           }
 
+          if (c.valid_from && existingSlot.valid_from && c.valid_from < existingSlot.valid_from) {
+            const histId = generateId();
+            insertNewRecord(db, {
+              c: { ...c, valid_to: existingSlot.valid_from },
+              id: histId,
+              status: 'superseded',
+              scope,
+              workspace_id,
+              session_id,
+              content: rawContent,
+              summary: rawSummary,
+              token_cost: contentTokens,
+              summary_cost: estimateTokens(rawSummary),
+              hash,
+              slot_key: slotKey,
+              confidence,
+              origin_kinds: originKinds,
+              approved_at: now,
+              approved_by: 'user',
+              now,
+            });
+            addRelation(db, existingSlot.id, histId, 'supersedes', now);
+            return { action: 'superseded', id: existingSlot.id, oldId: histId };
+          }
           // 显式用户新值 -> supersede 旧值并激活新值
           saveVersionSnapshot(db, existingSlot, 'supersede', c.actor, now);
           db.run(
@@ -345,11 +378,12 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
        WHERE scope = ?
          AND COALESCE(workspace_id, '') = ?
          AND status IN ('active', 'candidate', 'frozen')
+         AND COALESCE(session_id, '') = ?
          AND type != 'meta'
          AND COALESCE(slot_key, '') NOT LIKE 'core:%'
        ORDER BY (CASE WHEN type = ? THEN 0 ELSE 1 END) ASC, utility DESC, updated_at DESC
        LIMIT 24`,
-      [scope, workspace_id || '', c.type]
+      [scope, workspace_id || '', session_id || '', c.type]
     );
 
     const newTokens = tokenSet(rawContent);
@@ -431,7 +465,7 @@ function insertNewRecord(
   params: {
     c: CandidateInput;
     id: string;
-    status: 'active' | 'candidate';
+    status: 'active' | 'candidate' | 'superseded';
     scope: Scope;
     workspace_id: string | null;
     session_id: string | null;
@@ -659,6 +693,10 @@ export function editContent(
       rawSummary = match ? match[0].trim() : rawContent.slice(0, 80);
     }
 
+    if (redactSecrets(rawSummary).hasSensitive) throw new Error('sensitive_content_detected');
+    if (estimateTokens(rawSummary) > DEFAULTS.maxSummaryTokens) {
+      rawSummary = rawSummary.slice(0, 100);
+    }
     saveVersionSnapshot(db, memory, 'edit', actor, now);
 
     const nextVersion = memory.version + 1;
@@ -730,6 +768,19 @@ export function rollback(
     if (!versionRow) throw new Error('target_version_not_found');
 
     const snapshot: MemoryRecord = JSON.parse(versionRow.snapshot);
+    const nextSlotKey = snapshot.slot_key !== undefined ? snapshot.slot_key : memory.slot_key;
+    if (nextSlotKey && memory.status === 'active') {
+      const slotConflict = db.get<MemoryRecord>(
+        `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id != ?`,
+        [memory.scope, memory.workspace_id || '', memory.session_id || '', nextSlotKey, id]
+      );
+      if (slotConflict) {
+        if (slotConflict.status === 'frozen') throw new Error('slot_is_frozen');
+        saveVersionSnapshot(db, slotConflict, 'supersede_by_rollback', actor, now);
+        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`, [now, now, slotConflict.id]);
+        removeCachedRuntimeEmbedding(slotConflict.id);
+      }
+    }
     saveVersionSnapshot(db, memory, 'rollback', actor, now);
 
     const nextVersion = memory.version + 1;
@@ -755,6 +806,9 @@ export function rollback(
       ]
     );
     removeCachedRuntimeEmbedding(id);
+    if (nextSlotKey !== memory.slot_key) {
+      db.run(`UPDATE memories SET slot_key = ? WHERE id = ?`, [nextSlotKey, id]);
+    }
     primeRuntimeVectorCache(id, rollbackHash, rollbackVec);
 
     // 重建 FTS
@@ -788,7 +842,7 @@ export function forget(db: Db, id: string, actor: string = 'user', now: number =
     if (!memory) return false;
 
     saveVersionSnapshot(db, memory, 'status', actor, now);
-    db.run(`UPDATE memories SET status = 'archived', updated_at = ? WHERE id = ?`, [now, id]);
+    db.run(`UPDATE memories SET status = 'archived', version = version + 1, updated_at = ? WHERE id = ?`, [now, id]);
     removeCachedRuntimeEmbedding(id);
     return true;
   });
@@ -816,7 +870,7 @@ export function freeze(db: Db, id: string, actor: string = 'user', now: number =
       if (slotConflict) {
         if (slotConflict.status === 'frozen') return false;
         saveVersionSnapshot(db, slotConflict, 'supersede_by_freeze', actor, now);
-        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, updated_at = ? WHERE id = ?`, [
+        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`, [
           now,
           now,
           slotConflict.id,
@@ -826,7 +880,7 @@ export function freeze(db: Db, id: string, actor: string = 'user', now: number =
     }
 
     saveVersionSnapshot(db, memory, 'status', actor, now);
-    db.run(`UPDATE memories SET status = 'frozen', updated_at = ? WHERE id = ?`, [now, id]);
+    db.run(`UPDATE memories SET status = 'frozen', version = version + 1, updated_at = ? WHERE id = ?`, [now, id]);
     return true;
   });
 }
@@ -853,7 +907,7 @@ export function unfreeze(db: Db, id: string, actor: string = 'user', now: number
       if (slotConflict) {
         if (slotConflict.status === 'frozen') return false;
         saveVersionSnapshot(db, slotConflict, 'supersede_by_unfreeze', actor, now);
-        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, updated_at = ? WHERE id = ?`, [
+        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`, [
           now,
           now,
           slotConflict.id,
@@ -863,7 +917,10 @@ export function unfreeze(db: Db, id: string, actor: string = 'user', now: number
     }
 
     saveVersionSnapshot(db, memory, 'status', actor, now);
-    db.run(`UPDATE memories SET status = 'active', updated_at = ? WHERE id = ?`, [now, id]);
+    if (memory.status !== 'frozen' && memory.status !== 'active') return false;
+    if (memory.status === 'active') return true;
+    saveVersionSnapshot(db, memory, 'status', actor, now);
+    db.run(`UPDATE memories SET status = 'active', version = version + 1, updated_at = ? WHERE id = ?`, [now, id]);
     return true;
   });
 }
@@ -966,6 +1023,7 @@ export function confirmMemory(
            approved_at = ?,
            approved_by = ?,
            success_count = success_count + 1,
+           version = version + 1,
            updated_at = ?
        WHERE id = ?`,
       [newConfidence, newUtility, newStatus, approvedAt, approvedBy, now, id]
@@ -1049,6 +1107,7 @@ export function mergeMemories(
        SET utility = ?,
            confidence = ?,
            success_count = success_count + 1,
+           version = version + 1,
            updated_at = ?
        WHERE id = ?`,
       [newUtility, newConfidence, now, targetId]
@@ -1097,7 +1156,7 @@ export function restoreMemory(
     }
 
     saveVersionSnapshot(db, memory, 'restore', actor, now);
-    db.run(`UPDATE memories SET status = 'active', valid_to = NULL, updated_at = ? WHERE id = ?`, [now, id]);
+    db.run(`UPDATE memories SET status = 'active', valid_to = NULL, version = version + 1, updated_at = ? WHERE id = ?`, [now, id]);
     return { success: true, message: `Memory '${id}' restored to active status` };
   });
 }
@@ -1121,6 +1180,7 @@ export function invalidateMemory(
        SET status = 'archived',
            valid_to = ?,
            invalidated_at = ?,
+           version = version + 1,
            updated_at = ?
        WHERE id = ?`,
       [now, now, now, id]

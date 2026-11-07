@@ -38,7 +38,7 @@ export async function handlePreStep(
   }
 
   // 若下游取消或并非 enter，直接返回
-  if (!decision || decision.kind !== 'enter' || !Array.isArray(decision.messages)) {
+  if (!decision || decision.kind !== 'enter' || !Array.isArray(decision.messages) || payload?.signal?.aborted) {
     return decision;
   }
 
@@ -117,9 +117,10 @@ export async function handlePreStep(
     }
 
     // B. 本 session 历史注入
+    const lastCompaction = ctx.db.get<{ max_t: number | null }>("SELECT MAX(time) as max_t FROM raw_events WHERE session_id = ? AND role = 'compaction'", [sessionId])?.max_t || 0;
     const historyRows = ctx.db.all<{ memory_id: string; content_rev: number }>(
-      'SELECT memory_id, content_rev FROM injections WHERE session_id = ?',
-      [sessionId]
+      'SELECT memory_id, content_rev FROM injections WHERE session_id = ? AND created_at >= ?',
+      [sessionId, lastCompaction]
     );
     for (const row of historyRows) {
       alreadyInjected.add(`${row.memory_id}@${row.content_rev}`);
@@ -177,7 +178,8 @@ export async function handlePreStep(
           injected = excluded.injected,
           inject_tokens = excluded.inject_tokens,
           latency_ms = excluded.latency_ms,
-          strategy_v = excluded.strategy_v`,
+          strategy_v = excluded.strategy_v
+        WHERE turn_metrics.injected = 0 OR excluded.injected > 0`,
         [
           sessionId,
           turn,
