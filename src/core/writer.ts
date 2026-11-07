@@ -122,7 +122,10 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
 
     // 1. 计算可信状态
     let isExplicitUser = false;
-    if (c.source_kind === 'user' && c.actor === 'user') {
+    if (
+      (c.source_kind === 'user' && c.actor === 'user') ||
+      (c.status === 'active' && (c.actor === 'user' || c.actor === 'system'))
+    ) {
       isExplicitUser = true;
     }
 
@@ -133,7 +136,7 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
     if (isExplicitUser) {
       initialStatus = 'active';
       approved_at = now;
-      approved_by = 'user';
+      approved_by = c.actor || 'user';
     }
 
     let confidence = typeof c.confidence === 'number' && Number.isFinite(c.confidence) ? c.confidence : 0.5;
@@ -763,6 +766,29 @@ export function freeze(db: Db, id: string, actor: string = 'user', now: number =
     const memory = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
     if (!memory) return false;
 
+    if (memory.slot_key && memory.status !== 'active' && memory.status !== 'frozen') {
+      const slotConflict = db.get<MemoryRecord>(
+        `SELECT * FROM memories
+         WHERE scope = ?
+           AND IFNULL(workspace_id, '') = IFNULL(?, '')
+           AND IFNULL(session_id, '') = IFNULL(?, '')
+           AND slot_key = ?
+           AND status IN ('active', 'frozen')
+           AND id != ?`,
+        [memory.scope, memory.workspace_id, memory.session_id, memory.slot_key, id]
+      );
+      if (slotConflict) {
+        if (slotConflict.status === 'frozen') return false;
+        saveVersionSnapshot(db, slotConflict, 'supersede_by_freeze', actor, now);
+        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, updated_at = ? WHERE id = ?`, [
+          now,
+          now,
+          slotConflict.id,
+        ]);
+        removeCachedRuntimeEmbedding(slotConflict.id);
+      }
+    }
+
     saveVersionSnapshot(db, memory, 'status', actor, now);
     db.run(`UPDATE memories SET status = 'frozen', updated_at = ? WHERE id = ?`, [now, id]);
     return true;
@@ -776,6 +802,29 @@ export function unfreeze(db: Db, id: string, actor: string = 'user', now: number
   return db.transaction(() => {
     const memory = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
     if (!memory) return false;
+
+    if (memory.slot_key && memory.status !== 'active' && memory.status !== 'frozen') {
+      const slotConflict = db.get<MemoryRecord>(
+        `SELECT * FROM memories
+         WHERE scope = ?
+           AND IFNULL(workspace_id, '') = IFNULL(?, '')
+           AND IFNULL(session_id, '') = IFNULL(?, '')
+           AND slot_key = ?
+           AND status IN ('active', 'frozen')
+           AND id != ?`,
+        [memory.scope, memory.workspace_id, memory.session_id, memory.slot_key, id]
+      );
+      if (slotConflict) {
+        if (slotConflict.status === 'frozen') return false;
+        saveVersionSnapshot(db, slotConflict, 'supersede_by_unfreeze', actor, now);
+        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, updated_at = ? WHERE id = ?`, [
+          now,
+          now,
+          slotConflict.id,
+        ]);
+        removeCachedRuntimeEmbedding(slotConflict.id);
+      }
+    }
 
     saveVersionSnapshot(db, memory, 'status', actor, now);
     db.run(`UPDATE memories SET status = 'active', updated_at = ? WHERE id = ?`, [now, id]);
@@ -847,9 +896,31 @@ export function confirmMemory(
     const boostConf = actor === 'user' ? 0.2 : 0.1;
     const newConfidence = Math.min(1.0, memory.confidence + boostConf);
     const newUtility = Math.min(1.0, memory.utility + 0.15);
-    const newStatus = memory.status === 'candidate' ? 'active' : memory.status;
-    const approvedAt = memory.status === 'candidate' ? now : memory.approved_at;
-    const approvedBy = memory.status === 'candidate' ? actor : memory.approved_by;
+    let newStatus = memory.status === 'candidate' ? 'active' : memory.status;
+    let approvedAt = memory.status === 'candidate' ? now : memory.approved_at;
+    let approvedBy = memory.status === 'candidate' ? actor : memory.approved_by;
+
+    if (memory.status === 'candidate' && memory.slot_key) {
+      const existingSlot = db.get<MemoryRecord>(
+        `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id != ?`,
+        [memory.scope, memory.workspace_id || '', memory.session_id || '', memory.slot_key, id]
+      );
+      if (existingSlot) {
+        if (existingSlot.status === 'frozen') {
+          return {
+            success: false,
+            message: `Slot '${memory.slot_key}' is currently locked by frozen memory '${existingSlot.id}'`,
+          };
+        }
+        saveVersionSnapshot(db, existingSlot, 'supersede', actor, now);
+        db.run(
+          `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+          [now, now, existingSlot.id]
+        );
+        removeCachedRuntimeEmbedding(existingSlot.id);
+        addRelation(db, memory.id, existingSlot.id, 'supersedes', now);
+      }
+    }
 
     db.run(
       `UPDATE memories
@@ -967,6 +1038,28 @@ export function restoreMemory(
     const memory = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
     if (!memory) return { success: false, message: `Memory '${id}' not found` };
 
+    if (memory.slot_key && memory.status !== 'active' && memory.status !== 'frozen') {
+      const existingSlot = db.get<MemoryRecord>(
+        `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id != ?`,
+        [memory.scope, memory.workspace_id || '', memory.session_id || '', memory.slot_key, id]
+      );
+      if (existingSlot) {
+        if (existingSlot.status === 'frozen') {
+          return {
+            success: false,
+            message: `Slot '${memory.slot_key}' is currently locked by frozen memory '${existingSlot.id}'`,
+          };
+        }
+        saveVersionSnapshot(db, existingSlot, 'supersede', actor, now);
+        db.run(
+          `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+          [now, now, existingSlot.id]
+        );
+        removeCachedRuntimeEmbedding(existingSlot.id);
+        addRelation(db, memory.id, existingSlot.id, 'supersedes', now);
+      }
+    }
+
     saveVersionSnapshot(db, memory, 'restore', actor, now);
     db.run(`UPDATE memories SET status = 'active', valid_to = NULL, updated_at = ? WHERE id = ?`, [now, id]);
     return { success: true, message: `Memory '${id}' restored to active status` };
@@ -985,7 +1078,7 @@ export function invalidateMemory(
 ): boolean {
   return db.transaction(() => {
     const mem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
-    if (!mem) return false;
+    if (!mem || mem.status === 'frozen') return false;
     saveVersionSnapshot(db, mem, reason, actor, now);
     db.run(
       `UPDATE memories
@@ -996,6 +1089,7 @@ export function invalidateMemory(
        WHERE id = ?`,
       [now, now, now, id]
     );
+    removeCachedRuntimeEmbedding(id);
     return true;
   });
 }

@@ -10,6 +10,7 @@ import { estimateTokens } from '../core/tokens.js';
 
 export interface DistillBatchOptions {
   sessionId?: string;
+  cwd?: string;
   signal?: AbortSignal;
   jobDeadline?: number;
   fetchFn?: typeof fetch;
@@ -111,30 +112,37 @@ export async function distillSession(
   const batchEvents: RawEvent[] = [];
   const testLedger: EvidenceLedger = new Map();
 
+  const wrapperUserPrompt = PROMPT_DISTILL.buildUser({
+    cwd: workspaceId,
+    sessionId: targetSessionId,
+    rangeLabel: `seq ${allUnprocessed[0].seq}..${allUnprocessed[allUnprocessed.length - 1].seq}`,
+    isoTime: new Date(allUnprocessed[0].time).toISOString(),
+    transcript: '',
+  });
+  let runningTokens = estimateTokens(PROMPT_DISTILL.system + wrapperUserPrompt) + 200;
+
   for (const ev of allUnprocessed) {
-    const candidateBatch = [...batchEvents, ev];
-    const candidateLedger: EvidenceLedger = new Map();
-    const candidateTranscript = renderTranscript(candidateBatch, candidateLedger);
+    const singleLedger: EvidenceLedger = new Map();
+    const singleLine = renderTranscript([ev], singleLedger);
+    const lineTokens = estimateTokens(singleLine + '\n');
 
-    const userPrompt = PROMPT_DISTILL.buildUser({
-      cwd: workspaceId,
-      sessionId: targetSessionId,
-      rangeLabel: `seq ${candidateBatch[0].seq}..${candidateBatch[candidateBatch.length - 1].seq}`,
-      isoTime: new Date(candidateBatch[0].time).toISOString(),
-      transcript: candidateTranscript,
-    });
+    if (batchEvents.length > 0 && runningTokens + lineTokens > maxInputTokens) {
+      // 超出 token 预算，停止本批，剩余事件留待后续批次
+      break;
+    }
 
-    const totalEstimated = estimateTokens(PROMPT_DISTILL.system + userPrompt) + 200;
-    if (batchEvents.length > 0 && totalEstimated > maxInputTokens) {
-      // 超出 6000 token 预算，停止本批，剩余事件留待后续批次
+    if (batchEvents.length === 0 && runningTokens + lineTokens > maxInputTokens) {
+      // 单条事件超出预算时，截断文本避免会话游标永久死锁
+      const maxChars = Math.max(100, Math.floor((maxInputTokens - runningTokens) * 2));
+      batchEvents.push({
+        ...ev,
+        text: (ev.text || '').slice(0, maxChars),
+      });
       break;
     }
 
     batchEvents.push(ev);
-    testLedger.clear();
-    for (const [k, v] of candidateLedger.entries()) {
-      testLedger.set(k, v);
-    }
+    runningTokens += lineTokens;
   }
 
   if (batchEvents.length === 0) {
@@ -159,7 +167,7 @@ export async function distillSession(
       systemPrompt: PROMPT_DISTILL.system,
       userPrompt,
       maxOutputTokens: PROMPT_DISTILL.maxOutputTokens,
-      cwd: workspaceId,
+      cwd: options.cwd || workspaceId,
       workspaceId,
       signal: options.signal,
       jobDeadline: options.jobDeadline,

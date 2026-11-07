@@ -11,7 +11,7 @@ import { MemoryTools } from './tools.js';
 import { MemoryCommands } from './commands.js';
 import { workspaceId } from '../core/scope.js';
 import { JobScheduler, recoverJobsOnStartup } from '../jobs/scheduler.js';
-import { registerJobHandler } from '../jobs/runner.js';
+import { registerJobHandler, unregisterJobHandler } from '../jobs/runner.js';
 import {
   distillSession,
   findEligibleDistillSession,
@@ -129,7 +129,8 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     registerJobHandler('distill', async (job, signal) => {
       const liveCfg = getLiveCfg();
       const payload = job.payload ? JSON.parse(job.payload) : {};
-      const res = await distillSession(currentDb, liveCfg, { sessionId: payload.sessionId, signal });
+      const cwd = payload.cwd || ctx?.agent?.cwd || process.cwd();
+      const res = await distillSession(currentDb, liveCfg, { sessionId: payload.sessionId, cwd, signal });
       if (!res.success) {
         return { action: 'failed', error: res.error || 'distill_failed', nonRetryable: true };
       }
@@ -138,6 +139,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
         if (nextBatch) {
           scheduler.enqueue('distill', `${nextBatch.sessionId}:seq:${nextBatch.minSeq}`, {
             sessionId: nextBatch.sessionId,
+            cwd,
           });
         }
       }
@@ -232,7 +234,8 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
         const liveCfg = getLiveCfg();
         const eligible = findEligibleDistillSession(currentDb, liveCfg, true, evt.sessionId);
         const minSeq = eligible?.minSeq ?? 1;
-        scheduler.enqueue('distill', `${evt.sessionId}:seq:${minSeq}`, { sessionId: evt.sessionId });
+        const rawCwd = evt?.agent?.cwd || ctx?.agent?.cwd || process.cwd();
+        scheduler.enqueue('distill', `${evt.sessionId}:seq:${minSeq}`, { sessionId: evt.sessionId, cwd: rawCwd });
       }
     }) : undefined;
 
@@ -287,7 +290,8 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
           const agent = exec?.agent || ctx.agent;
           const cwd = agent?.cwd || process.cwd();
           const sessId = agent?.session?.id || 'default_session';
-          return tools.expand(args, { workspaceId: cwd, sessionId: sessId });
+          const turn = agent?.position?.turn ?? 0;
+          return tools.expand(args, { workspaceId: cwd, sessionId: sessId, turn });
         },
       });
 
@@ -480,6 +484,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
                 if (eligible) {
                   scheduler.enqueue('distill', `${eligible.sessionId}:seq:${eligible.minSeq}`, {
                     sessionId: eligible.sessionId,
+                    cwd: rawCwd,
                   });
                 }
               }
@@ -514,6 +519,9 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
           if (unlistenPressure) unlistenPressure();
           unlistenPreStep();
           scheduler.stop();
+          for (const kind of ['distill', 'reflect', 'consolidate', 'maintain', 'repair', 'evolve']) {
+            unregisterJobHandler(kind);
+          }
           promptSections?.disposeAll();
           if (queue) {
             queue

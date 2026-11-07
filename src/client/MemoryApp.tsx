@@ -178,9 +178,12 @@ export function MemoryApp() {
     });
   }, [memories, filterQuery]);
 
-  const activeCount = (statsData?.stats.active ?? 0) + (statsData?.stats.frozen ?? 0);
+  const activeCount =
+    (statsData?.stats.active ?? statsData?.stats.byStatus?.active ?? 0) +
+    (statsData?.stats.frozen ?? statsData?.stats.byStatus?.frozen ?? 0);
   const totalCount = statsData?.stats.total ?? 0;
-  const candidateCount = statsData?.stats.candidate ?? 0;
+  const candidateCount =
+    statsData?.stats.candidate ?? statsData?.stats.byStatus?.candidate ?? 0;
 
   const avgTokens = statsData?.recentTelemetry.avgTokens ?? 0;
   const dynamicBudget = statsData?.dynamicBudgetTokens ?? 1600;

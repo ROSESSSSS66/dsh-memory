@@ -12,10 +12,10 @@ export interface StrategyRecord {
   promoted_at: number | null;
 }
 
-let cachedActive: { version: number; config: StrategyConfig } | null = null;
+let cachedActiveByDb = new WeakMap<Db, { version: number; config: StrategyConfig }>();
 
 export function clearStrategyCache(): void {
-  cachedActive = null;
+  cachedActiveByDb = new WeakMap<Db, { version: number; config: StrategyConfig }>();
 }
 
 /**
@@ -79,8 +79,9 @@ export function initDefaultStrategy(
     }
   });
 
-  cachedActive = { version: 1, config: v1Config };
-  return cachedActive;
+  const entry = { version: 1, config: v1Config };
+  cachedActiveByDb.set(db, entry);
+  return entry;
 }
 
 /**
@@ -90,6 +91,7 @@ export function getActiveStrategy(
   db: Db,
   cfg: PluginConfig = DEFAULTS
 ): { version: number; config: StrategyConfig } {
+  const cachedActive = cachedActiveByDb.get(db);
   if (cachedActive) {
     // 每次读取仍按当前配置约束动态预算上限
     const clamped = validateAndClampStrategy(cachedActive.config, cfg);
@@ -107,8 +109,9 @@ export function getActiveStrategy(
   try {
     const parsed = JSON.parse(row.config) as StrategyConfig;
     const clamped = validateAndClampStrategy(parsed, cfg);
-    cachedActive = { version: row.version, config: clamped };
-    return cachedActive;
+    const entry = { version: row.version, config: clamped };
+    cachedActiveByDb.set(db, entry);
+    return entry;
   } catch {
     return initDefaultStrategy(db, cfg);
   }
@@ -165,7 +168,7 @@ export function promoteStrategy(
     );
   });
 
-  cachedActive = { version: newVersion, config: clamped };
+  cachedActiveByDb.set(db, { version: newVersion, config: clamped });
 }
 
 /**

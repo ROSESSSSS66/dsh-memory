@@ -91,7 +91,13 @@ export function loadLabEvalCases(db: Db, cfg: PluginConfig = DEFAULTS): EvalCase
   for (const r of rows) {
     try {
       const parsed = JSON.parse(r.payload) as EvalCase;
-      if (parsed.id && parsed.query && parsed.expect) {
+      if (
+        parsed.id &&
+        parsed.query &&
+        parsed.expect &&
+        Array.isArray(parsed.setup) &&
+        (parsed.setup.length > 0 || (parsed.expect.include?.length ?? 0) === 0)
+      ) {
         dbCases.push(parsed);
       }
     } catch {}
@@ -266,25 +272,29 @@ export function checkSentinelAndRollback(
     return { rolledBack: false, reason: 'Active strategy has no parent or promotion timestamp' };
   }
 
-  // 统计晋升后的纠正率 (最多取 windowSize 条)
+  // 统计晋升后的纠正率 (最多取最近 windowSize 条)
   const afterRow = db.get<{ avg_corr: number | null; cnt: number }>(
     `SELECT AVG(correction) as avg_corr, COUNT(*) as cnt
-     FROM turn_metrics
-     WHERE strategy_v = ?
-     ORDER BY created_at DESC LIMIT ?`,
-    [active.version, windowSize]
+     FROM (
+       SELECT correction FROM turn_metrics
+       WHERE strategy_v = ? AND created_at >= ?
+       ORDER BY created_at DESC LIMIT ?
+     )`,
+    [active.version, active.promoted_at, windowSize]
   );
 
   if (!afterRow || afterRow.cnt < 10) {
     return { rolledBack: false, reason: 'Insufficient post-promotion turns to evaluate' };
   }
 
-  // 统计晋升前 (parent 版本) 的纠正率
+  // 统计晋升前 (parent 版本) 的纠正率 (最多取最近 windowSize 条)
   const beforeRow = db.get<{ avg_corr: number | null; cnt: number }>(
     `SELECT AVG(correction) as avg_corr, COUNT(*) as cnt
-     FROM turn_metrics
-     WHERE strategy_v = ?
-     ORDER BY created_at DESC LIMIT ?`,
+     FROM (
+       SELECT correction FROM turn_metrics
+       WHERE strategy_v = ?
+       ORDER BY created_at DESC LIMIT ?
+     )`,
     [active.parent, windowSize]
   );
 

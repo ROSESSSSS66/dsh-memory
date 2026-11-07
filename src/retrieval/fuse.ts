@@ -247,7 +247,12 @@ export function fuseCandidates(
         synergyWeightMap.set(edge.seedId, Math.max(synergyWeightMap.get(edge.seedId) || 0, fanWeight));
         synergyWeightMap.set(edge.neighborId, Math.max(synergyWeightMap.get(edge.neighborId) || 0, fanWeight));
         recordSeedConvergence(edge.neighborId, edge.seedId);
-        recordSeedConvergence(edge.seedId, edge.neighborId);
+        const hopPenalty = edge.hop === 2 ? 2 : 0;
+        const rrfContrib = (0.65 * fanWeight) / (strategy.rrfK + edge.seedRank + 2 + hopPenalty);
+        graphBonusRrf.set(
+          edge.neighborId,
+          (graphBonusRrf.get(edge.neighborId) || 0) + rrfContrib
+        );
         continue;
       }
 

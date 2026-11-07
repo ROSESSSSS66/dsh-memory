@@ -18,7 +18,8 @@ import {
   rollback,
   addRelation,
 } from '../core/writer.js';
-import { redactSecrets } from '../core/privacy.js';
+import { redactSecrets, isOfflineEndpointAllowed } from '../core/privacy.js';
+import { workspaceId } from '../core/scope.js';
 import { serializeMemoryToMarkdown } from '../core/markdown.js';
 import { estimateTokens, budgetTokens } from '../core/tokens.js';
 import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
@@ -132,20 +133,35 @@ function sendJson(res: ServerResponse, statusCode: number, data: unknown) {
   res.end(JSON.stringify(data));
 }
 
+function stripEmbedding(m: MemoryRecord | null | undefined) {
+  if (!m) return null;
+  const { embedding: _emb, ...rest } = m;
+  return rest;
+}
+
 function readBodyJson(req: IncomingMessage): Promise<any> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let tooLarge = false;
     req.on('data', (chunk) => {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += buf.length;
-      if (size > 1024 * 1024) return; // 1MB limit
+      if (size > 1024 * 1024) {
+        tooLarge = true;
+        return; // 1MB limit
+      }
       chunks.push(buf);
     });
     req.on('end', () => {
+      if (tooLarge) {
+        resolve({});
+        return;
+      }
       try {
         const raw = Buffer.concat(chunks).toString('utf8');
-        resolve(raw ? JSON.parse(raw) : {});
+        const parsed = raw ? JSON.parse(raw) : {};
+        resolve(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {});
       } catch {
         resolve({});
       }
@@ -190,7 +206,9 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
         // 1. Overview & Stats
         if (subPath === '/overview' || subPath === '/stats') {
-          const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
+          const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
+          const wsId = rawWs ? workspaceId(rawWs) : undefined;
+          const defaultWsId = wsId || workspaceId(process.cwd());
           runThrottledAutonomousCycle(wsId);
           const st = stats(db, wsId);
           const ledger = getLedgerUsage(db, undefined, cfg);
@@ -218,14 +236,21 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const coreBlocks = getAllCoreMemories(db, { workspaceId: wsId });
           const stableLayer = renderStableLayer(
             db,
-            { workspaceId: wsId || process.cwd() },
+            { workspaceId: defaultWsId },
             cfg,
             activeStrat.version
           );
 
           sendJson(res, 200, {
             ok: true,
-            stats: st,
+            stats: {
+              ...st,
+              active: st.byStatus.active || 0,
+              candidate: st.byStatus.candidate || 0,
+              frozen: st.byStatus.frozen || 0,
+              superseded: st.byStatus.superseded || 0,
+              archived: st.byStatus.archived || 0,
+            },
             dynamicBudgetTokens: cfg.dynamicBudgetTokens || 1600,
             stableBudgetTokens: cfg.stableBudgetTokens || 600,
             stableLayerTokens: stableLayer.stableTokens,
@@ -250,7 +275,9 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
         // 1.2. Core Memory Scratchpad (GET & POST — supports both /core-memory and /core)
         if (subPath === '/core-memory' || subPath === '/core') {
-          const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
+          const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
+          const wsId = rawWs ? workspaceId(rawWs) : undefined;
+          const defaultWsId = wsId || workspaceId(process.cwd());
           if (req.method === 'GET') {
             const entries = getAllCoreMemories(db, { workspaceId: wsId });
             const entryMap = new Map(entries.map((e) => [e.block, e]));
@@ -282,7 +309,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             const activeStrat = getActiveStrategy(db, cfg);
             const stableLayer = renderStableLayer(
               db,
-              { workspaceId: wsId || process.cwd() },
+              { workspaceId: defaultWsId },
               cfg,
               activeStrat.version
             );
@@ -366,7 +393,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             'SELECT id, kind, key, status, attempts, error AS last_error, created_at, finished_at AS updated_at FROM jobs ORDER BY id DESC LIMIT 20'
           );
 
-          const ledger = getLedgerUsage(db, 'enforce');
+          const ledger = getLedgerUsage(db, undefined, cfg);
 
           sendJson(res, 200, {
             ok: true,
@@ -382,12 +409,13 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         // 1.4. Recall Sandbox & Context Window Inspector (Letta ADE + Langfuse + Mem0 Audit)
         if (subPath === '/sandbox') {
           let queryText = (reqUrl.searchParams.get('q') || '').trim();
-          let wsId = reqUrl.searchParams.get('workspaceId') || '';
+          let rawWs = reqUrl.searchParams.get('workspaceId') || '';
           if (req.method === 'POST') {
             const body = await readBodyJson(req);
             if (typeof body.query === 'string') queryText = body.query.trim();
-            if (typeof body.workspaceId === 'string') wsId = body.workspaceId.trim();
+            if (typeof body.workspaceId === 'string') rawWs = body.workspaceId.trim();
           }
+          const wsId = rawWs ? workspaceId(rawWs) : workspaceId(process.cwd());
 
           const activeStrat = getActiveStrategy(db, cfg);
           const stableLayer = renderStableLayer(
@@ -494,9 +522,11 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
         // 1.5. Graph Topology (汲取自 qwert702/dsh-memory 与 omdsh-dev/dsh-mnemon Obsidian 拓扑图)
         if (subPath === '/graph') {
-          const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
+          const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
+          const wsId = rawWs ? workspaceId(rawWs) : undefined;
           const centerId = reqUrl.searchParams.get('centerId') || undefined;
-          const limit = parseInt(reqUrl.searchParams.get('limit') || '80', 10);
+          const rawLimit = parseInt(reqUrl.searchParams.get('limit') || '80', 10);
+          const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(200, rawLimit)) : 80;
           if (centerId) {
             const sub = getSubgraph(db, centerId, { workspaceId: wsId, hops: 2, maxNodes: limit });
             sendJson(res, 200, { ok: true, graph: sub || { nodes: [], links: [], stats: { totalNodes: 0, memoryNodes: 0, entityNodes: 0, totalLinks: 0 } } });
@@ -509,15 +539,16 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
         // 1.6. Memory Health & Conflict Doctor (v0.3.0)
         if (subPath === '/health') {
-          const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
+          const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
+          const wsId = rawWs ? workspaceId(rawWs) : undefined;
+          runThrottledAutonomousCycle(wsId);
           let health = auditMemoryHealth(db, { workspaceId: wsId });
           if (
             !health.ftsConsistent ||
             (health.missingEmbeddingsCount ?? 0) > 0 ||
             health.duplicatePairs.length > 0 ||
             health.contradictions.length > 0 ||
-            (health.orphanMemoriesCount ?? 0) > 0 ||
-            health.counts.candidate > 0
+            (health.orphanMemoriesCount ?? 0) > 0
           ) {
             try {
               const healed = autoHealMemoryHealth(db, { workspaceId: wsId });
@@ -539,7 +570,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const clean = redactSecrets(rawContent);
           const type = normalizeMemoryType(body.type);
           const scope = (body.scope === 'workspace' ? 'workspace' : 'global') as 'workspace' | 'global';
-          const wsId = body.workspaceId || undefined;
+          const wsId = body.workspaceId ? workspaceId(body.workspaceId) : undefined;
           const slotKey = typeof body.slot_key === 'string' && body.slot_key.trim() ? body.slot_key.trim() : undefined;
           const dryRun = body.dryRun !== false;
 
@@ -560,7 +591,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           if (dryRun) {
             const decision = reconcileCandidate(db, candidateInput);
-            const targetMemory = decision.targetId ? get(db, decision.targetId) || null : null;
+            const targetMemory = decision.targetId ? stripEmbedding(get(db, decision.targetId)) : null;
             sendJson(res, 200, {
               ok: true,
               dryRun: true,
@@ -571,7 +602,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
 
           const resRec = reconcileAndUpsert(db, candidateInput, Date.now());
-          const targetMemory = (resRec as any).id ? get(db, (resRec as any).id) || null : null;
+          const targetMemory = (resRec as any).id ? stripEmbedding(get(db, (resRec as any).id)) : null;
           sendJson(res, 200, {
             ok: true,
             dryRun: false,
@@ -590,9 +621,12 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const scope = (reqUrl.searchParams.get('scope') || '') as any;
           const excludeCoreParam = reqUrl.searchParams.get('excludeCore');
           const excludeCore = excludeCoreParam === '1' || excludeCoreParam === 'true';
-          const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
-          const limit = parseInt(reqUrl.searchParams.get('limit') || '50', 10);
-          const offset = parseInt(reqUrl.searchParams.get('offset') || '0', 10);
+          const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
+          const wsId = rawWs ? workspaceId(rawWs) : undefined;
+          const rawLimit = parseInt(reqUrl.searchParams.get('limit') || '50', 10);
+          const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(200, rawLimit)) : 50;
+          const rawOffset = parseInt(reqUrl.searchParams.get('offset') || '0', 10);
+          const offset = Number.isFinite(rawOffset) ? Math.max(0, rawOffset) : 0;
 
           let sql = 'SELECT * FROM memories WHERE 1=1';
           const params: unknown[] = [];
@@ -919,7 +953,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               pin(db, resUpsert.id, 'user', now);
             }
 
-            const record = get(db, resUpsert.id);
+            const record = stripEmbedding(get(db, resUpsert.id));
             sendJson(res, 200, { ok: true, memory: record });
             return;
           }
@@ -1091,7 +1125,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
         // 4.5. Export memories (GET)
         if (subPath === '/export') {
-          const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
+          const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
+          const wsId = rawWs ? workspaceId(rawWs) : undefined;
           const format = reqUrl.searchParams.get('format') || 'json';
           let sql = 'SELECT * FROM memories WHERE 1=1';
           const params: unknown[] = [];
@@ -1222,6 +1257,9 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               }
               if (typeof body.offlineLLM.baseURL === 'string') {
                 patch.offlineLLM.baseURL = body.offlineLLM.baseURL.trim();
+                if (patch.offlineLLM.baseURL && typeof body.offlineLLM.useDshLlm !== 'boolean') {
+                  patch.offlineLLM.useDshLlm = false;
+                }
               }
               if (typeof body.offlineLLM.model === 'string') {
                 patch.offlineLLM.model = body.offlineLLM.model.trim();
@@ -1301,7 +1339,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               patch.distillMaxInputTokens = Math.floor(body.distillMaxInputTokens);
             }
 
-            const updated = saveConfigToDb(db, patch);
+            const updated = saveConfigToDb(db, patch, cfg);
             Object.assign(cfg, updated);
 
             sendJson(res, 200, {
@@ -1318,6 +1356,28 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const baseURL = (body.baseURL || cfg.offlineLLM.baseURL || '').trim();
           const model = (body.model || cfg.offlineLLM.model || 'deepseek-chat').trim();
 
+          if (!baseURL) {
+            sendJson(res, 400, { ok: false, error: '请先填写接口 Base URL' });
+            return;
+          }
+
+          let parsedTargetUrl: URL;
+          try {
+            parsedTargetUrl = new URL(baseURL);
+            if (parsedTargetUrl.protocol !== 'http:' && parsedTargetUrl.protocol !== 'https:') {
+              sendJson(res, 400, { ok: false, error: '仅支持 HTTP/HTTPS 协议端点' });
+              return;
+            }
+          } catch {
+            sendJson(res, 400, { ok: false, error: 'Base URL 格式不合法' });
+            return;
+          }
+
+          const isSameConfiguredEndpoint =
+            !body.baseURL ||
+            body.baseURL.trim() === (cfg.offlineLLM.baseURL || '').trim() ||
+            isOfflineEndpointAllowed(baseURL, cfg.privacy.allowedOfflineEndpoints, true);
+
           let apiKey = '';
           if (
             typeof body.apiKey === 'string' &&
@@ -1325,18 +1385,16 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             !body.apiKey.includes('****')
           ) {
             apiKey = body.apiKey.trim();
-          } else {
+          } else if (isSameConfiguredEndpoint) {
             apiKey = cfg.offlineLLM.apiKey || '';
           }
 
           const envName = (body.apiKeyEnv || cfg.offlineLLM.apiKeyEnv || '').trim();
-          if (!apiKey && envName && process.env[envName]) {
+          const isSafeEnvName =
+            envName === cfg.offlineLLM.apiKeyEnv ||
+            /^[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET)[A-Z0-9_]*$/i.test(envName);
+          if (!apiKey && envName && isSafeEnvName && isSameConfiguredEndpoint && process.env[envName]) {
             apiKey = process.env[envName]!;
-          }
-
-          if (!baseURL) {
-            sendJson(res, 400, { ok: false, error: '请先填写接口 Base URL' });
-            return;
           }
 
           const chosenProtocol = body.protocol || cfg.offlineLLM.protocol || 'chat/completions';

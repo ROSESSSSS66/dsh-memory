@@ -3,7 +3,7 @@ import { DEFAULTS, type PluginConfig } from '../config.js';
 import type { QueryPlan } from '../types.js';
 
 export const TEMPORAL_INTENT_REGEX =
-  /(?:昨天|今天|前天|上周|上个月|最近|之前|以前|上次|刚才|何时|什么时候|几号|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}月\d{1,2}[日号]|yesterday|today|last (?:week|month|time)|recently|when|before)/i;
+  /(?:昨天|今天|前天|前几天|这几天|上周|上个月|最近|之前|以前|上次|刚才|何时|什么时候|几号|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}月\d{1,2}[日号]|yesterday|today|last (?:week|month|time)|recently|when|before)/i;
 
 export const CAUSAL_INTENT_REGEX =
   /(?:为什么|原因|导致|因为|怎么回事|为何|根因|why|because|cause|reason)/i;
@@ -28,6 +28,7 @@ export const QUERY_PROMPT_WORDS = new Set([
 ]);
 
 const CJK_PARTICLE_BOUNDARY_REGEX = /^[的是了吗呢吧啊么哪怎何]|[\s]*[的是了吗呢吧啊么哪怎何]$/;
+const CJK_VALID_COMPOUNDS = new Set(['目的', '几何', '了解', '任何', '的确', '正确', '明确', '准确']);
 
 /**
  * 解析查询中的时间区间
@@ -88,8 +89,8 @@ export function parseTimeRange(text: string, now: number): { from: number; to: n
     return { from: now - 14 * 86400000, to: now - 7 * 86400000 };
   }
 
-  // 7. 最近 / 这几天 / recently
-  if (/(?:最近|这几天|recently)/i.test(text)) {
+  // 7. 最近 / 这几天 / 前几天 / recently
+  if (/(?:最近|这几天|前几天|recently)/i.test(text)) {
     return { from: now - 7 * 86400000, to: now };
   }
 
@@ -134,7 +135,12 @@ export function buildQueryPlan(input: {
     return !QUERY_PROMPT_WORDS.has(lower) && !STOPWORDS.has(lower);
   });
   const refinedContentTokens = baseContentTokens.filter((t) => {
-    if (t.length === 2 && /[\u4e00-\u9fa5]{2}/.test(t) && CJK_PARTICLE_BOUNDARY_REGEX.test(t)) {
+    if (
+      t.length === 2 &&
+      /[\u4e00-\u9fa5]{2}/.test(t) &&
+      !CJK_VALID_COMPOUNDS.has(t) &&
+      CJK_PARTICLE_BOUNDARY_REGEX.test(t)
+    ) {
       return false;
     }
     return true;

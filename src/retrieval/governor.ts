@@ -1,4 +1,4 @@
-import type { MemoryRecord } from '../types.js';
+import type { Db, MemoryRecord } from '../types.js';
 import type { ScoredCandidate } from './fuse.js';
 import { budgetTokens } from '../core/tokens.js';
 import { tokenSet, jaccard } from '../core/text.js';
@@ -47,6 +47,8 @@ export interface GovernOptions {
   alreadyInjected: Set<string>;
   strategyVersion?: number;
   layer?: 'dynamic' | 'stable';
+  db?: Db;
+  scopeCtx?: { workspaceId: string; sessionId?: string };
 }
 
 export interface SelectedItem {
@@ -142,7 +144,12 @@ export function govern(
   const selectedFeatures: Array<{ tokens: Set<string>; vec: Float32Array | null; type: string }> = [];
 
   function testBudget(items: RenderItem[]): number {
-    const text = render(items, { strategyVersion, layer });
+    const text = render(items, {
+      strategyVersion,
+      layer,
+      db: opts.db,
+      scopeCtx: opts.scopeCtx,
+    });
     return budgetTokens(text);
   }
 

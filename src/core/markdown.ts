@@ -500,18 +500,66 @@ export function importMemoryBank(
       if (!sec) continue;
 
       const headerLine = sec.split('\n')[0].trim();
-      const body = sec.slice(headerLine.length).replace(/^---[\s\S]*?---/, '').replace(/---\s*$/, '').trim();
+      const rawBodyLines = sec
+        .slice(headerLine.length)
+        .replace(/^---[\s\S]*?---/, '')
+        .replace(/---\s*$/, '')
+        .trim()
+        .split('\n');
+
+      let parsedSlotKey: string | undefined;
+      const contentLines: string[] = [];
+      let inLeadingMeta = true;
+      for (const line of rawBodyLines) {
+        const trimmedLine = line.trim();
+        if (inLeadingMeta) {
+          if (!trimmedLine) continue;
+          const slotMatch = /^-\s*\*\*槽位\*\*:\s*`([^`]+)`/.exec(trimmedLine);
+          if (slotMatch) {
+            parsedSlotKey = slotMatch[1].trim();
+            continue;
+          }
+          if (/^-\s*\*\*(?:ID|重要度|置信度|更新时间)\*\*:/.test(trimmedLine)) {
+            continue;
+          }
+          inLeadingMeta = false;
+        }
+        contentLines.push(line);
+      }
+
+      const body = contentLines.join('\n').trim();
       if (!body) continue;
+
+      let parsedType: MemoryType = item.defaultType;
+      const typeMatch = /^\[([A-Z_]+)(?:\s+[^\]]+)?\]/i.exec(headerLine);
+      if (typeMatch) {
+        const candidateType = typeMatch[1].toLowerCase() as MemoryType;
+        if (
+          [
+            'episodic',
+            'semantic',
+            'procedural',
+            'belief',
+            'preference',
+            'goal',
+            'failure',
+            'meta',
+          ].includes(candidateType)
+        ) {
+          parsedType = candidateType;
+        }
+      }
 
       const cleanSummary = headerLine.replace(/^\[.*?\]\s*/, '').trim();
 
       const upsertRes = upsertCandidate(
         db,
         {
-          type: item.defaultType,
+          type: parsedType,
           content: body,
           summary: cleanSummary.slice(0, 80),
-          scope: item.defaultType === 'preference' ? 'user' : 'workspace',
+          slot_key: parsedSlotKey,
+          scope: parsedType === 'preference' ? 'user' : 'workspace',
           workspaceId: wsId,
           source_kind: 'user',
           confidence: 0.9,

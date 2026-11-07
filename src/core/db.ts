@@ -84,6 +84,7 @@ export function openDb(dbPath: string = ':memory:'): Db {
         } catch (err) {
           try {
             rawDb.exec(`ROLLBACK TO SAVEPOINT ${sp};`);
+            rawDb.exec(`RELEASE SAVEPOINT ${sp};`);
           } catch {}
           savepointDepth--;
           throw err;

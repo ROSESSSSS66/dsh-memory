@@ -221,20 +221,29 @@ export async function handlePreStep(
       });
     });
 
-    // 10. 构造注入消息并追加到 decision.messages 尾部
-    const memoryMsg = {
-      id: crypto.randomUUID(),
-      role: 'user',
-      content: [{ type: 'text', text: recallResult.block }],
-      source: {
-        kind: 'plugin',
-        plugin: 'dsh-memory',
-        memoryRefs: recallResult.items.map((it) => ({
+    // 10. 构造注入消息并追加到 decision.messages 尾部（遵循 §A.6.3 宿主消息不可变性契约）
+    const frozenContent = Object.freeze([
+      Object.freeze({ type: 'text' as const, text: recallResult.block }),
+    ]);
+    const frozenMemoryRefs = Object.freeze(
+      recallResult.items.map((it) =>
+        Object.freeze({
           id: it.memory.id,
           contentRev: it.memory.content_rev,
-        })),
-      },
-    };
+        })
+      )
+    );
+    const frozenSource = Object.freeze({
+      kind: 'plugin' as const,
+      plugin: 'dsh-memory',
+      memoryRefs: frozenMemoryRefs,
+    });
+    const memoryMsg = Object.freeze({
+      id: crypto.randomUUID(),
+      role: 'user' as const,
+      content: frozenContent,
+      source: frozenSource,
+    });
 
     return {
       ...decision,

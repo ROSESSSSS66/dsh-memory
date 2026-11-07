@@ -3,7 +3,12 @@ import { tokenSet, jaccard, contentHash, extractEntities } from '../core/text.js
 import { scopeFilterSQL, workspaceId as resolveWorkspaceId } from '../core/scope.js';
 import { upsertCandidate, saveVersionSnapshot, addRelation, invalidateMemory } from '../core/writer.js';
 import { resolveFixedSlot } from '../ingest/rules.js';
-import { computeLocalEmbedding, cosineSimilarity } from '../core/vector.js';
+import {
+  computeLocalEmbedding,
+  cosineSimilarity,
+  getOrComputeEmbedding,
+  removeCachedRuntimeEmbedding,
+} from '../core/vector.js';
 
 const NEGATION_PATTERNS = [
   /不再使用/i,
@@ -132,21 +137,21 @@ export function reconcileCandidate(
   let bestMatch: MemoryRecord | null = null;
   let maxJaccard = 0;
   let maxHybridSim = 0;
+  let bestScore = 0;
 
   for (const mem of candidateMemories) {
     const memText = mem.content + ' ' + (mem.summary || '');
     const memTokens = tokenSet(memText);
     const jacSim = jaccard(candTokens, memTokens);
-    const vecSim = cosineSimilarity(candVec, computeLocalEmbedding(memText));
+    const memVec = getOrComputeEmbedding(mem) ?? computeLocalEmbedding(memText);
+    const vecSim = cosineSimilarity(candVec, memVec);
     const hybridSim = 0.55 * jacSim + 0.45 * vecSim;
-    if (hybridSim > maxHybridSim || jacSim > maxJaccard) {
-      if (hybridSim >= maxHybridSim) {
-        bestMatch = mem;
-        maxHybridSim = hybridSim;
-      }
-      if (jacSim > maxJaccard) {
-        maxJaccard = jacSim;
-      }
+    const combinedScore = Math.max(hybridSim, jacSim);
+    if (combinedScore > bestScore) {
+      bestScore = combinedScore;
+      bestMatch = mem;
+      maxHybridSim = hybridSim;
+      maxJaccard = jacSim;
     }
   }
 
@@ -226,6 +231,12 @@ export function applyReconciliation(
 
       case 'DELETE': {
         if (decision.targetId) {
+          const target = db.get<MemoryRecord>('SELECT status FROM memories WHERE id = ?', [
+            decision.targetId,
+          ]);
+          if (target?.status === 'frozen') {
+            return { action: 'rejected', reason: 'target_is_frozen' };
+          }
           invalidateMemory(db, decision.targetId, decision.reason, candidate.actor, now);
           return { action: 'superseded', id: decision.targetId, oldId: decision.targetId };
         }
@@ -236,6 +247,9 @@ export function applyReconciliation(
         if (decision.targetId) {
           const oldMem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [decision.targetId]);
           if (oldMem) {
+            if (oldMem.status === 'frozen') {
+              return { action: 'rejected', reason: 'target_is_frozen' };
+            }
             // 先将旧记忆归档并标记 superseded
             saveVersionSnapshot(db, oldMem, 'supersede', candidate.actor, now);
             db.run(
@@ -244,6 +258,7 @@ export function applyReconciliation(
                WHERE id = ?`,
               [now, now, oldMem.id]
             );
+            removeCachedRuntimeEmbedding(oldMem.id);
 
             // 插入新记忆
             const insertRes = upsertCandidate(db, candidate, now);
@@ -251,6 +266,13 @@ export function applyReconciliation(
               addRelation(db, insertRes.id, oldMem.id, 'supersedes', now);
               return { action: 'superseded', id: insertRes.id, oldId: oldMem.id };
             }
+            // 若新记忆被拒绝，恢复原记录状态避免丢失有效记忆
+            db.run(
+              `UPDATE memories
+               SET status = ?, valid_to = ?, version = ?, updated_at = ?
+               WHERE id = ?`,
+              [oldMem.status, oldMem.valid_to, oldMem.version, oldMem.updated_at, oldMem.id]
+            );
             return insertRes;
           }
         }

@@ -115,20 +115,38 @@ export function isOfflineEndpointAllowed(
 
   try {
     const targetUrl = new URL(endpoint);
-    for (const allowed of allowedEndpoints) {
-      try {
-        const allowedUrl = new URL(allowed);
-        if (targetUrl.origin === allowedUrl.origin) {
-          return true;
-        }
-      } catch {
-        if (allowed === endpoint || allowed === targetUrl.host) {
+    if (
+      (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') ||
+      !targetUrl.origin ||
+      targetUrl.origin === 'null'
+    ) {
+      return false;
+    }
+
+    for (const rawAllowed of allowedEndpoints) {
+      const allowed = (rawAllowed || '').trim();
+      if (!allowed) continue;
+
+      if (/^https?:\/\//i.test(allowed)) {
+        try {
+          const allowedUrl = new URL(allowed);
+          if (allowedUrl.origin && allowedUrl.origin !== 'null' && targetUrl.origin === allowedUrl.origin) {
+            return true;
+          }
+        } catch {}
+      } else {
+        const lowerAllowed = allowed.toLowerCase();
+        if (
+          allowed === endpoint ||
+          lowerAllowed === targetUrl.host.toLowerCase() ||
+          lowerAllowed === targetUrl.hostname.toLowerCase()
+        ) {
           return true;
         }
       }
     }
   } catch {
-    return allowedEndpoints.includes(endpoint);
+    return false;
   }
 
   return false;

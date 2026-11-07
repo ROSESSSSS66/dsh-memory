@@ -71,7 +71,7 @@ export async function runReflectJob(
       systemPrompt: PROMPT_REFLECT.system,
       userPrompt,
       maxOutputTokens: PROMPT_REFLECT.maxOutputTokens,
-      cwd: wsId,
+      cwd: cwd || wsId,
       workspaceId: wsId,
       signal,
       fetchFn,

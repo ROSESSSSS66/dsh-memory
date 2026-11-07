@@ -83,8 +83,8 @@ export function generateShortCodes(
         for (const m of memories) {
           const code = result.get(m.id)!;
           const row = db.get<{ cnt: number }>(
-            `SELECT COUNT(*) as cnt FROM memories WHERE id LIKE ? AND ${scope.sql} AND id != ?`,
-            [code + '%', ...scope.params, m.id]
+            `SELECT COUNT(*) as cnt FROM memories WHERE id >= ? AND id < ? AND ${scope.sql} AND id != ?`,
+            [code, code + '\uffff', ...scope.params, m.id]
           );
           if (row && row.cnt > 0) {
             hasCollision = true;

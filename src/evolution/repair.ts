@@ -127,12 +127,20 @@ export function executeRepair(
     for (let i = 0; i < validSources.length; i++) {
       const s = validSources[i];
       const seq = i + 1;
+      const originKind =
+        s.kind === 'tool_result' || s.kind === 'tool'
+          ? 'tool'
+          : s.kind === 'web'
+            ? 'web'
+            : s.kind === 'assistant_msg' || s.kind === 'assistant'
+              ? 'assistant'
+              : 'user';
       evidenceLedger.set(seq, {
         seq,
         original_seq: s.seq,
         session_id: s.session_id,
         kind: s.kind,
-        origin_kinds: [s.kind as any],
+        origin_kinds: [originKind],
         redacted_text: s.excerpt!,
         time: s.created_at || now,
       });
@@ -141,7 +149,12 @@ export function executeRepair(
     // 5. 渲染提示词
     const lines: string[] = [];
     for (const [seq, ev] of evidenceLedger.entries()) {
-      const tag = ev.kind === 'tool' ? 'T' : ev.kind === 'assistant' ? 'A' : 'U';
+      const tag =
+        ev.kind === 'tool_result' || ev.kind === 'tool'
+          ? 'T'
+          : ev.kind === 'assistant_msg' || ev.kind === 'assistant'
+            ? 'A'
+            : 'U';
       lines.push(`[${tag}#${seq}] ${ev.redacted_text}`);
     }
     const evidenceTranscript = lines.join('\n');
@@ -218,7 +231,10 @@ export function executeRepair(
           },
           now
         );
-        const candId = 'id' in res ? res.id : mem.id;
+        if (!('id' in res)) {
+          return;
+        }
+        const candId = res.id;
 
         // 建立 derived_from 关系
         db.run(
@@ -269,12 +285,14 @@ export function executeRepair(
           }
         }
 
-        db.run(
-          `INSERT INTO repair_proposals (
-            job_id, memory_id, content_rev, action, candidate_ids, reason, status, created_at, expires_at
-          ) VALUES (?, ?, ?, 'split', ?, ?, 'candidate', ?, ?)`,
-          [job.id, mem.id, mem.content_rev, JSON.stringify(candIds), reason, now, expiresAt]
-        );
+        if (candIds.length >= 2) {
+          db.run(
+            `INSERT INTO repair_proposals (
+              job_id, memory_id, content_rev, action, candidate_ids, reason, status, created_at, expires_at
+            ) VALUES (?, ?, ?, 'split', ?, ?, 'candidate', ?, ?)`,
+            [job.id, mem.id, mem.content_rev, JSON.stringify(candIds), reason, now, expiresAt]
+          );
+        }
       } else if (action === 'invalidate') {
         db.run(
           `INSERT INTO repair_proposals (
@@ -349,6 +367,31 @@ export function approveRepairProposal(
         return { ok: false, reason: `Candidate ${candId} not found or not in candidate status` };
       }
 
+      // 检查候选槽位冲突（排除将要被取代的 target.id）
+      if (candidateMem.slot_key) {
+        const conflictingSlot = db.get<MemoryRecord>(
+          `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id NOT IN (?, ?)`,
+          [
+            candidateMem.scope,
+            candidateMem.workspace_id || '',
+            candidateMem.session_id || '',
+            candidateMem.slot_key,
+            target.id,
+            candId,
+          ]
+        );
+        if (conflictingSlot) {
+          if (conflictingSlot.status === 'frozen') {
+            return { ok: false, reason: `Slot '${candidateMem.slot_key}' is frozen` };
+          }
+          saveVersionSnapshot(db, conflictingSlot, 'repair_slot_supersede', approvedBy, now);
+          db.run(
+            `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+            [now, now, conflictingSlot.id]
+          );
+        }
+      }
+
       // 保存旧版本快照并标记 superseded
       saveVersionSnapshot(db, target, 'repair_revise', approvedBy, now);
       db.run(
@@ -381,8 +424,8 @@ export function approveRepairProposal(
       const seenSlots = new Set<string>();
       for (const cid of candidateIds) {
         const cMem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [cid]);
-        if (!cMem) {
-          return { ok: false, reason: `Candidate ${cid} not found` };
+        if (!cMem || cMem.status !== 'candidate') {
+          return { ok: false, reason: `Candidate ${cid} not found or not in candidate status` };
         }
         if (cMem.slot_key) {
           if (seenSlots.has(cMem.slot_key)) {
@@ -392,6 +435,28 @@ export function approveRepairProposal(
             };
           }
           seenSlots.add(cMem.slot_key);
+
+          const conflictingSlot = db.get<MemoryRecord>(
+            `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id NOT IN (?, ?)`,
+            [
+              cMem.scope,
+              cMem.workspace_id || '',
+              cMem.session_id || '',
+              cMem.slot_key,
+              target.id,
+              cid,
+            ]
+          );
+          if (conflictingSlot) {
+            if (conflictingSlot.status === 'frozen') {
+              return { ok: false, reason: `Slot '${cMem.slot_key}' is frozen` };
+            }
+            saveVersionSnapshot(db, conflictingSlot, 'repair_slot_supersede', approvedBy, now);
+            db.run(
+              `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+              [now, now, conflictingSlot.id]
+            );
+          }
         }
       }
 

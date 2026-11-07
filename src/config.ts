@@ -70,13 +70,30 @@ export type PluginConfig = Omit<typeof DEFAULTS, 'offlineLLM'> & {
   offlineLLM: OfflineLLMConfig;
 };
 
-export function validateConfig(raw: Partial<PluginConfig> = {}): PluginConfig {
+export function validateConfig(raw: Partial<PluginConfig> & Record<string, any> = {}): PluginConfig {
+  const rawOffline: Partial<OfflineLLMConfig> = { ...(raw.offlineLLM || {}) };
+  if (typeof raw.llmBaseUrl === 'string' && raw.llmBaseUrl.trim() && !rawOffline.baseURL) {
+    rawOffline.baseURL = raw.llmBaseUrl.trim();
+    if (rawOffline.useDshLlm === undefined) rawOffline.useDshLlm = false;
+  }
+  if (typeof raw.llmApiKey === 'string' && raw.llmApiKey.trim() && !rawOffline.apiKey) {
+    rawOffline.apiKey = raw.llmApiKey.trim();
+  }
+  if (typeof raw.llmModel === 'string' && raw.llmModel.trim() && !rawOffline.model) {
+    rawOffline.model = raw.llmModel.trim();
+  }
+
+  const rawPrivacy = { ...(raw.privacy || {}) };
+  if ((raw.llmBaseUrl || raw.llmApiKey) && rawPrivacy.offlineConsent === undefined) {
+    rawPrivacy.offlineConsent = true;
+  }
+
   const cfg: PluginConfig = {
     ...DEFAULTS,
     ...raw,
-    offlineLLM: { ...DEFAULTS.offlineLLM, ...(raw.offlineLLM || {}) },
+    offlineLLM: { ...DEFAULTS.offlineLLM, ...rawOffline },
     embedding: { ...DEFAULTS.embedding, ...(raw.embedding || {}) },
-    privacy: { ...DEFAULTS.privacy, ...(raw.privacy || {}) },
+    privacy: { ...DEFAULTS.privacy, ...rawPrivacy },
     excludeWorkspaces: Array.isArray(raw.excludeWorkspaces)
       ? [...raw.excludeWorkspaces]
       : [...DEFAULTS.excludeWorkspaces],
@@ -212,8 +229,12 @@ export function loadConfigFromDb(db: any, baseCfg: PluginConfig = DEFAULTS): Plu
   return baseCfg;
 }
 
-export function saveConfigToDb(db: any, patch: Partial<PluginConfig>): PluginConfig {
-  const current = loadConfigFromDb(db, DEFAULTS);
+export function saveConfigToDb(
+  db: any,
+  patch: Partial<PluginConfig>,
+  baseCfg: PluginConfig = DEFAULTS
+): PluginConfig {
+  const current = loadConfigFromDb(db, baseCfg);
   const merged: any = {
     ...current,
     ...patch,
