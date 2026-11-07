@@ -287,19 +287,29 @@ export function LLMConfigModal({
   };
 
   return (
-    <div className="dshm-backdrop" onClick={handleClose}>
+    <div
+      className="dshm-backdrop"
+      data-dsh-claude-quiet=""
+      onClick={handleClose}
+    >
       <div
         className="dshm-sheet"
         role="dialog"
         aria-modal="true"
         aria-label="模型配置"
+        style={{
+          width: 'min(520px, calc(100vw - 40px))',
+          maxWidth: 520,
+          margin: 'auto',
+          flex: '0 0 auto',
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="dshm-sheet-head">
           <h2 className="dshm-sheet-title">模型配置</h2>
           <span
             className="dshm-sheet-close"
-            role="presentation"
+            aria-hidden="true"
             title="保存并关闭 (Esc)"
             onClick={handleClose}
           >
@@ -344,10 +354,13 @@ export function LLMConfigModal({
                 display: 'grid',
                 gridTemplateColumns: '1.5fr 1fr',
                 gap: 10,
+                alignItems: 'end',
               }}
             >
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label className="dshm-settings-label">接口地址 (Base URL)</label>
+                <div className="dshm-settings-label-row">
+                  <label className="dshm-settings-label">接口地址 (Base URL)</label>
+                </div>
                 <input
                   className="dshm-field-input dshm-field-input--mono"
                   value={baseURL}
@@ -365,7 +378,9 @@ export function LLMConfigModal({
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label className="dshm-settings-label">协议类型</label>
+                <div className="dshm-settings-label-row">
+                  <label className="dshm-settings-label">协议类型</label>
+                </div>
                 <select
                   className="dshm-field-select"
                   value={protocol}
@@ -384,7 +399,9 @@ export function LLMConfigModal({
 
           {/* Row 3: Model ID */}
           <div className="dshm-settings-row">
-            <label className="dshm-settings-label">模型名称 (Model ID)</label>
+            <div className="dshm-settings-label-row">
+              <label className="dshm-settings-label">模型名称 (Model ID)</label>
+            </div>
             <input
               className="dshm-field-input dshm-field-input--mono"
               value={model}
@@ -403,6 +420,7 @@ export function LLMConfigModal({
                 display: 'grid',
                 gridTemplateColumns: '1.3fr 1fr',
                 gap: 10,
+                alignItems: 'end',
               }}
             >
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -437,7 +455,9 @@ export function LLMConfigModal({
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label className="dshm-settings-label">环境变量兜底</label>
+                <div className="dshm-settings-label-row">
+                  <label className="dshm-settings-label">环境变量兜底</label>
+                </div>
                 <input
                   className="dshm-field-input dshm-field-input--mono"
                   value={apiKeyEnv}
@@ -453,9 +473,18 @@ export function LLMConfigModal({
 
           {/* Row 5: Daily Guardrail Quotas */}
           <div className="dshm-settings-row">
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: 10,
+                alignItems: 'end',
+              }}
+            >
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label className="dshm-settings-label">每日调用上限 (次)</label>
+                <div className="dshm-settings-label-row">
+                  <label className="dshm-settings-label">每日调用上限 (次)</label>
+                </div>
                 <input
                   type="number"
                   min={1}
@@ -470,7 +499,9 @@ export function LLMConfigModal({
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label className="dshm-settings-label">每日 Token 上限</label>
+                <div className="dshm-settings-label-row">
+                  <label className="dshm-settings-label">每日 Token 上限</label>
+                </div>
                 <input
                   type="number"
                   min={1000}

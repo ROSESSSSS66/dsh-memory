@@ -53,6 +53,7 @@ export const MEMORY_STYLES = `
   overflow-x: hidden;
   background: var(--dshm-canvas);
   color: var(--dshm-ink-1);
+  color-scheme: dark;
   font-family: var(--dshm-font-sans);
   font-size: 13px;
   line-height: 1.5;
@@ -62,6 +63,7 @@ export const MEMORY_STYLES = `
 
 /* Light scheme fallback when host is in light mode and dsh-claude-style tokens are unset */
 :root:not([data-ds-dark-theme]) .dshm-root {
+  color-scheme: light;
   --dshm-canvas: var(--dsh-claude-canvas, var(--dsw-alias-bg-base, #ffffff));
   --dshm-panel: var(--dsh-claude-sidebar-canvas, var(--dsw-alias-bg-layer-1, #fafafa));
   --dshm-card: var(--dsh-claude-card, var(--dsw-alias-bg-overlay, #ffffff));
@@ -655,17 +657,23 @@ export const MEMORY_STYLES = `
 }
 
 /* ── 6. Claude Settings Sheet Modal (Auto-Save, Zero Extra Buttons) ── */
-.dshm-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: var(--dsh-claude-layer-float, 99999);
-  background: rgba(0, 0, 0, 0.52);
+.dshm-backdrop,
+.dshm-root .dshm-backdrop {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  max-height: none !important;
+  z-index: var(--dsh-claude-layer-takeover, var(--dsh-claude-layer-float, 99999)) !important;
+  background: rgba(0, 0, 0, 0.56);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 20px !important;
+  box-sizing: border-box !important;
   animation: dshmFade 150ms ease-out;
 }
 
@@ -674,10 +682,15 @@ export const MEMORY_STYLES = `
   to { opacity: 1; }
 }
 
-.dshm-sheet {
-  width: 100%;
-  max-width: 540px;
-  max-height: 86vh;
+.dshm-sheet,
+.dshm-root .dshm-backdrop .dshm-sheet,
+body[data-dsh-claude-style] .dshm-root .dshm-backdrop .dshm-sheet {
+  width: min(520px, calc(100vw - 40px)) !important;
+  max-width: 520px !important;
+  min-width: min(320px, calc(100vw - 40px));
+  max-height: min(86vh, 680px) !important;
+  margin: auto !important;
+  flex: 0 0 auto !important;
   overflow-y: auto;
   background: var(--dshm-card);
   border: 1px solid var(--dshm-border-2);
@@ -687,6 +700,7 @@ export const MEMORY_STYLES = `
   display: flex;
   flex-direction: column;
   gap: 14px;
+  box-sizing: border-box !important;
   animation: dshmSheetIn var(--dsh-claude-duration-open, 220ms) var(--dsh-claude-ease-settle, cubic-bezier(0.22, 1, 0.36, 1));
 }
 
@@ -756,11 +770,13 @@ export const MEMORY_STYLES = `
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: 20px;
 }
 
 .dshm-settings-label {
   font-size: 13px;
   font-weight: 500;
+  line-height: 20px;
   color: var(--dshm-ink-1);
 }
 
@@ -782,7 +798,13 @@ export const MEMORY_STYLES = `
   font-family: var(--dshm-font-sans);
   font-size: 12.5px;
   outline: none;
+  box-sizing: border-box;
   transition: border-color var(--dshm-timing);
+}
+
+.dshm-field-select option {
+  background: var(--dshm-card);
+  color: var(--dshm-ink-1);
 }
 
 .dshm-field-input--mono {
