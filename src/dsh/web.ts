@@ -23,7 +23,14 @@ import { serializeMemoryToMarkdown } from '../core/markdown.js';
 import { estimateTokens, budgetTokens } from '../core/tokens.js';
 import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
-import { backfillMissingEmbeddings } from '../core/vector.js';
+import { contentHash } from '../core/text.js';
+import {
+  backfillMissingEmbeddings,
+  computeLocalEmbedding,
+  encodeEmbeddingBlob,
+  primeRuntimeVectorCache,
+  removeCachedRuntimeEmbedding,
+} from '../core/vector.js';
 import { findConsolidationClusters, consolidateCluster } from '../evolution/consolidator.js';
 import { buildQueryPlan } from '../retrieval/query.js';
 import { recall } from '../retrieval/recall.js';
@@ -186,7 +193,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
           runThrottledAutonomousCycle(wsId);
           const st = stats(db, wsId);
-          const ledger = getLedgerUsage(db, 'enforce');
+          const ledger = getLedgerUsage(db, undefined, cfg);
 
           // Recent 7 days injection stats
           const sevenDaysAgo = Date.now() - 7 * 86400000;
@@ -503,7 +510,20 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         // 1.6. Memory Health & Conflict Doctor (v0.3.0)
         if (subPath === '/health') {
           const wsId = reqUrl.searchParams.get('workspaceId') || undefined;
-          const health = auditMemoryHealth(db, { workspaceId: wsId });
+          let health = auditMemoryHealth(db, { workspaceId: wsId });
+          if (
+            !health.ftsConsistent ||
+            (health.missingEmbeddingsCount ?? 0) > 0 ||
+            health.duplicatePairs.length > 0 ||
+            health.contradictions.length > 0 ||
+            (health.orphanMemoriesCount ?? 0) > 0 ||
+            health.counts.candidate > 0
+          ) {
+            try {
+              const healed = autoHealMemoryHealth(db, { workspaceId: wsId });
+              health = healed.report;
+            } catch {}
+          }
           sendJson(res, 200, { ok: true, health });
           return;
         }
@@ -781,6 +801,22 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 if (updates.length > 0) {
                   uParams.push(id);
                   db.run(`UPDATE memories SET ${updates.join(', ')} WHERE id = ?`, uParams);
+                  if (type !== undefined || slot_key !== undefined) {
+                    const updatedRow = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
+                    if (updatedRow) {
+                      const newHash = contentHash(updatedRow.type, updatedRow.content);
+                      const newVec = computeLocalEmbedding(
+                        `${updatedRow.summary}\n${updatedRow.content}${updatedRow.slot_key ? `\n${updatedRow.slot_key}` : ''}`
+                      );
+                      db.run('UPDATE memories SET hash = ?, embedding = ? WHERE id = ?', [
+                        newHash,
+                        encodeEmbeddingBlob(newVec),
+                        id,
+                      ]);
+                      removeCachedRuntimeEmbedding(id);
+                      primeRuntimeVectorCache(id, newHash, newVec);
+                    }
+                  }
                 }
               }
               sendJson(res, 200, { id, ...resEdit });
@@ -1117,13 +1153,26 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             }
             try {
               const clean = redactSecrets(raw.trim());
+              const cleanSummary =
+                typeof item.summary === 'string' && item.summary.trim()
+                  ? redactSecrets(item.summary.trim()).text
+                  : undefined;
               const upsertRes = upsertCandidate(
                 db,
                 {
                   type: normalizeMemoryType(item.type),
                   scope: item.scope || 'global',
+                  workspaceId: item.workspace_id || body.workspaceId || undefined,
+                  sessionId: item.session_id || undefined,
                   content: clean.text,
+                  summary: cleanSummary,
+                  slot_key: typeof item.slot_key === 'string' && item.slot_key.trim() ? item.slot_key.trim() : null,
                   confidence: typeof item.confidence === 'number' ? item.confidence : 0.95,
+                  importance:
+                    typeof item.importance === 'number' && item.importance >= 1 && item.importance <= 10
+                      ? Math.round(item.importance)
+                      : undefined,
+                  status: item.status === 'candidate' ? 'candidate' : 'active',
                   source_kind: 'user',
                   origin_kinds: ['user'],
                   actor: 'user',
@@ -1142,6 +1191,11 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             } catch {
               skipped++;
             }
+          }
+          if (imported > 0) {
+            try {
+              weaveZettelkastenLinks(db, { now });
+            } catch {}
           }
           sendJson(res, 200, { ok: true, imported, skipped, total: items.length });
           return;
@@ -1290,9 +1344,9 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const { requestBody, headers: protoHeaders } = buildProtocolPayload(
             protocol,
             model,
-            '',
-            'hi',
-            5
+            'Reply in valid JSON format.',
+            'Return {"ok":true} in json.',
+            32
           );
 
           const start = Date.now();

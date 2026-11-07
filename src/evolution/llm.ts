@@ -114,11 +114,18 @@ export function extractResponseContent(data: any): string | null {
   if (!data) return null;
 
   // 1. OpenAI chat/completions: choices[0].message.content
-  if (
-    typeof data?.choices?.[0]?.message?.content === 'string' &&
-    data.choices[0].message.content.trim().length > 0
-  ) {
-    return data.choices[0].message.content;
+  const choiceMsg = data?.choices?.[0]?.message;
+  if (typeof choiceMsg?.content === 'string' && choiceMsg.content.trim().length > 0) {
+    return choiceMsg.content;
+  }
+  if (Array.isArray(choiceMsg?.content)) {
+    const joined = choiceMsg.content
+      .filter((c: any) => c?.type !== 'reasoning' && c?.type !== 'thinking')
+      .map((c: any) => (typeof c === 'string' ? c : c?.text || ''))
+      .join('');
+    if (joined.trim().length > 0) {
+      return joined;
+    }
   }
 
   // 2. OpenAI responses: output_text or output array
@@ -239,8 +246,12 @@ export async function callOfflineLLM(
     return { ok: false, error: 'input_budget_exceeded' };
   }
 
-  const reservedTokens = estimatedInput + params.maxOutputTokens;
   const model = cfg.offlineLLM.model || 'deepseek-ai/deepseek-v4-flash-0731';
+  const isReasoningModel = /v4|r1|reasoner|thinking|qwq|\bo[134]\b/i.test(model);
+  let currentMaxOutputTokens =
+    isReasoningModel && params.maxOutputTokens >= 1200
+      ? Math.max(params.maxOutputTokens, 4096)
+      : params.maxOutputTokens;
 
   // 读取 API 密钥（优先直接配置的 apiKey，其次从环境变量读取）
   let apiKey = cfg.offlineLLM.apiKey || '';
@@ -255,7 +266,7 @@ export async function callOfflineLLM(
     model,
     sanitizedSystem,
     sanitizedUser,
-    params.maxOutputTokens
+    currentMaxOutputTokens
   );
 
   // 4. 重试循环（最多 3 次发送尝试）
@@ -265,6 +276,7 @@ export async function callOfflineLLM(
 
   while (currentAttempt < maxAttempts) {
     currentAttempt++;
+    const reservedTokens = estimatedInput + currentMaxOutputTokens;
 
     // 每次 HTTP attempt 原子预留独立额度
     const reserveRes = reserve(
@@ -360,13 +372,13 @@ export async function callOfflineLLM(
           note: 'missing_choice_content',
         });
         if (currentAttempt < maxAttempts) {
-          const expandedMaxTokens = Math.max(params.maxOutputTokens * 4, 8192);
+          currentMaxOutputTokens = Math.max(currentMaxOutputTokens * 2, 8192);
           const nextPayload = buildProtocolPayload(
             protocol,
             model,
             sanitizedSystem,
             sanitizedUser,
-            expandedMaxTokens
+            currentMaxOutputTokens
           );
           requestBody = nextPayload.requestBody;
           protocolHeaders = nextPayload.headers;

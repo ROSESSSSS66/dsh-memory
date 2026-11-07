@@ -5,7 +5,13 @@ import { redactSecrets } from '../core/privacy.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
 export const PREFERENCE_INDICATOR_REGEX =
-  /(?:以后|今后|总是|一律|永远|不要再|别再|每次都|统一使用|必须使用|严禁|切勿|绝不|不能水文|不要产生新|不需要任何测试|上限上调到|from now on|always|never|must always|do not ever)/i;
+  /(?:以后|今后|总是|一律|永远|不要再|别再|每次都|统一使用|必须使用|严禁|切勿|绝不|不能水文|不要产生新|上限上调到|from now on|always|never|must always|do not ever)/i;
+
+const ONE_OFF_TASK_PROMPT_REGEX =
+  /^(?:请|帮我|给我)?(?:创建一个|写一个|生成一个|画一个|绘制一个|制作一个)\b/i;
+
+const DURABLE_HABIT_MARKER_REGEX =
+  /(?:以后|今后|总是|一律|永远|每次都|统一使用|必须使用|from now on|always|must always)/i;
 
 export const CORRECTION_REGEX =
   /(?:不对|错了|不是这样|搞错|不行|没用|还是不行|重来|wrong|incorrect|doesn't work|not what)/i;
@@ -161,17 +167,21 @@ export function runRules(
   if (event.origin_kind === 'user' && event.role === 'user' && event.text) {
     const trimmed = event.text.trim();
     if (trimmed.length <= 300 && PREFERENCE_INDICATOR_REGEX.test(trimmed)) {
+      const slotRes = resolveFixedSlot(trimmed);
+      const isOneOffTask =
+        !slotRes.slotKey &&
+        ONE_OFF_TASK_PROMPT_REGEX.test(trimmed) &&
+        !DURABLE_HABIT_MARKER_REGEX.test(trimmed);
       const isQuotedOrExample = /(?:^>|```|例如|比如|有人说|示例|规则说明|“|”|")/i.test(trimmed);
       const privCheck = redactSecrets(trimmed);
-      if (!privCheck.hasSensitive && !trimmed.includes('[REDACTED:')) {
-        const slotRes = resolveFixedSlot(trimmed);
+      if (!isOneOffTask && !privCheck.hasSensitive && !trimmed.includes('[REDACTED:')) {
         let scope: Scope = slotRes.scope || 'user';
         if (/(?:本项目|当前项目|这个项目|本仓库|当前工作区)/i.test(trimmed)) {
           scope = 'workspace';
         }
 
         const candidate: CandidateInput = {
-          type: 'preference',
+          type: slotRes.type || 'preference',
           content: trimmed,
           slot_key: slotRes.slotKey,
           scope,

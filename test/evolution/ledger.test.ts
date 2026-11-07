@@ -220,4 +220,20 @@ describe('Evolution Ledger (M3-T1)', () => {
     expect(row?.note).not.toContain('sk-1234567890abcdef1234');
     expect(row?.note).toContain('[REDACTED:SECRET]');
   });
+
+  it('normalizes non-date day strings in getLedgerUsage to today', () => {
+    reserve(
+      db,
+      {
+        jobKind: 'distill',
+        model: 'deepseek-v4-flash',
+        promptVersion: 'distill-v2',
+        reservedTokens: 1200,
+      },
+      DEFAULTS
+    );
+    const usage = getLedgerUsage(db, 'enforce', DEFAULTS);
+    expect(usage.callsCount).toBe(1);
+    expect(usage.tokensConsumed).toBe(1200);
+  });
 });

@@ -4,7 +4,7 @@ import type { Db, MemoryRecord } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import { ftsText } from '../core/text.js';
 import { openDb } from '../core/db.js';
-import { backfillMissingEmbeddings } from '../core/vector.js';
+import { backfillMissingEmbeddings, clearRuntimeVectorCache } from '../core/vector.js';
 
 export function getBackupTimestamp(date: Date = new Date()): string {
   const y = date.getFullYear();
@@ -477,7 +477,8 @@ export function importDatabaseFile(
       }
     });
 
-    // 4. 重建 FTS 索引并补齐旧版备份缺失的 128D 本地向量
+    // 4. 清空内存向量缓存、重建 FTS 索引并补齐旧版备份缺失的 128D 本地向量
+    clearRuntimeVectorCache();
     checkAndRepairFts(currentDb);
     backfillMissingEmbeddings(currentDb, { limit: 1000 });
 

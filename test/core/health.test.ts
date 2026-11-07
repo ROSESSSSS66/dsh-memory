@@ -251,4 +251,61 @@ describe('Memory Health & Conflict Doctor (src/core/health.ts)', () => {
     ]);
     expect(revAfter?.status).toBe('active');
   });
+
+  it('weaves cross-scope and heterogeneous orphan memories to 0 orphans during autoHealMemoryHealth', () => {
+    upsertCandidate(
+      db,
+      {
+        type: 'preference',
+        content: '用户偏好直接给出简洁中文结论',
+        slot_key: 'user.pref.style',
+        scope: 'user',
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 1, kind: 'user' }],
+        actor: 'user',
+      },
+      now
+    );
+
+    upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: '当前工程采用 SQLite WAL + FTS5 + 128D 向量检索引擎',
+        slot_key: 'project.arch.storage',
+        scope: 'workspace',
+        workspaceId: ws,
+        source_kind: 'user',
+        confidence: 0.92,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 2, kind: 'user' }],
+        actor: 'user',
+      },
+      now + 10
+    );
+
+    upsertCandidate(
+      db,
+      {
+        type: 'procedural',
+        content: '发布前执行 npm run check 与 npm run eval 验证门禁',
+        slot_key: 'project.cmd.verify',
+        scope: 'workspace',
+        workspaceId: ws,
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 3, kind: 'user' }],
+        actor: 'user',
+      },
+      now + 20
+    );
+
+    const healRes = autoHealMemoryHealth(db, { workspaceId: ws, now: now + 100 });
+    expect(healRes.report.orphanMemoriesCount).toBe(0);
+    expect(healRes.afterScore).toBe(100);
+    expect(healRes.afterGrade).toBe('A+');
+  });
 });

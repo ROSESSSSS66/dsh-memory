@@ -175,18 +175,38 @@ export function validateConfig(raw: Partial<PluginConfig> = {}): PluginConfig {
   return cfg;
 }
 
+function ensureConfiguredEndpointAllowed(cfg: PluginConfig): PluginConfig {
+  const baseURL = cfg.offlineLLM?.baseURL?.trim();
+  if (
+    cfg.privacy?.offlineConsent &&
+    baseURL &&
+    (!Array.isArray(cfg.privacy.allowedOfflineEndpoints) ||
+      cfg.privacy.allowedOfflineEndpoints.length === 0)
+  ) {
+    const allowed = new Set<string>([baseURL]);
+    try {
+      const u = new URL(baseURL);
+      allowed.add(u.origin);
+    } catch {}
+    cfg.privacy.allowedOfflineEndpoints = Array.from(allowed);
+  }
+  return cfg;
+}
+
 export function loadConfigFromDb(db: any, baseCfg: PluginConfig = DEFAULTS): PluginConfig {
   try {
     const row = db.get('SELECT value FROM meta WHERE key = ?', ['config_override']);
     if (row?.value) {
       const parsed = JSON.parse(row.value);
-      return validateConfig({
-        ...baseCfg,
-        ...parsed,
-        offlineLLM: { ...baseCfg.offlineLLM, ...(parsed.offlineLLM || {}) },
-        privacy: { ...baseCfg.privacy, ...(parsed.privacy || {}) },
-        embedding: { ...baseCfg.embedding, ...(parsed.embedding || {}) },
-      });
+      return ensureConfiguredEndpointAllowed(
+        validateConfig({
+          ...baseCfg,
+          ...parsed,
+          offlineLLM: { ...baseCfg.offlineLLM, ...(parsed.offlineLLM || {}) },
+          privacy: { ...baseCfg.privacy, ...(parsed.privacy || {}) },
+          embedding: { ...baseCfg.embedding, ...(parsed.embedding || {}) },
+        })
+      );
     }
   } catch {}
   return baseCfg;
@@ -201,7 +221,7 @@ export function saveConfigToDb(db: any, patch: Partial<PluginConfig>): PluginCon
     privacy: { ...current.privacy, ...(patch.privacy || {}) },
     embedding: { ...current.embedding, ...(patch.embedding || {}) },
   };
-  const updated = validateConfig(merged);
+  const updated = ensureConfiguredEndpointAllowed(validateConfig(merged));
   db.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
     'config_override',
     JSON.stringify(updated),

@@ -26,6 +26,7 @@ import {
   encodeEmbeddingBlob,
   getOrComputeEmbedding,
   primeRuntimeVectorCache,
+  removeCachedRuntimeEmbedding,
 } from './vector.js';
 
 function generateId(): string {
@@ -314,9 +315,11 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
 
     const newTokens = tokenSet(rawContent);
     const newVec = computeLocalEmbedding(`${rawSummary}\n${rawContent}${slotKey ? `\n${slotKey}` : ''}`);
-    const newEntList = (c.entities && c.entities.length > 0 ? c.entities : extractEntities(rawContent)).map((e) =>
-      e.toLowerCase().replace(/\\/g, '/')
-    );
+    const newEntList = (
+      c.entities && c.entities.length > 0
+        ? c.entities
+        : extractEntities(`${rawSummary} ${rawContent}`)
+    ).map((e) => e.toLowerCase().replace(/\\/g, '/').trim());
     const newEntSet = new Set(newEntList);
 
     const scoredRelations: Array<{ id: string; affinity: number }> = [];
@@ -330,7 +333,9 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
 
       let sharedEnts = 0;
       if (newEntSet.size > 0) {
-        const candEnts = extractEntities(cand.content).map((e) => e.toLowerCase().replace(/\\/g, '/'));
+        const candEnts = extractEntities(`${cand.summary} ${cand.content}`).map((e) =>
+          e.toLowerCase().replace(/\\/g, '/').trim()
+        );
         for (const ce of candEnts) {
           if (newEntSet.has(ce)) sharedEnts++;
         }
@@ -341,8 +346,8 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
 
       if (
         jaccardSim >= DEFAULTS.dupJaccard ||
-        affinity >= 0.52 ||
-        (sharedEnts >= 2 && vecSim >= 0.45)
+        affinity >= 0.48 ||
+        (sharedEnts >= 2 && vecSim >= 0.42)
       ) {
         scoredRelations.push({ id: cand.id, affinity: Math.max(jaccardSim, affinity) });
       }
@@ -483,10 +488,13 @@ function insertNewRecord(
   db.run(`INSERT INTO memory_fts(rowid, fts_text) VALUES (?, ?)`, [rowid, fts]);
 
   // 实体
-  const entities = c.entities && c.entities.length > 0 ? c.entities : extractEntities(content);
+  const entities =
+    c.entities && c.entities.length > 0 ? c.entities : extractEntities(`${summary} ${content}`);
   for (const ent of entities) {
-    const normEnt = ent.toLowerCase().replace(/\\/g, '/');
-    db.run(`INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`, [id, normEnt]);
+    const normEnt = ent.toLowerCase().replace(/\\/g, '/').trim();
+    if (normEnt) {
+      db.run(`INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`, [id, normEnt]);
+    }
   }
 
   // 证据 sources
@@ -636,6 +644,7 @@ export function editContent(
         id,
       ]
     );
+    removeCachedRuntimeEmbedding(id);
     primeRuntimeVectorCache(id, newHash, updatedVec);
 
     // 重建 FTS
@@ -648,9 +657,12 @@ export function editContent(
 
     // 重建 entities
     db.run(`DELETE FROM memory_entities WHERE memory_id = ?`, [id]);
-    const entities = extractEntities(rawContent);
+    const entities = extractEntities(`${rawSummary} ${rawContent}`);
     for (const ent of entities) {
-      db.run(`INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`, [id, ent]);
+      const normEnt = ent.toLowerCase().replace(/\\/g, '/').trim();
+      if (normEnt) {
+        db.run(`INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`, [id, normEnt]);
+      }
     }
 
     return { ok: true, version: nextVersion, content_rev: nextContentRev };
@@ -683,6 +695,7 @@ export function rollback(
 
     const nextVersion = memory.version + 1;
     const nextContentRev = memory.content_rev + 1;
+    const rollbackHash = snapshot.hash || contentHash(memory.type, snapshot.content);
     const rollbackVec = computeLocalEmbedding(
       `${snapshot.summary}\n${snapshot.content}${memory.slot_key ? `\n${memory.slot_key}` : ''}`
     );
@@ -694,7 +707,7 @@ export function rollback(
         snapshot.summary,
         snapshot.token_cost,
         snapshot.summary_cost,
-        snapshot.hash,
+        rollbackHash,
         nextVersion,
         nextContentRev,
         encodeEmbeddingBlob(rollbackVec),
@@ -702,7 +715,8 @@ export function rollback(
         id,
       ]
     );
-    primeRuntimeVectorCache(id, snapshot.hash, rollbackVec);
+    removeCachedRuntimeEmbedding(id);
+    primeRuntimeVectorCache(id, rollbackHash, rollbackVec);
 
     // 重建 FTS
     const rowid = memory.rowid_!;
@@ -714,9 +728,12 @@ export function rollback(
 
     // 重建 entities
     db.run(`DELETE FROM memory_entities WHERE memory_id = ?`, [id]);
-    const entities = extractEntities(snapshot.content);
+    const entities = extractEntities(`${snapshot.summary} ${snapshot.content}`);
     for (const ent of entities) {
-      db.run(`INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`, [id, ent]);
+      const normEnt = ent.toLowerCase().replace(/\\/g, '/').trim();
+      if (normEnt) {
+        db.run(`INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`, [id, normEnt]);
+      }
     }
 
     return { ok: true, version: nextVersion, content_rev: nextContentRev };
@@ -733,6 +750,7 @@ export function forget(db: Db, id: string, actor: string = 'user', now: number =
 
     saveVersionSnapshot(db, memory, 'status', actor, now);
     db.run(`UPDATE memories SET status = 'archived', updated_at = ? WHERE id = ?`, [now, id]);
+    removeCachedRuntimeEmbedding(id);
     return true;
   });
 }

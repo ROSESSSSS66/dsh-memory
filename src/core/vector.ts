@@ -148,6 +148,15 @@ export function clearRuntimeVectorCache(): void {
   runtimeVectorCache.clear();
 }
 
+export function removeCachedRuntimeEmbedding(id: string): void {
+  const prefix = `${id}:`;
+  for (const key of runtimeVectorCache.keys()) {
+    if (key.startsWith(prefix)) {
+      runtimeVectorCache.delete(key);
+    }
+  }
+}
+
 export function primeRuntimeVectorCache(
   id: string,
   hashOrKey: string | number,
@@ -232,10 +241,11 @@ export function backfillMissingEmbeddings(
         summary: string;
         content: string;
         slot_key: string | null;
+        hash: string;
       }>(
-        `SELECT id, summary, content, slot_key FROM memories
+        `SELECT id, summary, content, slot_key, hash FROM memories
          WHERE status IN ('active', 'frozen')
-           AND (workspace_id = ? OR scope = 'global')
+           AND (workspace_id = ? OR scope IN ('user', 'global'))
            AND embedding IS NULL
          LIMIT ?`,
         [options.workspaceId, limit]
@@ -245,8 +255,9 @@ export function backfillMissingEmbeddings(
         summary: string;
         content: string;
         slot_key: string | null;
+        hash: string;
       }>(
-        `SELECT id, summary, content, slot_key FROM memories
+        `SELECT id, summary, content, slot_key, hash FROM memories
          WHERE status IN ('active', 'frozen')
            AND embedding IS NULL
          LIMIT ?`,
@@ -264,6 +275,9 @@ export function backfillMissingEmbeddings(
         encodeEmbeddingBlob(vec),
         row.id,
       ]);
+      if (row.hash && dim === DEFAULT_LOCAL_VECTOR_DIM) {
+        primeRuntimeVectorCache(row.id, row.hash, vec);
+      }
       updated++;
     }
   });

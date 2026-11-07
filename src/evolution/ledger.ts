@@ -165,7 +165,7 @@ export function recoverReservedToUnknown(db: Db, now: number = Date.now()): numb
  * 获取指定日期的使用量统计
  */
 export function getLedgerUsage(db: Db, day?: string, cfg?: PluginConfig): LedgerUsage {
-  const targetDay = day ?? getLocalDayString();
+  const targetDay = day && /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : getLocalDayString();
   const callsLimit = cfg?.dailyLLMCalls ?? 40;
   const tokensLimit = cfg?.dailyLLMTokens ?? 200_000;
 
