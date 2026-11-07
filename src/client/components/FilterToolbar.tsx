@@ -1,348 +1,140 @@
-import * as React from 'react';
-import type { ListDensityMode } from '../types.js';
-import { GlassCard, GlassInput } from './GlassUI.js';
-import {
-  SearchIcon,
-  CloseIcon,
-  GlobeIcon,
-  FolderIcon,
-  PinIcon,
-  SnowflakeIcon,
-  ArrowUpDownIcon,
-  CheckSquareIcon,
-  GridIcon,
-  TableIcon,
-} from './Icons.js';
+import React from 'react';
+import { GlassCard, GlassInput, GlassSelect, GlassBadge } from './GlassUI.js';
 
-interface FilterToolbarProps {
+export type MemoryStatusFilter =
+  | 'all'
+  | 'active'
+  | 'candidate'
+  | 'frozen'
+  | 'superseded'
+  | 'archived';
+
+export type MemoryTypeFilter =
+  | 'all'
+  | 'semantic'
+  | 'preference'
+  | 'procedural'
+  | 'experience';
+
+export type MemoryScopeFilter = 'all' | 'workspace' | 'global';
+
+export interface FilterToolbarProps {
   searchQuery: string;
-  onSearchChange: (q: string) => void;
-  selectedType: string;
-  onTypeChange: (type: string) => void;
-  selectedStatus: string;
-  onStatusChange: (status: string) => void;
-  selectedScope: string;
-  onScopeChange: (scope: string) => void;
-  sortBy: string;
-  onSortChange: (sort: string) => void;
-  density: ListDensityMode;
-  onDensityChange: (mode: ListDensityMode) => void;
-  counts: {
-    all: number;
-    preference: number;
-    semantic: number;
-    procedural: number;
-    experience: number;
-    candidate: number;
-    archived: number;
-    pinned?: number;
-  };
-  totalLoaded?: number;
-  isAllSelected?: boolean;
-  onToggleSelectAll?: () => void;
+  onSearchChange: (val: string) => void;
+  statusFilter: MemoryStatusFilter;
+  onStatusChange: (val: MemoryStatusFilter) => void;
+  typeFilter: MemoryTypeFilter;
+  onTypeChange: (val: MemoryTypeFilter) => void;
+  scopeFilter: MemoryScopeFilter;
+  onScopeChange: (val: MemoryScopeFilter) => void;
+  totalCount: number;
 }
 
-export const FilterToolbar: React.FC<FilterToolbarProps> = ({
+const STATUS_TABS: Array<{ key: MemoryStatusFilter; label: string }> = [
+  { key: 'all', label: '全部状态' },
+  { key: 'active', label: '● 已生效' },
+  { key: 'candidate', label: '◌ 自动观察池' },
+  { key: 'frozen', label: '❄ 冻结保护' },
+  { key: 'superseded', label: '↺ 历史演进' },
+  { key: 'archived', label: '▫ 已归档' },
+];
+
+const TYPE_TABS: Array<{ key: MemoryTypeFilter; label: string }> = [
+  { key: 'all', label: '全部类型' },
+  { key: 'semantic', label: '事实 (Semantic)' },
+  { key: 'preference', label: '偏好 (Preference)' },
+  { key: 'procedural', label: '流程 (Procedural)' },
+  { key: 'experience', label: '事件与反思 (Episodic/Failure)' },
+];
+
+export function FilterToolbar({
   searchQuery,
   onSearchChange,
-  selectedType,
-  onTypeChange,
-  selectedStatus,
+  statusFilter,
   onStatusChange,
-  selectedScope,
+  typeFilter,
+  onTypeChange,
+  scopeFilter,
   onScopeChange,
-  sortBy,
-  onSortChange,
-  density,
-  onDensityChange,
-  counts,
-  totalLoaded = 0,
-  isAllSelected = false,
-  onToggleSelectAll,
-}) => {
-  const searchInputRef = React.useRef<HTMLInputElement | null>(null);
-
-  // Global '/' hotkey to focus search
-  React.useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        e.key === '/' &&
-        document.activeElement?.tagName !== 'INPUT' &&
-        document.activeElement?.tagName !== 'TEXTAREA' &&
-        document.activeElement?.tagName !== 'SELECT'
-      ) {
-        e.preventDefault();
-        searchInputRef.current?.focus();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  const hasActiveFilters =
-    searchQuery !== '' ||
-    selectedType !== 'all' ||
-    selectedStatus !== 'all' ||
-    selectedScope !== 'all';
-
+  totalCount,
+}: FilterToolbarProps) {
   return (
-    <GlassCard interactive={false} className="dshm-toolbar">
-      {/* Upper row: Search box, Scope selector, Sort selector, Density toggle */}
-      <div className="dshm-toolbar-row">
-        <GlassInput
-          ref={searchInputRef}
-          type="text"
-          leftIcon={<SearchIcon size={14} />}
-          rightSlot={
-            !searchQuery ? (
-              <kbd className="dshm-kbd-hint">/</kbd>
-            ) : (
-              <button
-                type="button"
-                className="dshm-search-clear"
-                onClick={() => onSearchChange('')}
-                title="清除搜索"
-              >
-                <CloseIcon size={12} />
-              </button>
-            )
-          }
-          placeholder="搜索记忆正文、摘要、槽位 (slot_key) 或 ID…"
-          value={searchQuery}
-          onChange={(e) => onSearchChange(e.target.value)}
-        />
-
-        <div className="dshm-toolbar-controls">
-          {/* Scope Segmented Control */}
-          <div className="dshm-segmented-group">
-            <div className="dshm-segmented-control">
-              <button
-                type="button"
-                className={`dshm-segment-btn ${selectedScope === 'all' ? 'is-active' : ''}`}
-                onClick={() => onScopeChange('all')}
-              >
-                全部域
-              </button>
-              <button
-                type="button"
-                className={`dshm-segment-btn ${selectedScope === 'global' ? 'is-active' : ''}`}
-                onClick={() => onScopeChange('global')}
-              >
-                <GlobeIcon size={12} />
-                <span>全局</span>
-              </button>
-              <button
-                type="button"
-                className={`dshm-segment-btn ${selectedScope === 'workspace' ? 'is-active' : ''}`}
-                onClick={() => onScopeChange('workspace')}
-              >
-                <FolderIcon size={12} />
-                <span>工作区</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Sort Dropdown */}
-          <div className="dshm-sort-wrapper">
-            <span className="dshm-sort-icon">
-              <ArrowUpDownIcon size={12} />
-            </span>
-            <select
-              className="dshm-sort-select"
-              value={sortBy}
-              onChange={(e) => onSortChange(e.target.value)}
-              title="排序方式"
-            >
-              <option value="updated">最新更新优先</option>
-              <option value="pinned">置顶固化优先</option>
-              <option value="importance">重要度最高</option>
-              <option value="utility">实用度最高</option>
-              <option value="use_count">引用次数最多</option>
-              <option value="confidence">置信度最高</option>
-              <option value="created">最新创建优先</option>
-            </select>
-          </div>
-
-          {/* View Density Switcher */}
-          <div className="dshm-segmented-control" title="切换列表展示密度">
-            <button
-              type="button"
-              className={`dshm-segment-btn ${density === 'card' ? 'is-active' : ''}`}
-              onClick={() => onDensityChange('card')}
-              title="舒适卡片视图"
-            >
-              <GridIcon size={13} />
-            </button>
-            <button
-              type="button"
-              className={`dshm-segment-btn ${density === 'compact' ? 'is-active' : ''}`}
-              onClick={() => onDensityChange('compact')}
-              title="紧凑高密度列表"
-            >
-              <TableIcon size={13} />
-            </button>
-          </div>
+    <GlassCard className="dshm-toolbar">
+      <div className="dshm-toolbar-top">
+        {/* Search Input */}
+        <div className="dshm-search-box">
+          <span className="dshm-search-icon" aria-hidden="true">
+            🔍
+          </span>
+          <GlassInput
+            className="dshm-input--search"
+            placeholder="全文检索记忆内容、摘要、槽位 (slot_key) 或短码 ID..."
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+          />
         </div>
+
+        {/* Scope Selector */}
+        <div style={{ width: 170 }}>
+          <GlassSelect
+            value={scopeFilter}
+            onChange={(e) => onScopeChange(e.target.value as MemoryScopeFilter)}
+            aria-label="记忆作用域筛选"
+          >
+            <option value="all">全部作用域 (All)</option>
+            <option value="workspace">当前工作区 (Workspace)</option>
+            <option value="global">全局跨项目 (Global)</option>
+          </GlassSelect>
+        </div>
+
+        {/* Result Count Badge */}
+        <GlassBadge variant="neutral">匹配 {totalCount} 条记忆</GlassBadge>
       </div>
 
-      {/* Lower row: Category Tabs, Status chips & Select All */}
-      <div className="dshm-toolbar-row">
-        <div className="dshm-tabs-control">
-          <button
-            type="button"
-            className={`dshm-tab-item ${
-              selectedType === 'all' &&
-              selectedStatus !== 'candidate' &&
-              selectedStatus !== 'archived'
-                ? 'is-active'
-                : ''
-            }`}
-            onClick={() => {
-              onTypeChange('all');
-              if (selectedStatus === 'candidate' || selectedStatus === 'archived') {
-                onStatusChange('all');
-              }
-            }}
-          >
-            <span>全部</span>
-            <span className="dshm-tab-badge">{counts.all}</span>
-          </button>
-
-          <button
-            type="button"
-            className={`dshm-tab-item ${selectedType === 'preference' ? 'is-active' : ''}`}
-            onClick={() => {
-              onTypeChange('preference');
-              if (selectedStatus === 'candidate' || selectedStatus === 'archived')
-                onStatusChange('all');
-            }}
-          >
-            <span className="dshm-type-dot is-preference" />
-            <span>偏好习惯</span>
-            <span className="dshm-tab-badge">{counts.preference}</span>
-          </button>
-
-          <button
-            type="button"
-            className={`dshm-tab-item ${selectedType === 'semantic' ? 'is-active' : ''}`}
-            onClick={() => {
-              onTypeChange('semantic');
-              if (selectedStatus === 'candidate' || selectedStatus === 'archived')
-                onStatusChange('all');
-            }}
-          >
-            <span className="dshm-type-dot is-semantic" />
-            <span>事实知识</span>
-            <span className="dshm-tab-badge">{counts.semantic}</span>
-          </button>
-
-          <button
-            type="button"
-            className={`dshm-tab-item ${selectedType === 'procedural' ? 'is-active' : ''}`}
-            onClick={() => {
-              onTypeChange('procedural');
-              if (selectedStatus === 'candidate' || selectedStatus === 'archived')
-                onStatusChange('all');
-            }}
-          >
-            <span className="dshm-type-dot is-procedural" />
-            <span>流程规范</span>
-            <span className="dshm-tab-badge">{counts.procedural}</span>
-          </button>
-
-          <button
-            type="button"
-            className={`dshm-tab-item ${selectedType === 'experience' ? 'is-active' : ''}`}
-            onClick={() => {
-              onTypeChange('experience');
-              if (selectedStatus === 'candidate' || selectedStatus === 'archived')
-                onStatusChange('all');
-            }}
-          >
-            <span className="dshm-type-dot is-experience" />
-            <span>情景/反思</span>
-            <span className="dshm-tab-badge">{counts.experience}</span>
-          </button>
-
-          <button
-            type="button"
-            className={`dshm-tab-item ${selectedStatus === 'candidate' ? 'is-active' : ''}`}
-            onClick={() => {
-              onStatusChange(selectedStatus === 'candidate' ? 'all' : 'candidate');
-              onTypeChange('all');
-            }}
-          >
-            <span>待审候选</span>
-            <span className={`dshm-tab-badge ${counts.candidate > 0 ? 'is-warm' : ''}`}>
-              {counts.candidate}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            className={`dshm-tab-item ${selectedStatus === 'archived' ? 'is-active' : ''}`}
-            onClick={() => {
-              onStatusChange(selectedStatus === 'archived' ? 'all' : 'archived');
-              onTypeChange('all');
-            }}
-          >
-            <span>已归档</span>
-            <span className="dshm-tab-badge">{counts.archived}</span>
-          </button>
+      {/* Bottom Row: Segmented Status & Type Filters */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 10,
+          flexWrap: 'wrap',
+        }}
+      >
+        <div className="dshm-segmented" role="tablist" aria-label="记忆状态筛选">
+          {STATUS_TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={statusFilter === tab.key}
+              className={`dshm-segment-btn ${
+                statusFilter === tab.key ? 'dshm-segment-btn--active' : ''
+              }`}
+              onClick={() => onStatusChange(tab.key)}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
-        {/* Status flags filter & Batch Select Toggle */}
-        <div className="dshm-filter-chips">
-          <button
-            type="button"
-            className={`dshm-chip-btn ${selectedStatus === 'pinned' ? 'is-active-amber' : ''}`}
-            onClick={() => onStatusChange(selectedStatus === 'pinned' ? 'all' : 'pinned')}
-            title="仅显示已置顶固化到 System Prompt 的记忆"
-          >
-            <PinIcon size={12} />
-            <span>置顶{counts.pinned ? ` (${counts.pinned})` : ''}</span>
-          </button>
-
-          <button
-            type="button"
-            className={`dshm-chip-btn ${selectedStatus === 'frozen' ? 'is-active-cyan' : ''}`}
-            onClick={() => onStatusChange(selectedStatus === 'frozen' ? 'all' : 'frozen')}
-            title="仅显示冻结保护项"
-          >
-            <SnowflakeIcon size={12} />
-            <span>冻结</span>
-          </button>
-
-          {hasActiveFilters && (
+        <div className="dshm-segmented" role="tablist" aria-label="记忆类型筛选">
+          {TYPE_TABS.map((tab) => (
             <button
+              key={tab.key}
               type="button"
-              className="dshm-chip-btn is-reset"
-              onClick={() => {
-                onSearchChange('');
-                onTypeChange('all');
-                onStatusChange('all');
-                onScopeChange('all');
-              }}
-              title="清除所有筛选条件"
+              role="tab"
+              aria-selected={typeFilter === tab.key}
+              className={`dshm-segment-btn ${
+                typeFilter === tab.key ? 'dshm-segment-btn--active' : ''
+              }`}
+              onClick={() => onTypeChange(tab.key)}
             >
-              <CloseIcon size={11} />
-              <span>重置</span>
+              {tab.label}
             </button>
-          )}
-
-          {onToggleSelectAll && totalLoaded > 0 && (
-            <button
-              type="button"
-              className={`dshm-chip-btn ${isAllSelected ? 'is-active' : ''}`}
-              onClick={onToggleSelectAll}
-              title={isAllSelected ? '取消全选' : '选择当前列表中的所有记忆'}
-            >
-              <CheckSquareIcon size={12} />
-              <span>{isAllSelected ? '取消全选' : '全选'}</span>
-            </button>
-          )}
+          ))}
         </div>
       </div>
     </GlassCard>
   );
-};
+}

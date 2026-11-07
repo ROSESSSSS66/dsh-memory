@@ -18,13 +18,6 @@ export const useGlassVariant = (explicitVariant?: GlassVariant): GlassVariant =>
   return explicitVariant ?? ctx.variant;
 };
 
-/**
- * Tailwind CSS Custom Utility Class Names for Glassmorphism
- * - .glass-light: backdrop-filter: blur(16px); background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.18);
- * - .glass-light-hover:hover: increases white background opacity (rgba(255,255,255,0.18))
- * - .glass-dark: backdrop-filter: blur(16px); background: rgba(0,0,0,0.28); border: 1px solid rgba(255,255,255,0.18);
- * - .glass-dark-hover:hover: increases black background opacity (rgba(0,0,0,0.44))
- */
 export function getGlassUtilityClasses(
   variant: GlassVariant,
   interactive = true
@@ -55,7 +48,7 @@ export const GlassCard = React.forwardRef<HTMLElement, GlassCardProps>(
   (
     {
       variant,
-      interactive = true,
+      interactive = false,
       active = false,
       pinned = false,
       candidate = false,
@@ -70,9 +63,9 @@ export const GlassCard = React.forwardRef<HTMLElement, GlassCardProps>(
     const glassCls = getGlassUtilityClasses(resolvedVariant, interactive);
     const stateCls = [
       active ? 'is-selected' : '',
-      pinned ? 'is-pinned' : '',
+      pinned ? 'is-pinned dshm-glass-card--pinned' : '',
       candidate ? 'is-candidate' : '',
-      interactive ? 'is-interactive' : '',
+      interactive ? 'is-interactive dshm-glass-card--interactive' : '',
     ]
       .filter(Boolean)
       .join(' ');
@@ -80,7 +73,7 @@ export const GlassCard = React.forwardRef<HTMLElement, GlassCardProps>(
     return (
       <Component
         ref={ref}
-        className={`glass-card rounded-xl p-4 text-slate-100 shadow-glass ${glassCls} ${stateCls} ${className}`.trim()}
+        className={`dshm-glass-card glass-card ${glassCls} ${stateCls} ${className}`.trim()}
         {...rest}
       >
         {children}
@@ -95,17 +88,19 @@ GlassCard.displayName = 'GlassCard';
    ========================================================================== */
 export interface GlassButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: GlassVariant;
+  variant?: GlassVariant | 'default' | 'primary' | 'danger' | 'success';
   intent?: 'default' | 'primary' | 'success' | 'warning' | 'danger' | 'ghost';
   size?: 'sm' | 'md' | 'lg' | 'icon';
+  icon?: React.ReactNode;
 }
 
 export const GlassButton = React.forwardRef<HTMLButtonElement, GlassButtonProps>(
   (
     {
       variant,
-      intent = 'default',
+      intent,
       size = 'md',
+      icon,
       className = '',
       type = 'button',
       children,
@@ -113,25 +108,37 @@ export const GlassButton = React.forwardRef<HTMLButtonElement, GlassButtonProps>
     },
     ref
   ) => {
-    const resolvedVariant = useGlassVariant(variant);
+    const themeVariant: GlassVariant | undefined =
+      variant === 'light' || variant === 'dark' ? variant : undefined;
+    const resolvedVariant = useGlassVariant(themeVariant);
     const glassCls = getGlassUtilityClasses(resolvedVariant, true);
 
+    const effectiveIntent =
+      intent ||
+      (variant === 'primary'
+        ? 'primary'
+        : variant === 'danger'
+          ? 'danger'
+          : variant === 'success'
+            ? 'success'
+            : 'default');
+
     const intentCls =
-      intent === 'primary'
-        ? 'glass-btn-primary dshm-btn-primary'
-        : intent === 'success'
-        ? 'glass-btn-success dshm-action-btn-approve'
-        : intent === 'warning'
+      effectiveIntent === 'primary'
+        ? 'glass-btn-primary dshm-btn-primary dshm-btn--primary'
+        : effectiveIntent === 'success'
+        ? 'glass-btn-success dshm-action-btn-approve dshm-btn--success'
+        : effectiveIntent === 'warning'
         ? 'glass-btn-warning is-active-amber'
-        : intent === 'danger'
-        ? 'glass-btn-danger is-danger'
-        : intent === 'ghost'
+        : effectiveIntent === 'danger'
+        ? 'glass-btn-danger is-danger dshm-btn--danger'
+        : effectiveIntent === 'ghost'
         ? 'glass-btn-ghost dshm-btn-ghost'
         : 'glass-btn-default dshm-btn-secondary';
 
     const sizeCls =
       size === 'sm'
-        ? 'h-7 px-2.5 text-xs rounded-lg'
+        ? 'h-7 px-2.5 text-xs rounded-lg dshm-btn--sm'
         : size === 'lg'
         ? 'h-10 px-4 text-sm rounded-xl'
         : size === 'icon'
@@ -145,6 +152,7 @@ export const GlassButton = React.forwardRef<HTMLButtonElement, GlassButtonProps>
         className={`glass-btn dshm-btn inline-flex items-center justify-center gap-1.5 font-medium select-none ${glassCls} ${intentCls} ${sizeCls} ${className}`.trim()}
         {...rest}
       >
+        {icon}
         {children}
       </button>
     );
@@ -153,7 +161,7 @@ export const GlassButton = React.forwardRef<HTMLButtonElement, GlassButtonProps>
 GlassButton.displayName = 'GlassButton';
 
 /* ==========================================================================
-   3. GlassInput
+   3. GlassInput & GlassSelect & GlassBadge
    ========================================================================== */
 export interface GlassInputProps
   extends React.InputHTMLAttributes<HTMLInputElement> {
@@ -188,7 +196,7 @@ export const GlassInput = React.forwardRef<HTMLInputElement, GlassInputProps>(
           {leftIcon && <span className="dshm-search-icon">{leftIcon}</span>}
           <input
             ref={ref}
-            className={`glass-input dshm-search-input w-full rounded-lg text-xs text-white placeholder-slate-400 outline-none ${glassCls} ${focusCls} ${
+            className={`glass-input dshm-input dshm-input--search dshm-search-input ${glassCls} ${focusCls} ${
               leftIcon ? 'has-left-icon' : ''
             } ${rightSlot ? 'has-right-slot' : ''} ${className}`.trim()}
             {...rest}
@@ -201,7 +209,7 @@ export const GlassInput = React.forwardRef<HTMLInputElement, GlassInputProps>(
     return (
       <input
         ref={ref}
-        className={`glass-input dshm-form-input w-full rounded-lg px-3 py-2 text-xs text-white placeholder-slate-400 outline-none ${glassCls} ${focusCls} ${className}`.trim()}
+        className={`glass-input dshm-input dshm-form-input ${glassCls} ${focusCls} ${className}`.trim()}
         {...rest}
       />
     );
@@ -209,10 +217,60 @@ export const GlassInput = React.forwardRef<HTMLInputElement, GlassInputProps>(
 );
 GlassInput.displayName = 'GlassInput';
 
+export interface GlassSelectProps
+  extends React.SelectHTMLAttributes<HTMLSelectElement> {
+  variant?: GlassVariant;
+}
+
+export const GlassSelect = React.forwardRef<HTMLSelectElement, GlassSelectProps>(
+  ({ className = '', children, ...rest }, ref) => {
+    return (
+      <select
+        ref={ref}
+        className={`dshm-select ${className}`.trim()}
+        {...rest}
+      >
+        {children}
+      </select>
+    );
+  }
+);
+GlassSelect.displayName = 'GlassSelect';
+
+export type GlassBadgeVariant =
+  | 'accent'
+  | 'purple'
+  | 'cyan'
+  | 'emerald'
+  | 'amber'
+  | 'rose'
+  | 'neutral';
+
+export interface GlassBadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
+  variant?: GlassBadgeVariant;
+}
+
+export const GlassBadge: React.FC<GlassBadgeProps> = ({
+  variant = 'neutral',
+  className = '',
+  children,
+  ...rest
+}) => {
+  return (
+    <span
+      className={`dshm-badge dshm-badge--${variant} ${className}`.trim()}
+      {...rest}
+    >
+      {children}
+    </span>
+  );
+};
+
 /* ==========================================================================
    4. GlassModal
    ========================================================================== */
 export interface GlassModalProps {
+  open?: boolean;
   isOpen?: boolean;
   onClose: () => void;
   variant?: GlassVariant;
@@ -229,7 +287,8 @@ export interface GlassModalProps {
 }
 
 export const GlassModal: React.FC<GlassModalProps> = ({
-  isOpen = true,
+  open,
+  isOpen,
   onClose,
   variant,
   title,
@@ -246,13 +305,14 @@ export const GlassModal: React.FC<GlassModalProps> = ({
   const resolvedVariant = useGlassVariant(variant);
   const glassCls = getGlassUtilityClasses(resolvedVariant, false);
 
-  if (!isOpen) return null;
+  const visible = open !== undefined ? open : (isOpen ?? true);
+  if (!visible) return null;
 
   const sizeCls =
     size === 'xl'
-      ? 'dshm-modal-detail max-w-2xl'
+      ? 'dshm-modal--lg dshm-modal-detail max-w-2xl'
       : size === 'lg'
-      ? 'dshm-modal-config max-w-xl'
+      ? 'dshm-modal--lg dshm-modal-config max-w-xl'
       : 'max-w-lg';
 
   return (
@@ -273,7 +333,7 @@ export const GlassModal: React.FC<GlassModalProps> = ({
             {headerActions}
             <button
               type="button"
-              className={`dshm-action-btn ${getGlassUtilityClasses(resolvedVariant, true)}`}
+              className={`dshm-modal-close dshm-action-btn ${getGlassUtilityClasses(resolvedVariant, true)}`}
               onClick={onClose}
               title="关闭"
             >

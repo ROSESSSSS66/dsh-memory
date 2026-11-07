@@ -164,4 +164,89 @@ describe('Memory Health & Conflict Doctor (src/core/health.ts)', () => {
     expect(healRes.report.contradictions).toHaveLength(0);
     expect(healRes.report.missingEmbeddingsCount).toBe(0);
   });
+
+  it('v0.6.0 Autonomous Doctor: auto-promotes high-confidence candidates and auto-applies verified repair proposals', () => {
+    // 1. Insert a high-confidence candidate memory
+    const cand = upsertCandidate(
+      db,
+      {
+        type: 'procedural',
+        content: '全自动部署流水线要求在合并主干前通过全部 120 条门禁回归测试',
+        scope: 'workspace',
+        workspaceId: ws,
+        source_kind: 'assistant',
+        status: 'candidate',
+        confidence: 0.85,
+        origin_kinds: ['tool'],
+        sources: [{ session_id: 's_auto', seq: 1, kind: 'tool' }],
+        actor: 'llm',
+      },
+      now
+    );
+    const candId = (cand as any).id;
+
+    // 2. Insert an active memory and a pending repair proposal (revise)
+    const orig = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: '缓存集群连接池最大连接数配置为 50。',
+        slot_key: 'redis.max_pool',
+        scope: 'workspace',
+        workspaceId: ws,
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's_auto', seq: 2, kind: 'user' }],
+        actor: 'user',
+      },
+      now
+    );
+    const origId = (orig as any).id;
+
+    const revCand = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: '缓存集群连接池最大连接数已扩容配置为 128。',
+        slot_key: 'redis.max_pool',
+        scope: 'workspace',
+        workspaceId: ws,
+        source_kind: 'assistant',
+        status: 'candidate',
+        confidence: 0.92,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's_auto', seq: 3, kind: 'user' }],
+        actor: 'llm',
+      },
+      now + 10
+    );
+    const revCandId = (revCand as any).id;
+
+    db.run(
+      `INSERT INTO repair_proposals (
+        job_id, memory_id, content_rev, action, candidate_ids, reason, status, created_at, expires_at
+      ) VALUES (1, ?, 1, 'revise', ?, 'Pool size updated to 128', 'candidate', ?, ?)`,
+      [origId, JSON.stringify([revCandId]), now + 20, now + 86400_000]
+    );
+
+    const healRes = autoHealMemoryHealth(db, { workspaceId: ws, now: now + 100 });
+    expect(healRes.candidatesPromoted).toBeGreaterThanOrEqual(1);
+    expect(healRes.repairsApplied).toBe(1);
+
+    const promotedRow = db.get<{ status: string }>('SELECT status FROM memories WHERE id = ?', [
+      candId,
+    ]);
+    expect(promotedRow?.status).toBe('active');
+
+    const origAfter = db.get<{ status: string }>('SELECT status FROM memories WHERE id = ?', [
+      origId,
+    ]);
+    expect(origAfter?.status).toBe('superseded');
+
+    const revAfter = db.get<{ status: string }>('SELECT status FROM memories WHERE id = ?', [
+      revCandId,
+    ]);
+    expect(revAfter?.status).toBe('active');
+  });
 });

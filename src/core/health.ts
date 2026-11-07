@@ -5,8 +5,14 @@ import {
   cosineSimilarity,
   backfillMissingEmbeddings,
 } from './vector.js';
-import { mergeMemories, saveVersionSnapshot, addRelation } from './writer.js';
+import {
+  mergeMemories,
+  saveVersionSnapshot,
+  addRelation,
+  approveCandidate,
+} from './writer.js';
 import { checkAndRepairFts } from '../evolution/maintenance.js';
+import { approveRepairProposal, listRepairProposals } from '../evolution/repair.js';
 
 export interface DuplicatePairItem {
   sourceId: string;
@@ -66,6 +72,8 @@ export interface AutoHealResult {
   duplicatesMerged: number;
   contradictionsResolved: number;
   linksWeaved: number;
+  candidatesPromoted?: number;
+  repairsApplied?: number;
   report: MemoryHealthReport;
 }
 
@@ -346,36 +354,36 @@ export function auditMemoryHealth(
   const recommendations: string[] = [];
   if (!ftsConsistent) {
     recommendations.push(
-      'FTS5 倒排索引行数与 memories 主表不一致，建议立即执行「运行老化维护 (Maintain)」自动重建 FTS5 索引。'
+      'FTS5 倒排索引行数与 memories 主表存在偏差，全自动自愈守护进程将在下一周期自动对齐并重建索引。'
     );
   }
   if (duplicatePairs.length > 0) {
     recommendations.push(
-      `检测到 ${duplicatePairs.length} 对高相似或共享槽位 (slot_key) 的活跃记忆，可使用「一键合并去重」将其收敛为单条权威记忆。`
+      `检测到 ${duplicatePairs.length} 对高相似或共享槽位 (slot_key) 的活跃记忆，全自动自愈引擎将自动合并去重并收敛因果链。`
     );
   }
   if (contradictions.length > 0) {
     recommendations.push(
-      `存在 ${contradictions.length} 组尚未消解的显式矛盾记忆 (contradicts)，建议审阅并归档旧规则。`
+      `存在 ${contradictions.length} 组尚未消解的显式矛盾记忆 (contradicts)，全自动自愈引擎将依据效用与置信度自动裁决并归档旧规则。`
     );
   }
   if (staleMemories.length > 0) {
     recommendations.push(
-      `发现 ${staleMemories.length} 条低效用记忆 (Utility < 0.38)，可通过后台维护或手动归档释放召回信噪比。`
+      `发现 ${staleMemories.length} 条低效用记忆 (Utility < 0.38)，全自动老化维护守护进程将自动降级归档以保障召回信噪比。`
     );
   }
   if (counts.candidate > 10) {
     recommendations.push(
-      `当前有 ${counts.candidate} 条候选记忆待晋升，建议触发「蒸馏会话 (Distill)」或「反思升华 (Reflect)」加速沉淀。`
+      `当前有 ${counts.candidate} 条候选记忆在观察池中，高置信度候选将由全自动晋升流水线自动转正。`
     );
   }
   if (orphanMemoriesCount >= 3) {
     recommendations.push(
-      `检测到 ${orphanMemoriesCount} 条缺乏拓扑关联的孤岛记忆，建议执行「一键智能自愈 (Auto-Heal)」触发 A-Mem 双链织网。`
+      `检测到 ${orphanMemoriesCount} 条缺乏拓扑关联的孤岛记忆，A-Mem 自动双链织网引擎将在后台自动编织语义图谱。`
     );
   }
   if (recommendations.length === 0) {
-    recommendations.push('记忆库结构健康：FTS5 索引同步、无冗余槽位冲突、无活跃矛盾记忆。');
+    recommendations.push('全自动记忆系统运行健康：FTS5 索引同步、无冗余槽位冲突、无活跃矛盾记忆。');
   }
 
   return {
@@ -629,7 +637,53 @@ export function autoHealMemoryHealth(
     contradictionsResolved++;
   }
 
-  // 5. A-Mem Zettelkasten 孤岛节点自动双链织网
+  // 5. 全自动落地待处理的 RIME 记忆修复提案 (Auto-Apply Verified Repair Proposals)
+  let repairsApplied = 0;
+  try {
+    const pendingProposals = listRepairProposals(db, 'candidate');
+    for (const prop of pendingProposals) {
+      if (prop.expiresAt > now) {
+        const res = approveRepairProposal(db, prop.id, 'autonomous-doctor', now);
+        if (res.ok) {
+          repairsApplied++;
+        }
+      }
+    }
+  } catch {
+    // 忽略异常确保自愈流水线幂等继续
+  }
+
+  // 6. 全自动晋升高置信度候选记忆 (Auto-Promote Verified Candidates)
+  let candidatesPromoted = 0;
+  try {
+    const candidateRows = options.workspaceId
+      ? db.all<{ id: string }>(
+          `SELECT id FROM memories
+           WHERE status = 'candidate'
+             AND confidence >= 0.5
+             AND (workspace_id = ? OR scope = 'global')
+           ORDER BY confidence DESC, utility DESC
+           LIMIT 30`,
+          [options.workspaceId]
+        )
+      : db.all<{ id: string }>(
+          `SELECT id FROM memories
+           WHERE status = 'candidate'
+             AND confidence >= 0.5
+           ORDER BY confidence DESC, utility DESC
+           LIMIT 30`
+        );
+    for (const cand of candidateRows) {
+      const appRes = approveCandidate(db, cand.id, 'autonomous-doctor', now);
+      if (appRes.action === 'approved') {
+        candidatesPromoted++;
+      }
+    }
+  } catch {
+    // 忽略异常确保自愈流水线幂等继续
+  }
+
+  // 7. A-Mem Zettelkasten 孤岛节点自动双链织网
   const linksWeaved = weaveZettelkastenLinks(db, {
     workspaceId: options.workspaceId,
     maxNewLinks: 30,
@@ -647,6 +701,8 @@ export function autoHealMemoryHealth(
     duplicatesMerged,
     contradictionsResolved,
     linksWeaved,
+    candidatesPromoted,
+    repairsApplied,
     report: afterReport,
   };
 }
