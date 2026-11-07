@@ -105,6 +105,7 @@ export interface CandidateInput {
   valid_from?: number | null;
   valid_to?: number | null;
   importance?: number; // 1..10
+  supersedesId?: string;
   status?: 'candidate' | 'active';
   actor: 'rule' | 'llm' | 'user' | 'lab' | 'maintenance' | 'system';
 }

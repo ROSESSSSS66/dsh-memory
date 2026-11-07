@@ -8,7 +8,7 @@ export const PREFERENCE_INDICATOR_REGEX =
   /(?:以后|今后|总是|一律|永远|不要再|别再|每次都|统一使用|必须使用|严禁|切勿|绝不|不能水文|不要产生新|上限上调到|from now on|always|never|must always|do not ever)/i;
 
 const ONE_OFF_TASK_PROMPT_REGEX =
-  /^(?:请|帮我|给我)?(?:创建一个|写一个|生成一个|画一个|绘制一个|制作一个)\b/i;
+  /^(?:请\s*)?(?:帮我|给我|替我)?\s*(?:创建一个|写一个|生成一个|画一个|绘制一个|制作一个)/i;
 
 const DURABLE_HABIT_MARKER_REGEX =
   /(?:以后|今后|总是|一律|永远|每次都|统一使用|必须使用|from now on|always|must always)/i;
@@ -329,7 +329,18 @@ export function runRules(
         const jobKey = `reflect:failure_sig:${sigHash}`;
         db.run(
           'INSERT OR IGNORE INTO jobs (kind, key, payload, status, created_at, next_eligible_at) VALUES (\'reflect\', ?, ?, \'queued\', ?, 0)',
-          [jobKey, JSON.stringify({ sig, workspaceId: event.workspace_id }), now]
+          [
+            jobKey,
+            JSON.stringify({
+              sig,
+              workspaceId: event.workspace_id,
+              sessionId: event.session_id,
+              turn: event.turn ?? 0,
+              signalKind: 'repeated_tool_failure',
+              correctionMessage: `Repeated tool failure (${event.tool_name}): ${normalized.slice(0, 200)}`,
+            }),
+            now,
+          ]
         );
       }
     }

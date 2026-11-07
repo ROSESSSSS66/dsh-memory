@@ -1,11 +1,17 @@
-import type { Db, RawEvent, CandidateInput } from '../types.js';
+import type { Db, RawEvent, CandidateInput, MemoryRecord } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import type { EvidenceLedger } from './types.js';
 import { PROMPT_DISTILL, renderTranscript } from './prompts.js';
 import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
 import { reconcileCandidate } from './reconciler.js';
-import { upsertCandidate, addRelation } from '../core/writer.js';
+import {
+  upsertCandidate,
+  addRelation,
+  saveVersionSnapshot,
+  invalidateMemory,
+} from '../core/writer.js';
+import { removeCachedRuntimeEmbedding } from '../core/vector.js';
 import { estimateTokens } from '../core/tokens.js';
 
 export interface DistillBatchOptions {
@@ -22,7 +28,10 @@ export interface DistillResult {
   sessionId?: string;
   consumedCount: number;
   itemsCreated: number;
+  itemsUpdated?: number;
+  itemsDiscarded?: number;
   candidateIds?: string[];
+  discardedIds?: string[];
   error?: string;
 }
 
@@ -112,11 +121,41 @@ export async function distillSession(
   const batchEvents: RawEvent[] = [];
   const testLedger: EvidenceLedger = new Map();
 
+  // 查询当前工作区存量非冻结记忆摘要，供 LLM 自动识别过时/无效记忆并执行原地升级
+  const existingRows = workspaceId
+    ? db.all<{
+        id: string;
+        type: string;
+        status: string;
+        slot_key: string | null;
+        summary: string;
+        content: string;
+      }>(
+        `SELECT id, type, status, slot_key, summary, content
+         FROM memories
+         WHERE (workspace_id = ? OR scope IN ('user', 'global'))
+           AND status IN ('active', 'candidate')
+           AND pinned = 0
+           AND type != 'meta'
+           AND COALESCE(slot_key, '') NOT LIKE 'core:%'
+         ORDER BY updated_at DESC
+         LIMIT 16`,
+        [workspaceId]
+      )
+    : [];
+  const existingMemoriesText = existingRows
+    .map(
+      (m) =>
+        `[${m.id}] type=${m.type} status=${m.status}${m.slot_key ? ` slot=${m.slot_key}` : ''}: ${(m.summary || m.content).slice(0, 120)}`
+    )
+    .join('\n');
+
   const wrapperUserPrompt = PROMPT_DISTILL.buildUser({
     cwd: workspaceId,
     sessionId: targetSessionId,
     rangeLabel: `seq ${allUnprocessed[0].seq}..${allUnprocessed[allUnprocessed.length - 1].seq}`,
     isoTime: new Date(allUnprocessed[0].time).toISOString(),
+    existingMemories: existingMemoriesText,
     transcript: '',
   });
   let runningTokens = estimateTokens(PROMPT_DISTILL.system + wrapperUserPrompt) + 200;
@@ -155,10 +194,15 @@ export async function distillSession(
     sessionId: targetSessionId,
     rangeLabel: `seq ${batchEvents[0].seq}..${batchEvents[batchEvents.length - 1].seq}`,
     isoTime: new Date(batchEvents[0].time).toISOString(),
+    existingMemories: existingMemoriesText,
     transcript: finalTranscript,
   });
 
   // 3. 调用离线 LLM
+  const realCwd =
+    options.cwd && options.cwd.trim() && !/^[0-9a-f]{16}$/i.test(options.cwd.trim())
+      ? options.cwd.trim()
+      : process.cwd();
   const llmRes = await callOfflineLLM(
     db,
     {
@@ -167,7 +211,7 @@ export async function distillSession(
       systemPrompt: PROMPT_DISTILL.system,
       userPrompt,
       maxOutputTokens: PROMPT_DISTILL.maxOutputTokens,
-      cwd: options.cwd || workspaceId,
+      cwd: realCwd,
       workspaceId,
       signal: options.signal,
       jobDeadline: options.jobDeadline,
@@ -204,23 +248,88 @@ export async function distillSession(
     };
   }
 
-  // 5. 同一事务提交：智能调和 (Mem0/Zep Slot & Semantic Reconciliation) 写入候选记忆、推进 processed=2、推进 watermark
+  // 5. 同一事务提交：智能调和 (Mem0/Zep Slot & Semantic Reconciliation) + LLM 自动舍弃无效记忆 + 自动升级旧记忆
   const candidateIds: string[] = [];
+  const discardedIds: string[] = [];
+  let itemsUpdated = 0;
   const now = Date.now();
   try {
     db.transaction(() => {
-      // 写入记忆（先经 reconcileCandidate 推断规范槽位、抑制完全冗余项并关联语义演化冲突边）
+      // 5.1 执行 LLM 识别出的无效/过时记忆淘汰指令 (discard_ids)
+      if (parseRes.discardIds && parseRes.discardIds.length > 0) {
+        for (const discardId of parseRes.discardIds) {
+          const target = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [discardId]);
+          if (
+            target &&
+            target.status !== 'frozen' &&
+            target.pinned === 0 &&
+            (target.status === 'active' || target.status === 'candidate')
+          ) {
+            saveVersionSnapshot(db, target, 'llm_distill_discard', 'llm', now);
+            const nextStatus = target.status === 'candidate' ? 'rejected' : 'archived';
+            db.run(
+              `UPDATE memories
+               SET status = ?, valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ?
+               WHERE id = ?`,
+              [nextStatus, now, now, now, target.id]
+            );
+            removeCachedRuntimeEmbedding(target.id);
+            discardedIds.push(target.id);
+          }
+        }
+      }
+
+      // 5.2 写入新记忆并自动执行旧记忆升级取代 (LLM 显式 supersedes_id 原地取代 + Mem0 冲突边关联)
       for (const item of parseRes.items) {
         const decision = reconcileCandidate(db, item);
-        if (decision.action === 'NOOP' && decision.reason === 'subsumed_by_existing_memory') {
+        if (
+          decision.action === 'NOOP' &&
+          (decision.reason === 'subsumed_by_existing_memory' ||
+            decision.reason === 'identical_slot_and_content')
+        ) {
           continue;
         }
+
+        const oldMem = item.supersedesId
+          ? db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [item.supersedesId])
+          : undefined;
+
         const upsertRes = upsertCandidate(db, item, now);
         if ('id' in upsertRes) {
           if (upsertRes.action !== 'merged') {
             candidateIds.push(upsertRes.id);
           }
+
           if (
+            oldMem &&
+            oldMem.id !== upsertRes.id &&
+            oldMem.status !== 'frozen' &&
+            (oldMem.status === 'active' || oldMem.status === 'candidate')
+          ) {
+            saveVersionSnapshot(db, oldMem, 'llm_auto_supersede', 'llm', now);
+            db.run(
+              `UPDATE memories
+               SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ?
+               WHERE id = ?`,
+              [now, now, now, oldMem.id]
+            );
+            removeCachedRuntimeEmbedding(oldMem.id);
+            addRelation(db, upsertRes.id, oldMem.id, 'supersedes', now);
+            itemsUpdated++;
+
+            if (
+              oldMem.status === 'active' &&
+              item.origin_kinds.includes('user') &&
+              !item.origin_kinds.includes('web')
+            ) {
+              db.run(
+                `UPDATE memories
+                 SET status = 'active', approved_at = ?, approved_by = 'llm-auto-update', updated_at = ?
+                 WHERE id = ?`,
+                [now, now, upsertRes.id]
+              );
+            }
+          } else if (
             (decision.action === 'UPDATE' || decision.action === 'DELETE') &&
             decision.targetId &&
             decision.targetId !== upsertRes.id &&
@@ -268,6 +377,9 @@ export async function distillSession(
     sessionId: targetSessionId,
     consumedCount: batchEvents.length,
     itemsCreated: candidateIds.length,
+    itemsUpdated,
+    itemsDiscarded: discardedIds.length,
     candidateIds,
+    discardedIds,
   };
 }

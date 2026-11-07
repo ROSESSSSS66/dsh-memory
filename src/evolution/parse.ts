@@ -7,6 +7,8 @@ import type {
   ParseResult,
   RepairAction,
   JudgeOutput,
+  CurateOutput,
+  CurateUpdateItem,
 } from './types.js';
 import { redactSecrets } from '../core/privacy.js';
 
@@ -23,6 +25,7 @@ const VALID_MEMORY_TYPES = new Set<MemoryType>([
 
 const VALID_SCOPES = new Set<Scope>(['global', 'workspace', 'session']);
 const VALID_SLOT_KEY_REGEX = /^[a-z0-9.:_-]+$/;
+const VALID_MEMORY_ID_REGEX = /^m_[a-z0-9_]{4,32}$/i;
 
 export interface ParseOptions {
   taskKind: LLMTaskKind;
@@ -73,6 +76,11 @@ export function parseOutput(raw: string, options: ParseOptions): ParseResult {
     return parseJudgeOutput(parsed);
   }
 
+  // B-6: 离线记忆治理与无效记忆淘汰 (curate-v1)
+  if (options.taskKind === 'curate') {
+    return parseCurateOutput(parsed);
+  }
+
   // B-4: 修复
   if (options.taskKind === 'repair') {
     return parseRepairOutput(parsed, options);
@@ -86,12 +94,26 @@ export function parseOutput(raw: string, options: ParseOptions): ParseResult {
     };
   }
 
-  // 合法空 items 是成功 no-op
+  const rawDiscardList = Array.isArray(parsed.discard_ids)
+    ? parsed.discard_ids
+    : Array.isArray(parsed.obsolete_ids)
+      ? parsed.obsolete_ids
+      : [];
+  const discardIds = Array.from(
+    new Set<string>(
+      rawDiscardList
+        .filter((id: unknown): id is string => typeof id === 'string' && VALID_MEMORY_ID_REGEX.test(id.trim()))
+        .map((id: string) => id.trim())
+    )
+  ).slice(0, 20);
+
+  // 合法空 items 是成功 no-op (或仅包含 discardIds 淘汰指令)
   if (parsed.items.length === 0) {
     return {
       success: true,
       items: [],
       rawItems: [],
+      ...(discardIds.length > 0 ? { discardIds } : {}),
     };
   }
 
@@ -117,7 +139,7 @@ export function parseOutput(raw: string, options: ParseOptions): ParseResult {
 
   const { validItems, droppedNotes } = validateMemoryItems(parsed.items, options);
 
-  if (parsed.items.length > 0 && validItems.length === 0) {
+  if (parsed.items.length > 0 && validItems.length === 0 && discardIds.length === 0) {
     return {
       success: false,
       error: 'all_items_invalid',
@@ -138,6 +160,7 @@ export function parseOutput(raw: string, options: ParseOptions): ParseResult {
     success: true,
     items: candidateInputs,
     rawItems: validItems,
+    ...(discardIds.length > 0 ? { discardIds } : {}),
     droppedNotes,
   };
 }
@@ -262,7 +285,17 @@ function validateSingleItem(item: any, index: number, options: ParseOptions): st
 
     // 严格检查 quote 是否为该编号实际发送的脱敏文本的连续子串（区分大小写）
     if (!entry.redacted_text.includes(trimmedQuote)) {
-      return `evidence[${j}]_quote_not_substring_of_seq_${ev.seq}`;
+      let matchedWithWorkspacePlaceholder = false;
+      if (trimmedQuote.includes('<workspace>')) {
+        const escapedParts = trimmedQuote
+          .split('<workspace>')
+          .map((part: string) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        const wsPattern = new RegExp(escapedParts.join('[^\\r\\n]{1,260}'));
+        matchedWithWorkspacePlaceholder = wsPattern.test(entry.redacted_text);
+      }
+      if (!matchedWithWorkspacePlaceholder) {
+        return `evidence[${j}]_quote_not_substring_of_seq_${ev.seq}`;
+      }
     }
   }
 
@@ -418,6 +451,79 @@ function parseJudgeOutput(parsed: any): ParseResult {
 }
 
 /**
+ * 解析 B-6 离线记忆治理输出 (curate-v1)
+ */
+function parseCurateOutput(parsed: any): ParseResult {
+  const rawDiscards = Array.isArray(parsed.discard_ids) ? parsed.discard_ids : [];
+  const discardIds = Array.from(
+    new Set<string>(
+      rawDiscards
+        .filter((id: unknown): id is string => typeof id === 'string' && VALID_MEMORY_ID_REGEX.test(id.trim()))
+        .map((id: string) => id.trim())
+    )
+  ).slice(0, 30);
+
+  const rawUpdates = Array.isArray(parsed.updates) ? parsed.updates : [];
+  const updates: CurateUpdateItem[] = [];
+
+  for (const u of rawUpdates.slice(0, 15)) {
+    if (!u || typeof u !== 'object') continue;
+    const targetId = typeof u.target_id === 'string' ? u.target_id.trim() : '';
+    if (!VALID_MEMORY_ID_REGEX.test(targetId)) continue;
+
+    const text = typeof u.text === 'string' ? u.text.trim() : '';
+    if (text.length < 8 || text.length > 800) continue;
+    if (redactSecrets(text).hasSensitive) continue;
+
+    const type: MemoryType =
+      typeof u.type === 'string' && VALID_MEMORY_TYPES.has(u.type as MemoryType)
+        ? (u.type as MemoryType)
+        : 'semantic';
+
+    const slotKey =
+      typeof u.slot_key === 'string' && u.slot_key.length <= 48 && VALID_SLOT_KEY_REGEX.test(u.slot_key)
+        ? u.slot_key
+        : null;
+
+    const confidence =
+      typeof u.confidence === 'number' && Number.isFinite(u.confidence)
+        ? Math.max(0.1, Math.min(1, u.confidence))
+        : 0.85;
+
+    const absorbIds = Array.isArray(u.absorb_ids)
+      ? u.absorb_ids
+          .filter(
+            (id: unknown): id is string =>
+              typeof id === 'string' && VALID_MEMORY_ID_REGEX.test(id.trim()) && id.trim() !== targetId
+          )
+          .map((id: string) => id.trim())
+      : [];
+
+    updates.push({
+      target_id: targetId,
+      absorb_ids: absorbIds,
+      type,
+      text,
+      slot_key: slotKey,
+      confidence,
+    });
+  }
+
+  const curateResult: CurateOutput = {
+    discard_ids: discardIds,
+    updates,
+    reason: typeof parsed.reason === 'string' ? parsed.reason.trim().slice(0, 200) : undefined,
+  };
+
+  return {
+    success: true,
+    items: [],
+    discardIds,
+    curateResult,
+  };
+}
+
+/**
  * 将校验通过的 RawMemoryItem 映射为存储层的 CandidateInput
  */
 export function mapToCandidateInput(
@@ -462,10 +568,16 @@ export function mapToCandidateInput(
     scope = 'workspace';
   }
 
+  const supersedesId =
+    typeof item.supersedes_id === 'string' && VALID_MEMORY_ID_REGEX.test(item.supersedes_id.trim())
+      ? item.supersedes_id.trim()
+      : undefined;
+
   return {
     type: item.type,
     content: item.text.trim(),
     slot_key: item.slot_key || undefined,
+    ...(supersedesId ? { supersedesId } : {}),
     scope,
     workspaceId: options.workspaceId,
     sessionId: scope === 'session' ? options.sessionId : undefined,

@@ -28,7 +28,7 @@ jobs:
       - name: Run Typecheck
         run: npm run typecheck
 
-      - name: Run All Tests (50 suites, 302 tests)
+      - name: Run All Tests (51 suites, 322 tests)
         run: npm test
 
       - name: Run Build

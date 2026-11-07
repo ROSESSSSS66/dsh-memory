@@ -13,7 +13,7 @@ import {
   addRelation,
   approveCandidate,
 } from './writer.js';
-import { checkAndRepairFts } from '../evolution/maintenance.js';
+import { checkAndRepairFts, pruneInvalidMemories } from '../evolution/maintenance.js';
 import { approveRepairProposal, listRepairProposals } from '../evolution/repair.js';
 
 export interface DuplicatePairItem {
@@ -77,6 +77,7 @@ export interface AutoHealResult {
   candidatesPromoted?: number;
   repairsApplied?: number;
   coreBlocksSynced?: number;
+  invalidPruned?: number;
   report: MemoryHealthReport;
 }
 
@@ -832,7 +833,17 @@ export function autoHealMemoryHealth(
     // 忽略异常确保自愈流水线幂等继续
   }
 
+  // 5.5 全自动清理无效、被遮蔽或多次负反馈的噪音记忆 (Auto-Prune Invalid & Noisy Memories)
+  let invalidPruned = 0;
+  try {
+    const pruneRes = pruneInvalidMemories(db, { workspaceId: options.workspaceId, now });
+    invalidPruned = pruneRes.prunedCount;
+  } catch {
+    // 忽略异常确保自愈流水线幂等继续
+  }
+
   // 6. 全自动晋升高置信度候选记忆 (Auto-Promote Verified Candidates)
+  // 安全边界：排除外部不可信 web 来源与未经验证的纯规则工具报错候选
   let candidatesPromoted = 0;
   try {
     const candidateRows = options.workspaceId
@@ -840,6 +851,9 @@ export function autoHealMemoryHealth(
           `SELECT id FROM memories
            WHERE status = 'candidate'
              AND confidence >= 0.5
+             AND source_kind != 'web'
+             AND COALESCE(origin_kinds, '') NOT LIKE '%"web"%'
+             AND NOT (source_kind = 'rule' AND COALESCE(origin_kinds, '') LIKE '%"tool"%')
              AND (workspace_id = ? OR scope IN ('user', 'global'))
            ORDER BY confidence DESC, utility DESC
            LIMIT 30`,
@@ -849,6 +863,9 @@ export function autoHealMemoryHealth(
           `SELECT id FROM memories
            WHERE status = 'candidate'
              AND confidence >= 0.5
+             AND source_kind != 'web'
+             AND COALESCE(origin_kinds, '') NOT LIKE '%"web"%'
+             AND NOT (source_kind = 'rule' AND COALESCE(origin_kinds, '') LIKE '%"tool"%')
            ORDER BY confidence DESC, utility DESC
            LIMIT 30`
         );
@@ -889,6 +906,7 @@ export function autoHealMemoryHealth(
     candidatesPromoted,
     repairsApplied,
     coreBlocksSynced,
+    invalidPruned,
     report: afterReport,
   };
 }

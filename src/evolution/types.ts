@@ -21,6 +21,7 @@ export interface RawMemoryItem {
   type: MemoryType;
   text: string;
   slot_key?: string | null;
+  supersedes_id?: string | null;
   confidence: number;
   scope: Scope;
   evidence: RawEvidenceItem[];
@@ -28,6 +29,7 @@ export interface RawMemoryItem {
 
 export interface DistillOutput {
   items: RawMemoryItem[];
+  discard_ids?: string[];
 }
 
 export interface ReflectOutput {
@@ -60,7 +62,22 @@ export interface JudgeOutput {
   reason: string;
 }
 
-export type LLMTaskKind = 'distill' | 'reflect' | 'consolidate' | 'repair' | 'judge';
+export interface CurateUpdateItem {
+  target_id: string;
+  absorb_ids?: string[];
+  type: MemoryType;
+  text: string;
+  slot_key?: string | null;
+  confidence: number;
+}
+
+export interface CurateOutput {
+  discard_ids: string[];
+  updates: CurateUpdateItem[];
+  reason?: string;
+}
+
+export type LLMTaskKind = 'distill' | 'reflect' | 'consolidate' | 'repair' | 'judge' | 'curate';
 
 export interface ReserveParams {
   jobKind: string;
@@ -90,9 +107,11 @@ export interface ParseResultSuccess<T = CandidateInput[]> {
   success: true;
   items: T;
   rawItems?: RawMemoryItem[];
+  discardIds?: string[];
   action?: RepairAction;
   reason?: string;
   judgeResult?: JudgeOutput;
+  curateResult?: CurateOutput;
   droppedNotes?: string[];
 }
 

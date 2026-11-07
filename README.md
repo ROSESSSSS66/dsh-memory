@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
   <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
-  <img src="https://img.shields.io/badge/Tests-302_Passed_(50_Suites)-success?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-322_Passed_(51_Suites)-success?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Recall%40Inject-100.0%25_(120%2F120)-blueviolet?style=flat-square" alt="Recall Rate" />
   <img src="https://img.shields.io/badge/Online_Latency-p95_0.9ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />
@@ -351,7 +351,7 @@ npm run build
 项目内置完整的离线评测生成器（4 大评测套件共 120 条跨领域标准用例 + 20 条关键红线用例）与多级规模压测器：
 
 ```bash
-# 1. 运行 TypeScript 严格类型检查与 50 个测试套件 (302 项测试)
+# 1. 运行 TypeScript 严格类型检查与 51 个测试套件 (322 项测试)
 npm run check
 
 # 2. 构建服务端插件、前端 Claude Studio 自治控制台与评测 CLI

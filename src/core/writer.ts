@@ -248,7 +248,15 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
 
     // 3. 精确去重 (Merge)
     const existingSame = db.get<MemoryRecord>(
-      `SELECT * FROM memories WHERE type = ? AND scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND COALESCE(slot_key, '') = ? AND hash = ?`,
+      `SELECT * FROM memories
+       WHERE type = ?
+         AND scope = ?
+         AND COALESCE(workspace_id, '') = ?
+         AND COALESCE(session_id, '') = ?
+         AND COALESCE(slot_key, '') = ?
+         AND hash = ?
+       ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'frozen' THEN 1 WHEN 'candidate' THEN 2 ELSE 3 END ASC, updated_at DESC
+       LIMIT 1`,
       [c.type, scope, workspace_id || '', session_id || '', slotKey || '', hash]
     );
 
@@ -268,6 +276,28 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
         }
       }
 
+      const isInactive =
+        existingSame.status === 'superseded' ||
+        existingSame.status === 'archived' ||
+        existingSame.status === 'rejected';
+
+      // 若旧记录已处于 superseded / archived / rejected 状态，用户显式确认时必须重新激活 (避免 A->B->A 状态死锁)
+      if (isInactive && (isExplicitUser || initialStatus === 'active')) {
+        db.run(
+          `UPDATE memories
+           SET status = 'active',
+               valid_to = NULL,
+               confidence = ?,
+               approved_at = ?,
+               approved_by = ?,
+               version = version + 1,
+               updated_at = ?
+           WHERE id = ?`,
+          [confidence, now, isExplicitUser ? 'user' : c.actor || 'user', now, existingSame.id]
+        );
+        return { action: 'merged', id: existingSame.id };
+      }
+
       // 同一证据再次重放，confidence/use_count 不变
       if (isReplay) {
         return { action: 'merged', id: existingSame.id };
@@ -278,6 +308,12 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
         db.run(
           `UPDATE memories SET status = 'active', approved_at = ?, approved_by = 'user', updated_at = ? WHERE id = ?`,
           [now, now, existingSame.id]
+        );
+      } else if (isInactive) {
+        // 非显式用户的新证据再次命中已归档/取代记录，恢复为 candidate 待审状态
+        db.run(
+          `UPDATE memories SET status = 'candidate', valid_to = NULL, confidence = ?, updated_at = ? WHERE id = ?`,
+          [confidence, now, existingSame.id]
         );
       } else if (existingSame.status === 'candidate') {
         // 未批准记录使用 noisy-or 聚合独立证据
