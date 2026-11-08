@@ -32,6 +32,7 @@
     "src/core/migrations",
     "scripts/postinstall.mjs",
     "README.md",
+    "cordis.patch.yml",
     "LICENSE"
   ],
   "exports": {
@@ -42,6 +43,9 @@
     "./client": "./dist/client.js"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-locale",
