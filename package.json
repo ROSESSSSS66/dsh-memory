@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory",
   "version": "0.7.0",
-  "description": "DSH Self-Evolving Memory System v0.7.0 (Hybrid MMR & Autonomous Core Sync Edition) — 100.0% Recall@Inject, inline 128D semantic embeddings, Hybrid Lexical-Semantic Submodular MMR, HippoRAG 2 + SYNAPSE 7-channel retrieval, Autonomous Core Memory sync, Distillation-to-Reconciler closed loop, and single-button Claude Studio UI (Nwflower/dsh-claude-style) for DeepSeek Desktop (DSH)",
+  "description": "Self-evolving long-term memory system for DeepSeek Desktop (DSH) with zero-prompt recall, associative knowledge graphs, and workspace memory sync.",
   "keywords": [
     "dsh",
     "deepseek",
