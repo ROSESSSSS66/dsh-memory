@@ -93,14 +93,18 @@ export class JobScheduler {
    */
   scheduleTurnStopping(): void {
     if (this.isStopped) return;
-    if (this.isStopped) return;
     for (const t of this.timers) {
       clearTimeout(t);
     }
     this.timers.clear();
     const timer = setTimeout(async () => {
       this.timers.delete(timer);
-      await this.triggerNow();
+      // 定时器回调中的异常若不捕获会成为 unhandledRejection，在 Node 默认策略下会终止宿主进程
+      try {
+        await this.triggerNow();
+      } catch (err: any) {
+        console.warn('[dsh-memory] scheduled job cycle failed:', err?.message || err);
+      }
     }, 30_000);
     if (typeof (timer as any).unref === 'function') {
       (timer as any).unref();

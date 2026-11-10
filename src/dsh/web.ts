@@ -20,7 +20,7 @@ import {
   rollback,
   addRelation,
 } from '../core/writer.js';
-import { redactSecrets, isOfflineEndpointAllowed } from '../core/privacy.js';
+import { redactSecrets, isOfflineEndpointAllowed, isSafeApiKeyEnvName } from '../core/privacy.js';
 import { workspaceId } from '../core/scope.js';
 import { serializeMemoryToMarkdown, trashMemory } from '../core/markdown.js';
 import { estimateTokens } from '../core/tokens.js';
@@ -55,7 +55,7 @@ import {
   pruneInvalidMemories,
   curateMemoriesWithLLM,
 } from '../evolution/maintenance.js';
-import { resolveEndpointAndProtocol, buildProtocolPayload } from '../evolution/llm.js';
+import { resolveEndpointAndProtocol, buildProtocolPayload, type LLMProtocol } from '../evolution/llm.js';
 import {
   getActiveStrategy,
   listStrategies,
@@ -126,20 +126,80 @@ export function getSanitizedConfig(cfg: PluginConfig) {
   };
 }
 
-function isTrustedOrigin(originHeader?: string): boolean {
+function isLoopbackHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return (
+    h === 'localhost' ||
+    h.endsWith('.localhost') ||
+    h === '::1' ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)
+  );
+}
+
+function isIpLiteral(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, '');
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || (h.includes(':') && /^[0-9a-f:.]+$/i.test(h));
+}
+
+/**
+ * 跨源校验：仅信任回环地址与桌面壳协议。
+ * 注意：`Origin: null`（沙箱 iframe / data: URL / 跨源重定向）不再被信任，
+ * 否则任意网页都能借此发起 CSRF 并读取带 ACAO 回显的响应（如 /export 全量记忆）。
+ */
+export function isTrustedOrigin(originHeader?: string): boolean {
   if (!originHeader) return true;
   const trimmed = originHeader.trim();
-  if (trimmed === 'null' || trimmed.startsWith('file://') || trimmed.startsWith('app://') || trimmed.startsWith('dsh://')) {
+  if (trimmed.startsWith('file://') || trimmed.startsWith('app://') || trimmed.startsWith('dsh://')) {
     return true;
   }
   try {
     const u = new URL(trimmed);
-    const h = u.hostname.toLowerCase();
-    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return isLoopbackHostname(u.hostname);
   } catch {
     return false;
   }
 }
+
+/**
+ * DNS Rebinding 防护：同源 GET 不携带 Origin，必须额外校验 Host。
+ * 允许回环主机名与 IP 字面量，拒绝外部域名被解析到本机的情形。
+ */
+export function isAllowedHostHeader(hostHeader?: string): boolean {
+  if (!hostHeader) return true;
+  try {
+    const u = new URL(`http://${hostHeader.trim()}`);
+    return isLoopbackHostname(u.hostname) || isIpLiteral(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * allowedOfflineEndpoints 条目：HTTP(S) URL 或 host[:port]
+ */
+function isValidEndpointEntry(raw: string): boolean {
+  return isHttpUrl(raw) || /^[a-z0-9.-]+(:\d{1,5})?$/i.test(raw);
+}
+
+function isHttpUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+const VALID_SCOPES = ['global', 'workspace', 'user', 'session'] as const;
+const MAX_BATCH_IDS = 500;
+const MAX_IMPORT_ITEMS = 5000;
+const MAX_BODY_BYTES = 1024 * 1024;
+const BODY_TOO_LARGE = Symbol('body_too_large');
 
 function isSameOriginUrl(urlA?: string, urlB?: string): boolean {
   if (!urlA || !urlB) return false;
@@ -167,23 +227,31 @@ function stripEmbedding(m: MemoryRecord | null | undefined) {
   return rest;
 }
 
+class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
 function readBodyJson(req: IncomingMessage): Promise<any> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     let tooLarge = false;
     req.on('data', (chunk) => {
+      if (tooLarge) return;
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += buf.length;
-      if (size > 1024 * 1024) {
+      if (size > MAX_BODY_BYTES) {
         tooLarge = true;
-        return; // 1MB limit
+        chunks.length = 0; // 释放已缓冲数据
+        return;
       }
       chunks.push(buf);
     });
     req.on('end', () => {
       if (tooLarge) {
-        resolve({});
+        reject(new HttpError(413, `Request body exceeds ${MAX_BODY_BYTES} bytes`));
         return;
       }
       try {
@@ -198,6 +266,10 @@ function readBodyJson(req: IncomingMessage): Promise<any> {
   });
 }
 
+function str(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : '';
+}
+
 export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
   if (!ctx.webServer?.register) {
     return () => {};
@@ -205,6 +277,15 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
   let lastAutoCycleAt = 0;
   let lastLlmCurateAt = 0;
+  const healthCache = new Map<string, { fp: string; at: number; health: unknown }>();
+  /** 低成本数据指纹：任何记忆写入都会改变 updated_at / 行数，关系变化改变关系行数 */
+  const healthFingerprint = (): string => {
+    const m = db.get<{ c: number; u: number | null; v: number | null }>(
+      'SELECT COUNT(*) AS c, MAX(updated_at) AS u, SUM(version) AS v FROM memories'
+    );
+    const r = db.get<{ c: number }>('SELECT COUNT(*) AS c FROM memory_relations');
+    return `${m?.c}:${m?.u}:${m?.v}:${r?.c}`;
+  };
   const runThrottledAutonomousCycle = (wsId?: string) => {
     const now = Date.now();
     if (now - lastAutoCycleAt < 45_000) return;
@@ -223,10 +304,26 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
     path: API_PREFIX,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       const reqOrigin = typeof req?.headers?.origin === 'string' ? req.headers.origin : undefined;
+      const reqHost = typeof req?.headers?.host === 'string' ? req.headers.host : undefined;
+      if (!isAllowedHostHeader(reqHost)) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: 'Host not allowed' }));
+        return;
+      }
       if (reqOrigin && !isTrustedOrigin(reqOrigin)) {
         res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, error: 'Cross-origin request denied' }));
         return;
+      }
+      // CSRF 防护：真实浏览器请求的 POST 必须是 application/json（强制触发 CORS 预检），
+      // 拦截 text/plain / form 等“简单请求”跨站投递。
+      if (req.method === 'POST' && req.headers) {
+        const ctype = String(req.headers['content-type'] || '').toLowerCase();
+        if (!ctype.startsWith('application/json')) {
+          res.writeHead(415, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, error: 'Content-Type must be application/json' }));
+          return;
+        }
       }
       if (reqOrigin) {
         (res as any).__trustedOrigin = reqOrigin;
@@ -255,25 +352,27 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const st = stats(db, wsId);
           const ledger = getLedgerUsage(db, undefined, cfg);
 
-          // Recent 7 days injection stats
+          // Recent 7 days injection stats（SQL 聚合，避免把整周注入日志拉到 JS 层逐行累加）
           const sevenDaysAgo = Date.now() - 7 * 86400000;
-          const injRows = db.all<{ tokens: number; outcome: number | null }>(
-            'SELECT tokens, outcome FROM injections WHERE created_at >= ?',
+          const injAgg = db.get<{ cnt: number; total_tokens: number | null; corrections: number | null }>(
+            `SELECT COUNT(*) AS cnt,
+                    SUM(tokens) AS total_tokens,
+                    SUM(CASE WHEN outcome IS NOT NULL AND outcome <= -0.5 THEN 1 ELSE 0 END) AS corrections
+             FROM injections WHERE created_at >= ?`,
             [sevenDaysAgo]
           );
-          let totalTokens = 0;
-          let corrections = 0;
-          for (const r of injRows) {
-            totalTokens += r.tokens;
-            if (r.outcome !== null && r.outcome <= -0.5) {
-              corrections++;
-            }
-          }
-          const avgTokens = injRows.length > 0 ? Math.round(totalTokens / injRows.length) : 0;
+          const injCount = Number(injAgg?.cnt || 0);
+          const totalTokens = Number(injAgg?.total_tokens || 0);
+          const corrections = Number(injAgg?.corrections || 0);
+          const avgTokens = injCount > 0 ? Math.round(totalTokens / injCount) : 0;
           const correctionRate =
-            injRows.length > 0 ? Number(((corrections / injRows.length) * 100).toFixed(1)) : 0;
+            injCount > 0 ? Number(((corrections / injCount) * 100).toFixed(1)) : 0;
 
-          const pendingRepairs = listRepairProposals(db, 'candidate');
+          const pendingRepairsCount = Number(
+            db.get<{ c: number }>(
+              `SELECT COUNT(*) AS c FROM repair_proposals WHERE status = 'candidate'`
+            )?.c || 0
+          );
           const activeStrat = getActiveStrategy(db, cfg);
           const coreBlocks = getAllCoreMemories(db, { workspaceId: wsId });
           const stableLayer = renderStableLayer(
@@ -297,7 +396,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             stableBudgetTokens: cfg.stableBudgetTokens || 600,
             stableLayerTokens: stableLayer.stableTokens,
             hardBudgetTokens: cfg.hardBudgetTokens || 3200,
-            pendingRepairsCount: pendingRepairs.length,
+            pendingRepairsCount,
             activeStrategyVersion: activeStrat.version,
             coreMemoryCount: coreBlocks.length,
             ledger: {
@@ -307,7 +406,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               maxDailyTokens: cfg.dailyLLMTokens || 200000,
             },
             recentTelemetry: {
-              injectionCount: injRows.length,
+              injectionCount: injCount,
               avgTokens,
               correctionRate,
             },
@@ -395,6 +494,13 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
         // 1.3. Evolution, Strategy Lab & Repair Proposals (GET)
         if (subPath === '/evolution') {
+          const recentJobsSql =
+            'SELECT id, kind, key, status, attempts, error AS last_error, created_at, finished_at AS updated_at FROM jobs ORDER BY id DESC LIMIT 20';
+          // 轻量模式：前端轮询只需要最近任务，跳过策略列表与修复提案（含逐条记忆查询）的组装
+          if (reqUrl.searchParams.get('lite') === '1') {
+            sendJson(res, 200, { ok: true, recentJobs: db.all(recentJobsSql) });
+            return;
+          }
           let strategies = listStrategies(db);
           if (strategies.length === 0) {
             initDefaultStrategy(db, cfg);
@@ -402,11 +508,26 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
           const activeStrategy = getActiveStrategy(db, cfg);
           const rawProposals = listRepairProposals(db);
+          // 批量加载提案涉及的全部记忆，消除逐条 get() 的 N+1 查询
+          const refIds = new Set<string>();
+          for (const p of rawProposals) {
+            refIds.add(p.memoryId);
+            for (const cid of p.candidateIds) refIds.add(cid);
+          }
+          const memById = new Map<string, Pick<MemoryRecord, 'id' | 'type' | 'content' | 'summary' | 'slot_key' | 'status'>>();
+          if (refIds.size > 0) {
+            for (const m of db.all<Pick<MemoryRecord, 'id' | 'type' | 'content' | 'summary' | 'slot_key' | 'status'>>(
+              'SELECT id, type, content, summary, slot_key, status FROM memories WHERE id IN (SELECT value FROM json_each(?))',
+              [JSON.stringify([...refIds])]
+            )) {
+              memById.set(m.id, m);
+            }
+          }
           const repairProposals = rawProposals.map((p) => {
-            const targetMem = get(db, p.memoryId);
+            const targetMem = memById.get(p.memoryId);
             const candidates = p.candidateIds
-              .map((cid) => get(db, cid))
-              .filter((m): m is MemoryRecord => !!m);
+              .map((cid) => memById.get(cid))
+              .filter((m): m is NonNullable<typeof m> => !!m);
             return {
               ...p,
               targetSummary: targetMem?.summary || targetMem?.content?.slice(0, 80) || '',
@@ -431,9 +552,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             last_error: string | null;
             created_at: number;
             updated_at: number | null;
-          }>(
-            'SELECT id, kind, key, status, attempts, error AS last_error, created_at, finished_at AS updated_at FROM jobs ORDER BY id DESC LIMIT 20'
-          );
+          }>(recentJobsSql);
 
           const ledger = getLedgerUsage(db, undefined, cfg);
 
@@ -586,7 +705,18 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
           const wsId = rawWs ? workspaceId(rawWs) : undefined;
           runThrottledAutonomousCycle(wsId);
-          const health = auditMemoryHealth(db, { workspaceId: wsId });
+          // 体检为 O(n²) 相似度扫描，前端每 8s 轮询：在数据指纹未变化时复用 60s 内的结果
+          const fp = healthFingerprint();
+          const cacheKey = wsId || '*';
+          const cached = healthCache.get(cacheKey);
+          let health;
+          if (cached && cached.fp === fp && Date.now() - cached.at < 60_000) {
+            health = cached.health;
+          } else {
+            health = auditMemoryHealth(db, { workspaceId: wsId });
+            if (healthCache.size > 32) healthCache.clear();
+            healthCache.set(cacheKey, { fp, at: Date.now(), health });
+          }
           sendJson(res, 200, { ok: true, health });
           return;
         }
@@ -667,8 +797,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             sql += " AND COALESCE(slot_key, '') NOT LIKE 'core:%'";
           }
           if (q) {
-            sql += ' AND (content LIKE ? OR summary LIKE ? OR slot_key LIKE ? OR id LIKE ?)';
-            const qPattern = `%${q}%`;
+            sql += " AND (content LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR slot_key LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\')";
+            const qPattern = `%${escapeLike(q.slice(0, 200))}%`;
             params.push(qPattern, qPattern, qPattern, qPattern);
           }
           if (type && type !== 'all') {
@@ -851,77 +981,80 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             }
             try {
               const now = Date.now();
-              const resEdit = editContent(db, id, content.trim(), summary, 'user', now);
-              if (resEdit.ok) {
-                const currentMem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
-                const updates: string[] = [];
-                const uParams: unknown[] = [];
-                if (type && typeof type === 'string') {
-                  updates.push('type = ?');
-                  uParams.push(normalizeMemoryType(type));
-                }
-                if (scope && (scope === 'global' || scope === 'workspace' || scope === 'user' || scope === 'session')) {
-                  updates.push('scope = ?');
-                  if (scope === 'global' || scope === 'user') {
-                    updates.push('workspace_id = NULL', 'session_id = NULL');
-                  } else if (scope === 'workspace') {
-                    updates.push('workspace_id = ?', 'session_id = NULL');
-                    uParams.push(scope, currentMem?.workspace_id || (body.workspaceId ? workspaceId(body.workspaceId) : workspaceId(process.cwd())));
-                  } else if (scope === 'session') {
-                    updates.push('workspace_id = ?', 'session_id = ?');
-                    uParams.push(
-                      scope,
-                      currentMem?.workspace_id || (body.workspaceId ? workspaceId(body.workspaceId) : workspaceId(process.cwd())),
-                      currentMem?.session_id || 'manual_ui_session'
-                    );
+              // 正文编辑与元数据（类型/作用域/槽位/重要度）更新必须原子提交，避免半更新状态
+              const resEdit = db.transaction(() => {
+                const resEdit = editContent(db, id, content.trim(), typeof summary === 'string' ? summary : undefined, 'user', now);
+                if (resEdit.ok) {
+                  const currentMem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
+                  const updates: string[] = [];
+                  const uParams: unknown[] = [];
+                  if (type && typeof type === 'string') {
+                    updates.push('type = ?');
+                    uParams.push(normalizeMemoryType(type));
                   }
-                  if (scope === 'global' || scope === 'user')
-                  uParams.push(scope);
-                }
-                if (slot_key !== undefined) {
-                  updates.push('slot_key = ?');
-                  uParams.push(slot_key ? String(slot_key).trim() : null);
-                }
-                if (typeof importance === 'number' && importance >= 1 && importance <= 10) {
-                  updates.push('importance = ?');
-                  uParams.push(Math.round(importance));
-                }
-                if (updates.length > 0) {
-                  if (currentMem && (currentMem.status === 'active' || currentMem.status === 'frozen')) {
-                    const effScope = (scope && ['global', 'workspace', 'user', 'session'].includes(scope)) ? scope : currentMem.scope;
-                    const effWsId = (effScope === 'global' || effScope === 'user') ? null : (currentMem.workspace_id || (body.workspaceId ? workspaceId(body.workspaceId) : workspaceId(process.cwd())));
-                    const effSessId = effScope === 'session' ? (currentMem.session_id || 'manual_ui_session') : null;
-                    const effSlot = slot_key !== undefined ? (slot_key ? String(slot_key).trim() : null) : currentMem.slot_key;
-                    if (effSlot) {
-                      const conflict = db.get<{ id: string }>(
-                        `SELECT id FROM memories WHERE id != ? AND status IN ('active', 'frozen') AND scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ?`,
-                        [id, effScope, effWsId || '', effSessId || '', effSlot]
+                  if (scope && (scope === 'global' || scope === 'workspace' || scope === 'user' || scope === 'session')) {
+                    updates.push('scope = ?');
+                    if (scope === 'global' || scope === 'user') {
+                      updates.push('workspace_id = NULL', 'session_id = NULL');
+                      uParams.push(scope);
+                    } else if (scope === 'workspace') {
+                      updates.push('workspace_id = ?', 'session_id = NULL');
+                      uParams.push(scope, currentMem?.workspace_id || (body.workspaceId ? workspaceId(body.workspaceId) : workspaceId(process.cwd())));
+                    } else if (scope === 'session') {
+                      updates.push('workspace_id = ?', 'session_id = ?');
+                      uParams.push(
+                        scope,
+                        currentMem?.workspace_id || (body.workspaceId ? workspaceId(body.workspaceId) : workspaceId(process.cwd())),
+                        currentMem?.session_id || 'manual_ui_session'
                       );
-                      if (conflict) {
-                        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, updated_at = ?, version = version + 1 WHERE id = ?`, [now, now, conflict.id]);
+                    }
+                  }
+                  if (slot_key !== undefined) {
+                    updates.push('slot_key = ?');
+                    uParams.push(slot_key ? String(slot_key).trim() : null);
+                  }
+                  if (typeof importance === 'number' && importance >= 1 && importance <= 10) {
+                    updates.push('importance = ?');
+                    uParams.push(Math.round(importance));
+                  }
+                  if (updates.length > 0) {
+                    if (currentMem && (currentMem.status === 'active' || currentMem.status === 'frozen')) {
+                      const effScope = (scope && ['global', 'workspace', 'user', 'session'].includes(scope)) ? scope : currentMem.scope;
+                      const effWsId = (effScope === 'global' || effScope === 'user') ? null : (currentMem.workspace_id || (body.workspaceId ? workspaceId(body.workspaceId) : workspaceId(process.cwd())));
+                      const effSessId = effScope === 'session' ? (currentMem.session_id || 'manual_ui_session') : null;
+                      const effSlot = slot_key !== undefined ? (slot_key ? String(slot_key).trim() : null) : currentMem.slot_key;
+                      if (effSlot) {
+                        const conflict = db.get<{ id: string }>(
+                          `SELECT id FROM memories WHERE id != ? AND status IN ('active', 'frozen') AND scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ?`,
+                          [id, effScope, effWsId || '', effSessId || '', effSlot]
+                        );
+                        if (conflict) {
+                          db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, updated_at = ?, version = version + 1 WHERE id = ?`, [now, now, conflict.id]);
+                        }
+                      }
+                    }
+                    uParams.push(id);
+                    db.run(`UPDATE memories SET ${updates.join(', ')} WHERE id = ?`, uParams);
+                    if (type !== undefined || slot_key !== undefined) {
+                      const updatedRow = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
+                      if (updatedRow) {
+                        const newHash = contentHash(updatedRow.type, updatedRow.content);
+                        const newVec = computeLocalEmbedding(
+                          `${updatedRow.summary}\n${updatedRow.content}${updatedRow.slot_key ? `\n${updatedRow.slot_key}` : ''}`
+                        );
+                        db.run('UPDATE memories SET hash = ?, embedding = ? WHERE id = ?', [
+                          newHash,
+                          encodeEmbeddingBlob(newVec),
+                          id,
+                        ]);
+                        removeCachedRuntimeEmbedding(id);
+                        primeRuntimeVectorCache(id, newHash, newVec);
                       }
                     }
                   }
-                  uParams.push(id);
-                  db.run(`UPDATE memories SET ${updates.join(', ')} WHERE id = ?`, uParams);
-                  if (type !== undefined || slot_key !== undefined) {
-                    const updatedRow = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
-                    if (updatedRow) {
-                      const newHash = contentHash(updatedRow.type, updatedRow.content);
-                      const newVec = computeLocalEmbedding(
-                        `${updatedRow.summary}\n${updatedRow.content}${updatedRow.slot_key ? `\n${updatedRow.slot_key}` : ''}`
-                      );
-                      db.run('UPDATE memories SET hash = ?, embedding = ? WHERE id = ?', [
-                        newHash,
-                        encodeEmbeddingBlob(newVec),
-                        id,
-                      ]);
-                      removeCachedRuntimeEmbedding(id);
-                      primeRuntimeVectorCache(id, newHash, newVec);
-                    }
-                  }
                 }
-              }
+                return resEdit;
+              });
               sendJson(res, 200, { id, ...resEdit });
             } catch (err: any) {
               sendJson(res, 400, { ok: false, error: err?.message || '编辑失败' });
@@ -945,9 +1078,21 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
 
           if (action === 'batch') {
-            const { subAction, ids } = body;
-            if (!Array.isArray(ids) || ids.length === 0) {
+            const { subAction } = body;
+            const validSubActions = ['pin', 'unpin', 'freeze', 'unfreeze', 'forget', 'restore', 'approve', 'confirm'];
+            if (!validSubActions.includes(subAction)) {
+              sendJson(res, 400, { ok: false, error: `Unknown batch action: ${String(subAction)}` });
+              return;
+            }
+            const ids: string[] = Array.isArray(body.ids)
+              ? Array.from(new Set<string>(body.ids.filter((x: unknown): x is string => typeof x === 'string' && !!x.trim())))
+              : [];
+            if (ids.length === 0) {
               sendJson(res, 400, { ok: false, error: '请选择至少一条记忆' });
+              return;
+            }
+            if (ids.length > MAX_BATCH_IDS) {
+              sendJson(res, 400, { ok: false, error: `单次批量操作最多 ${MAX_BATCH_IDS} 条` });
               return;
             }
             let successCount = 0;
@@ -958,20 +1103,21 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             );
             for (const targetId of ids) {
               try {
-                if (subAction === 'pin') pin(db, targetId, 'user', now);
-                else if (subAction === 'unpin') unpin(db, targetId, 'user', now);
-                else if (subAction === 'freeze') freeze(db, targetId, 'user', now);
-                else if (subAction === 'unfreeze') unfreeze(db, targetId, 'user', now);
+                let ok = false;
+                if (subAction === 'pin') ok = pin(db, targetId, 'user', now);
+                else if (subAction === 'unpin') ok = unpin(db, targetId, 'user', now);
+                else if (subAction === 'freeze') ok = freeze(db, targetId, 'user', now);
+                else if (subAction === 'unfreeze') ok = unfreeze(db, targetId, 'user', now);
                 else if (subAction === 'forget') {
                   try {
                     trashMemory(db, targetId, trashDir);
                   } catch {}
-                  forget(db, targetId, 'user', now);
+                  ok = forget(db, targetId, 'user', now);
                 }
-                else if (subAction === 'restore') restoreMemory(db, targetId, 'user', now);
-                else if (subAction === 'approve') approveCandidate(db, targetId, 'user', now);
-                else if (subAction === 'confirm') confirmMemory(db, targetId, 'user', now);
-                successCount++;
+                else if (subAction === 'restore') ok = restoreMemory(db, targetId, 'user', now).success;
+                else if (subAction === 'approve') ok = approveCandidate(db, targetId, 'user', now).action !== 'rejected';
+                else if (subAction === 'confirm') ok = confirmMemory(db, targetId, 'user', now).success;
+                if (ok) successCount++;
               } catch {}
             }
             sendJson(res, 200, { ok: true, affected: successCount, total: ids.length });
@@ -998,6 +1144,10 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             } = body;
             if (!content || typeof content !== 'string' || content.trim().length < 4) {
               sendJson(res, 400, { ok: false, error: 'Content must be at least 4 characters' });
+              return;
+            }
+            if (!VALID_SCOPES.includes(scope)) {
+              sendJson(res, 400, { ok: false, error: `Invalid scope: ${String(scope)}` });
               return;
             }
             const clean = redactSecrets(content.trim());
@@ -1223,15 +1373,16 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const items = db.all<MemoryRecord>(sql, params);
 
           if (format === 'markdown') {
-            const mdSections = items.map((m) => {
-              const entities = db
-                .all<{ entity: string }>(
-                  'SELECT entity FROM memory_entities WHERE memory_id = ?',
-                  [m.id]
-                )
-                .map((e) => e.entity);
-              return serializeMemoryToMarkdown(m, entities);
-            });
+            // 单次查询聚合实体，避免逐条 N+1 查询
+            const entityMap = new Map<string, string[]>();
+            for (const row of db.all<{ memory_id: string; entity: string }>(
+              'SELECT memory_id, entity FROM memory_entities'
+            )) {
+              const arr = entityMap.get(row.memory_id);
+              if (arr) arr.push(row.entity);
+              else entityMap.set(row.memory_id, [row.entity]);
+            }
+            const mdSections = items.map((m) => serializeMemoryToMarkdown(m, entityMap.get(m.id) || []));
             const fullMd =
               `# DSH 长期记忆知识库导出 (${items.length} 条)\n\n导出时间: ${new Date().toLocaleString()}\n\n---\n\n` +
               mdSections.join('\n\n---\n\n');
@@ -1262,56 +1413,70 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             sendJson(res, 400, { ok: false, error: '导入数据不能为空，未发现有效记忆条目' });
             return;
           }
+          if (items.length > MAX_IMPORT_ITEMS) {
+            sendJson(res, 400, { ok: false, error: `单次最多导入 ${MAX_IMPORT_ITEMS} 条记忆` });
+            return;
+          }
           let imported = 0;
           let skipped = 0;
           const now = Date.now();
-          for (const item of items) {
-            const raw = item.content || item.summary;
-            if (!raw || typeof raw !== 'string' || raw.trim().length < 4) {
-              skipped++;
-              continue;
-            }
-            try {
-              const clean = redactSecrets(raw.trim());
-              const cleanSummary =
-                typeof item.summary === 'string' && item.summary.trim()
-                  ? redactSecrets(item.summary.trim()).text
-                  : undefined;
-              const upsertRes = upsertCandidate(
-                db,
-                {
-                  type: normalizeMemoryType(item.type),
-                  scope: item.scope || (item.workspace_id || body.workspaceId ? 'workspace' : undefined),
-                  workspaceId: item.workspace_id || body.workspaceId || undefined,
-                  sessionId: item.session_id || undefined,
-                  content: clean.text,
-                  summary: cleanSummary,
-                  slot_key: typeof item.slot_key === 'string' && item.slot_key.trim() ? item.slot_key.trim() : null,
-                  confidence: typeof item.confidence === 'number' ? item.confidence : 0.95,
-                  importance:
-                    typeof item.importance === 'number' && item.importance >= 1 && item.importance <= 10
-                      ? Math.round(item.importance)
-                      : undefined,
-                  status: item.status === 'candidate' ? 'candidate' : 'active',
-                  source_kind: 'user',
-                  origin_kinds: ['user'],
-                  actor: 'user',
-                  sources: [{ session_id: 'import', seq: 1, kind: 'user' }],
-                },
-                now
-              );
-              if (upsertRes.action !== 'rejected') {
-                if (item.pinned) {
-                  pin(db, upsertRes.id, 'user', now);
+          const bodyWs = str(body.workspaceId) || undefined;
+          // 单事务批量写入：大幅减少 fsync 次数；单条失败由 upsertCandidate 内部 SAVEPOINT 回滚，不影响其它条目
+          db.transaction(() => {
+            for (const item of items) {
+              if (!item || typeof item !== 'object') {
+                skipped++;
+                continue;
+              }
+              const raw = item.content || item.summary;
+              if (!raw || typeof raw !== 'string' || raw.trim().length < 4) {
+                skipped++;
+                continue;
+              }
+              try {
+                const clean = redactSecrets(raw.trim());
+                const cleanSummary =
+                  typeof item.summary === 'string' && item.summary.trim()
+                    ? redactSecrets(item.summary.trim()).text
+                    : undefined;
+                const itemWs = str(item.workspace_id) || bodyWs;
+                const itemScope = VALID_SCOPES.includes(item.scope) ? item.scope : itemWs ? 'workspace' : undefined;
+                const upsertRes = upsertCandidate(
+                  db,
+                  {
+                    type: normalizeMemoryType(item.type),
+                    scope: itemScope,
+                    workspaceId: itemWs,
+                    sessionId: str(item.session_id) || undefined,
+                    content: clean.text,
+                    summary: cleanSummary,
+                    slot_key: typeof item.slot_key === 'string' && item.slot_key.trim() ? item.slot_key.trim() : null,
+                    confidence: typeof item.confidence === 'number' ? item.confidence : 0.95,
+                    importance:
+                      typeof item.importance === 'number' && item.importance >= 1 && item.importance <= 10
+                        ? Math.round(item.importance)
+                        : undefined,
+                    status: item.status === 'candidate' ? 'candidate' : 'active',
+                    source_kind: 'user',
+                    origin_kinds: ['user'],
+                    actor: 'user',
+                    sources: [{ session_id: 'import', seq: 1, kind: 'user' }],
+                  },
+                  now
+                );
+                if (upsertRes.action !== 'rejected') {
+                  if (item.pinned) {
+                    pin(db, upsertRes.id, 'user', now);
+                  }
+                  imported++;
+                } else {
+                  skipped++;
                 }
-                imported++;
-              } else {
+              } catch {
                 skipped++;
               }
-            } catch {
-              skipped++;
             }
-          }
+          });
           if (imported > 0) {
             try {
               weaveZettelkastenLinks(db, { now });
@@ -1342,19 +1507,36 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               }
               if (typeof body.offlineLLM.baseURL === 'string') {
                 const prevBaseUrl = cfg.offlineLLM.baseURL || '';
-                patch.offlineLLM.baseURL = body.offlineLLM.baseURL.trim();
+                const nextBaseUrl = body.offlineLLM.baseURL.trim();
+                if (nextBaseUrl && !isHttpUrl(nextBaseUrl)) {
+                  sendJson(res, 400, { ok: false, error: 'Base URL 必须是合法的 HTTP/HTTPS 地址' });
+                  return;
+                }
+                patch.offlineLLM.baseURL = nextBaseUrl;
                 if (prevBaseUrl && patch.offlineLLM.baseURL && !isSameOriginUrl(prevBaseUrl, patch.offlineLLM.baseURL)) {
+                  // 端点跨源变更：清除原有密钥与密钥环境变量绑定，避免把旧凭据发往新端点
                   patch.offlineLLM.apiKey = '';
+                  if (typeof body.offlineLLM.apiKeyEnv !== 'string') {
+                    patch.offlineLLM.apiKeyEnv = '';
+                  }
                 }
                 if (patch.offlineLLM.baseURL && typeof body.offlineLLM.useDshLlm !== 'boolean') {
                   patch.offlineLLM.useDshLlm = false;
                 }
               }
               if (typeof body.offlineLLM.model === 'string') {
-                patch.offlineLLM.model = body.offlineLLM.model.trim();
+                patch.offlineLLM.model = body.offlineLLM.model.trim().slice(0, 200);
               }
               if (typeof body.offlineLLM.apiKeyEnv === 'string') {
-                patch.offlineLLM.apiKeyEnv = body.offlineLLM.apiKeyEnv.trim();
+                const envName = body.offlineLLM.apiKeyEnv.trim();
+                if (envName && !isSafeApiKeyEnvName(envName)) {
+                  sendJson(res, 400, {
+                    ok: false,
+                    error: '密钥环境变量名不合法：仅允许以 _API_KEY / _KEY / _TOKEN 结尾的变量名',
+                  });
+                  return;
+                }
+                patch.offlineLLM.apiKeyEnv = envName;
               }
               if (
                 typeof body.offlineLLM.protocol === 'string' &&
@@ -1379,7 +1561,11 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 patch.privacy.offlineConsent = body.privacy.offlineConsent;
               }
               if (Array.isArray(body.privacy.allowedOfflineEndpoints)) {
-                patch.privacy.allowedOfflineEndpoints = [...body.privacy.allowedOfflineEndpoints];
+                patch.privacy.allowedOfflineEndpoints = body.privacy.allowedOfflineEndpoints
+                  .filter((e: unknown): e is string => typeof e === 'string')
+                  .map((e: string) => e.trim())
+                  .filter((e: string) => e && isValidEndpointEntry(e))
+                  .slice(0, 50);
               }
             }
 
@@ -1418,15 +1604,14 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               patch.privacy.allowedOfflineEndpoints = Array.from(allowed);
             }
 
-            if (typeof body.dailyLLMCalls === 'number' && body.dailyLLMCalls > 0) {
-              patch.dailyLLMCalls = Math.floor(body.dailyLLMCalls);
-            }
-            if (typeof body.dailyLLMTokens === 'number' && body.dailyLLMTokens > 0) {
-              patch.dailyLLMTokens = Math.floor(body.dailyLLMTokens);
-            }
-            if (typeof body.distillMaxInputTokens === 'number' && body.distillMaxInputTokens > 0) {
-              patch.distillMaxInputTokens = Math.floor(body.distillMaxInputTokens);
-            }
+            const clampPositiveInt = (v: unknown, max: number): number | undefined =>
+              typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(max, Math.floor(v)) : undefined;
+            const calls = clampPositiveInt(body.dailyLLMCalls, 10_000);
+            if (calls !== undefined) patch.dailyLLMCalls = calls;
+            const tokens = clampPositiveInt(body.dailyLLMTokens, 100_000_000);
+            if (tokens !== undefined) patch.dailyLLMTokens = tokens;
+            const distillTokens = clampPositiveInt(body.distillMaxInputTokens, 1_000_000);
+            if (distillTokens !== undefined) patch.distillMaxInputTokens = distillTokens;
 
             const updated = saveConfigToDb(db, patch, cfg);
             Object.assign(cfg, updated);
@@ -1442,8 +1627,9 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         // 6. Test LLM Connection (POST)
         if (subPath === '/llm/test' && req.method === 'POST') {
           const body = await readBodyJson(req);
-          const baseURL = (body.baseURL || cfg.offlineLLM.baseURL || '').trim();
-          const model = (body.model || cfg.offlineLLM.model || 'deepseek-chat').trim();
+          const bodyBaseURL = str(body.baseURL);
+          const baseURL = (bodyBaseURL || cfg.offlineLLM.baseURL || '').trim();
+          const model = (str(body.model) || cfg.offlineLLM.model || 'deepseek-chat').trim();
 
           if (!baseURL) {
             sendJson(res, 400, { ok: false, error: '请先填写接口 Base URL' });
@@ -1463,8 +1649,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
 
           const isSameConfiguredEndpoint =
-            !body.baseURL ||
-            body.baseURL.trim() === (cfg.offlineLLM.baseURL || '').trim() ||
+            !bodyBaseURL ||
+            bodyBaseURL === (cfg.offlineLLM.baseURL || '').trim() ||
             isSameOriginUrl(baseURL, cfg.offlineLLM.baseURL);
 
           let apiKey = '';
@@ -1478,15 +1664,18 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             apiKey = cfg.offlineLLM.apiKey || '';
           }
 
-          const envName = (body.apiKeyEnv || cfg.offlineLLM.apiKeyEnv || '').trim();
+          const envName = (str(body.apiKeyEnv) || cfg.offlineLLM.apiKeyEnv || '').trim();
           const isSafeEnvName =
-            envName === cfg.offlineLLM.apiKeyEnv ||
+            (envName === cfg.offlineLLM.apiKeyEnv && isSafeApiKeyEnvName(envName)) ||
             ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DASHSCOPE_API_KEY', 'DSH_MEMORY_API_KEY'].includes(envName.toUpperCase());
           if (!apiKey && envName && isSafeEnvName && isSameConfiguredEndpoint && process.env[envName]) {
             apiKey = process.env[envName]!;
           }
 
-          const chosenProtocol = body.protocol || cfg.offlineLLM.protocol || 'chat/completions';
+          const rawProtocol = str(body.protocol);
+          const chosenProtocol: LLMProtocol = (['chat/completions', 'responses', 'messages'] as const).includes(rawProtocol as LLMProtocol)
+            ? (rawProtocol as LLMProtocol)
+            : cfg.offlineLLM.protocol || 'chat/completions';
           const { endpointUrl, protocol } = resolveEndpointAndProtocol(baseURL, chosenProtocol);
           const { requestBody, headers: protoHeaders } = buildProtocolPayload(
             protocol,
@@ -1572,6 +1761,10 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         // Unknown route
         sendJson(res, 404, { ok: false, error: `Not found: ${pathname}` });
       } catch (err: any) {
+        if (err instanceof HttpError) {
+          sendJson(res, err.status, { ok: false, error: err.message });
+          return;
+        }
         console.error('[dsh-memory web API error]', err);
         sendJson(res, 500, { ok: false, error: err?.message || 'Internal server error' });
       }

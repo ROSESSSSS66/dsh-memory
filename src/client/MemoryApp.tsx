@@ -69,7 +69,7 @@ export function MemoryApp() {
         fetch(`${API_PREFIX}/health`),
         fetch(`${API_PREFIX}/core-memory`),
         fetch(`${API_PREFIX}/memories?status=live&excludeCore=1&limit=60`),
-        fetch(`${API_PREFIX}/evolution`),
+        fetch(`${API_PREFIX}/evolution?lite=1`),
       ]);
 
       if (stRes.ok) {
@@ -114,9 +114,7 @@ export function MemoryApp() {
     try {
       const res = await fetch(`${API_PREFIX}/config`);
       if (!res.ok) return;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error || 'Save failed');
+      const json = await res.json();
       if (json.ok && json.config) {
         setLlmConfig(json.config);
       }
@@ -128,10 +126,23 @@ export function MemoryApp() {
   useEffect(() => {
     fetchAll();
     fetchConfig();
+    // 面板不可见时暂停轮询（每轮 5 个请求，其中体检为 O(n²) 计算），重新可见时立即刷新
+    const isHidden = () => typeof document !== 'undefined' && document.hidden;
     const timer = setInterval(() => {
-      fetchAll();
+      if (!isHidden()) fetchAll();
     }, 8000);
-    return () => clearInterval(timer);
+    const onVisibility = () => {
+      if (!isHidden()) fetchAll();
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibility);
+    }
+    return () => {
+      clearInterval(timer);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibility);
+      }
+    };
   }, [fetchAll, fetchConfig]);
 
   const handleSaveConfig = async (payload: any) => {

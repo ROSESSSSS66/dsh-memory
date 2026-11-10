@@ -13,7 +13,8 @@ const args = process.argv.slice(2);
 const force = args.includes('--force') || args.includes('-f');
 const quiet = args.includes('--quiet') || args.includes('-q');
 
-if (process.env.DSH_MEMORY_SKIP_BOOTSTRAP === '1') {
+// CI / 自动化环境下跳过（除非显式 --force，即 `npm run init`）：避免在构建机上扫描主目录、回填历史会话并写入 ~/.dsh
+if (process.env.DSH_MEMORY_SKIP_BOOTSTRAP === '1' || (process.env.CI && !force)) {
   process.exit(0);
 }
 

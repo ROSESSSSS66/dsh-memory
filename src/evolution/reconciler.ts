@@ -218,6 +218,31 @@ export function reconcileCandidate(
 /**
  * 执行调和决策，原子应用至数据库 (支持 Mem0 四种调和行为)
  */
+/**
+ * 与 upsertCandidate 的 isExplicitUser 判定保持一致：只有这类输入才会直接以 active 落盘。
+ * 非可信输入（模型/工具/网页来源）不得直接归档或取代现有记忆，只能以 candidate + contradicts 关系等待审批，
+ * 否则一次提示注入即可让模型通过 reconcile 清除或覆盖用户的有效记忆。
+ */
+function isTrustedReconcileInput(c: CandidateInput): boolean {
+  const origins = Array.isArray(c.origin_kinds) ? c.origin_kinds : [];
+  if (origins.includes('tool') || origins.includes('web') || c.source_kind === 'tool' || c.source_kind === 'web') {
+    return false;
+  }
+  return (
+    (c.source_kind === 'user' && c.actor === 'user') ||
+    (c.status === 'active' && (c.actor === 'user' || c.actor === 'system'))
+  );
+}
+
+function insertAsPendingConflict(db: Db, candidate: CandidateInput, targetId: string, now: number): UpsertResult {
+  const insertRes = upsertCandidate(db, { ...candidate, status: 'candidate' }, now);
+  if ('id' in insertRes && insertRes.id !== targetId) {
+    addRelation(db, insertRes.id, targetId, 'contradicts', now);
+    return { action: 'conflict_pending', id: insertRes.id, withId: targetId };
+  }
+  return insertRes;
+}
+
 export function applyReconciliation(
   db: Db,
   candidate: CandidateInput,
@@ -225,6 +250,7 @@ export function applyReconciliation(
   now: number = Date.now()
 ): UpsertResult {
   return db.transaction(() => {
+    const trusted = isTrustedReconcileInput(candidate);
     switch (decision.action) {
       case 'NOOP':
         return { action: 'merged', id: decision.targetId || 'noop_duplicate' };
@@ -236,6 +262,12 @@ export function applyReconciliation(
           ]);
           if (target?.status === 'frozen') {
             return { action: 'rejected', reason: 'target_is_frozen' };
+          }
+          if (!target) {
+            return { action: 'rejected', reason: 'delete_target_missing' };
+          }
+          if (!trusted) {
+            return insertAsPendingConflict(db, candidate, decision.targetId, now);
           }
           invalidateMemory(db, decision.targetId, decision.reason, candidate.actor, now);
           return { action: 'superseded', id: decision.targetId, oldId: decision.targetId };
@@ -249,6 +281,10 @@ export function applyReconciliation(
           if (oldMem) {
             if (oldMem.status === 'frozen') {
               return { action: 'rejected', reason: 'target_is_frozen' };
+            }
+            if (!trusted) {
+              // 非可信输入只会生成 candidate：此时若先取代旧记忆，会让有效知识在候选审批前“消失”
+              return insertAsPendingConflict(db, candidate, oldMem.id, now);
             }
             // 先将旧记忆归档并标记 superseded
             saveVersionSnapshot(db, oldMem, 'supersede', candidate.actor, now);

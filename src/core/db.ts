@@ -138,9 +138,16 @@ function runMigrations(db: Db): void {
   // 保证关系表反向索引与高规模检索覆盖索引存在 (性能优化)
   try {
     db.exec("CREATE INDEX IF NOT EXISTS ix_mem_rel_to ON memory_relations(to_id, rel);");
+    db.exec("CREATE INDEX IF NOT EXISTS ix_rel_type ON memory_relations(rel, from_id, to_id);");
     db.exec(
       "CREATE INDEX IF NOT EXISTS ix_mem_vec_rank ON memories(pinned DESC, utility DESC, updated_at DESC, status, type, scope, workspace_id, session_id, id, hash) WHERE status IN ('active', 'frozen') AND type != 'meta';"
     );
+  } catch {}
+  // 遥测表按时间窗口扫描（概览统计 / 沙盒最近注入 / 遥测清理），避免随注入日志增长退化为全表扫描
+  try {
+    db.exec('CREATE INDEX IF NOT EXISTS ix_inj_created ON injections(created_at);');
+    db.exec('CREATE INDEX IF NOT EXISTS ix_turn_metrics_created ON turn_metrics(created_at);');
+    db.exec('CREATE INDEX IF NOT EXISTS ix_jobs_status_eligible ON jobs(status, next_eligible_at);');
   } catch {}
 
   // 保证 Stanford / Zep 时序与重要度字段存在

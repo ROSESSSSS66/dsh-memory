@@ -510,78 +510,98 @@ export class MemoryCommands {
     if (!Array.isArray(items)) return 'Error: Invalid JSON format (must be an array of records)';
 
     let imported = 0;
+    let skipped = 0;
     const now = Date.now();
+    const VALID_TYPES = ['episodic', 'semantic', 'procedural', 'belief', 'preference', 'goal', 'failure', 'meta'];
+    const VALID_STATUS = ['active', 'candidate', 'frozen', 'superseded', 'archived', 'rejected'];
+    const VALID_SCOPES = ['session', 'workspace', 'user', 'global'];
+    const VALID_SOURCE_KINDS = ['user', 'assistant', 'tool', 'web', 'llm_extract', 'rule', 'system'];
+    const num = (v: unknown, def: number, min: number, max: number): number => {
+      const n = typeof v === 'number' ? v : Number(v);
+      return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : def;
+    };
+    const int = (v: unknown, def: number, min: number, max: number): number => Math.round(num(v, def, min, max));
     this.db.transaction(() => {
       for (const it of items) {
-        if (!it.id || !it.content || typeof it.content !== 'string') continue;
+        if (!it || typeof it !== 'object') continue;
+        if (!it.id || typeof it.id !== 'string' || !it.content || typeof it.content !== 'string') continue;
         const priv = redactSecrets(it.content);
         if (priv.hasSensitive || it.content.includes('[REDACTED:')) continue;
 
         const cleanContent = priv.text.trim();
         const rawSummary = typeof it.summary === 'string' && it.summary.trim() ? it.summary.trim() : cleanContent.slice(0, 60);
         const cleanSummary = redactSecrets(rawSummary).text;
-        const memType = it.type || 'semantic';
-        const slotKey = it.slot_key || null;
-        const hash = it.hash && it.hash !== 'imported' ? it.hash : contentHash(memType, cleanContent);
+        const memType = VALID_TYPES.includes(it.type) ? it.type : 'semantic';
+        const memStatus = VALID_STATUS.includes(it.status) ? it.status : 'active';
+        const memScope = VALID_SCOPES.includes(it.scope) ? it.scope : 'workspace';
+        const sourceKind = VALID_SOURCE_KINDS.includes(it.source_kind) ? it.source_kind : 'user';
+        const slotKey = typeof it.slot_key === 'string' && it.slot_key.trim() ? it.slot_key.trim() : null;
+        // 始终按导入后的正文重算哈希：文件中的 hash 不可信，错误的哈希会破坏去重与向量缓存一致性
+        const hash = contentHash(memType, cleanContent);
         const vec = computeLocalEmbedding(`${cleanSummary}\n${cleanContent}${slotKey ? `\n${slotKey}` : ''}`);
 
-        const res = this.db.run(
-          `INSERT OR IGNORE INTO memories (
-            id, type, status, content, summary, slot_key, scope, workspace_id, session_id,
-            origin_kinds, source_kind, confidence, utility, use_count, success_count, fail_count,
-            token_cost, summary_cost, hash, version, content_rev, pinned, created_at, updated_at,
-            importance, embedding
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            it.id,
-            memType,
-            it.status || 'active',
-            cleanContent,
-            cleanSummary,
-            slotKey,
-            it.scope || 'workspace',
-            (it.scope === 'global' || it.scope === 'user') ? null : (it.workspace_id ? workspaceId(it.workspace_id) : workspaceId(ctx.workspaceId)),
-            it.scope === 'session' ? (it.session_id || ctx.sessionId || 'default_session') : null,
-            // replaced by scope-aware workspace_id above
-            // replaced by scope-aware session_id above
-            typeof it.origin_kinds === 'string' ? it.origin_kinds : JSON.stringify(it.origin_kinds || ['user']),
-            it.source_kind || 'user',
-            it.confidence ?? 0.8,
-            it.utility ?? 0.5,
-            it.use_count ?? 0,
-            it.success_count ?? 0,
-            it.fail_count ?? 0,
-            it.token_cost ?? estimateTokens(cleanContent),
-            it.summary_cost ?? estimateTokens(cleanSummary),
-            hash,
-            it.version ?? 1,
-            it.content_rev ?? 1,
-            it.pinned ?? 0,
-            it.created_at || now,
-            it.updated_at || now,
-            Math.max(1, Math.min(10, Number(it.importance) || 5)),
-            encodeEmbeddingBlob(vec),
-          ]
-        );
-        if (Number(res.changes) > 0) {
-          const rowid = Number(res.lastInsertRowid);
-          this.db.run(`DELETE FROM memory_fts WHERE rowid = ?`, [rowid]);
-          this.db.run(`INSERT INTO memory_fts(rowid, fts_text) VALUES (?, ?)`, [
-            rowid,
-            ftsText(cleanContent + ' ' + cleanSummary),
-          ]);
-          const entities = extractEntities(`${cleanSummary} ${cleanContent}`);
-          for (const ent of entities) {
-            const normEnt = ent.toLowerCase().replace(/\\/g, '/').trim();
-            if (normEnt) {
-              this.db.run(`INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`, [
+        try {
+          // 单条记录使用 SAVEPOINT：某条违反约束只跳过该条，不回滚整个导入
+          this.db.transaction(() => {
+            const res = this.db.run(
+              `INSERT OR IGNORE INTO memories (
+                id, type, status, content, summary, slot_key, scope, workspace_id, session_id,
+                origin_kinds, source_kind, confidence, utility, use_count, success_count, fail_count,
+                token_cost, summary_cost, hash, version, content_rev, pinned, created_at, updated_at,
+                importance, embedding
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
                 it.id,
-                normEnt,
+                memType,
+                memStatus,
+                cleanContent,
+                cleanSummary,
+                slotKey,
+                memScope,
+                (memScope === 'global' || memScope === 'user') ? null : (typeof it.workspace_id === 'string' && it.workspace_id ? workspaceId(it.workspace_id) : workspaceId(ctx.workspaceId)),
+                memScope === 'session' ? (typeof it.session_id === 'string' && it.session_id ? it.session_id : ctx.sessionId || 'default_session') : null,
+                typeof it.origin_kinds === 'string' ? it.origin_kinds : JSON.stringify(Array.isArray(it.origin_kinds) ? it.origin_kinds : ['user']),
+                sourceKind,
+                num(it.confidence, 0.8, 0, 1),
+                num(it.utility, 0.5, 0, 1),
+                int(it.use_count, 0, 0, 1e9),
+                int(it.success_count, 0, 0, 1e9),
+                int(it.fail_count, 0, 0, 1e9),
+                estimateTokens(cleanContent),
+                estimateTokens(cleanSummary),
+                hash,
+                int(it.version, 1, 1, 1e9),
+                int(it.content_rev, 1, 1, 1e9),
+                it.pinned ? 1 : 0,
+                int(it.created_at, now, 0, 8.64e15),
+                int(it.updated_at, now, 0, 8.64e15),
+                int(it.importance, 5, 1, 10),
+                encodeEmbeddingBlob(vec),
+              ]
+            );
+            if (Number(res.changes) > 0) {
+              const rowid = Number(res.lastInsertRowid);
+              this.db.run(`DELETE FROM memory_fts WHERE rowid = ?`, [rowid]);
+              this.db.run(`INSERT INTO memory_fts(rowid, fts_text) VALUES (?, ?)`, [
+                rowid,
+                ftsText(cleanContent + ' ' + cleanSummary),
               ]);
+              const entities = extractEntities(`${cleanSummary} ${cleanContent}`);
+              for (const ent of entities) {
+                const normEnt = ent.toLowerCase().replace(/\\/g, '/').trim();
+                if (normEnt) {
+                  this.db.run(`INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`, [
+                    it.id,
+                    normEnt,
+                  ]);
+                }
+              }
+              primeRuntimeVectorCache(it.id, hash, vec);
+              imported++;
             }
-          }
-          primeRuntimeVectorCache(it.id, hash, vec);
-          imported++;
+          });
+        } catch {
+          skipped++;
         }
       }
     });
@@ -592,7 +612,7 @@ export class MemoryCommands {
       } catch {}
     }
 
-    return `Imported ${imported} records from ${filePath}`;
+    return `Imported ${imported} records from ${filePath}${skipped ? ` (${skipped} invalid records skipped)` : ''}`;
   }
 
   /**

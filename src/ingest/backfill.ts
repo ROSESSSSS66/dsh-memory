@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
+import * as fzstd from 'fzstd';
 import type { Db, RawEvent } from '../types.js';
 import { workspaceId } from '../core/scope.js';
 import { isWorkspaceExcluded, redactSecrets } from '../core/privacy.js';
@@ -238,7 +239,19 @@ export function readSessionFile(filePath: string): { header: any; rawLines: stri
     const decompressedChunks: Buffer[] = [];
     for (const frame of frames) {
       try {
-        const chunk = (zlib as any).zstdDecompressSync(buf.subarray(frame.start, frame.end), { maxOutputLength: 64 * 1024 * 1024 });
+        const frameBuf = buf.subarray(frame.start, frame.end);
+        let chunk: Buffer | null = null;
+        if (typeof (zlib as any).zstdDecompressSync === 'function') {
+          try {
+            chunk = (zlib as any).zstdDecompressSync(frameBuf, { maxOutputLength: 64 * 1024 * 1024 });
+          } catch {
+            chunk = null;
+          }
+        }
+        if (!chunk) {
+          const rawDecompressed = fzstd.decompress(new Uint8Array(frameBuf.buffer, frameBuf.byteOffset, frameBuf.byteLength));
+          chunk = Buffer.from(rawDecompressed);
+        }
         decompressedChunks.push(chunk);
       } catch (err: any) {
         console.warn(`[dsh-memory] Frame decompress failed in ${filePath}:`, err?.message || err);
@@ -251,7 +264,7 @@ export function readSessionFile(filePath: string): { header: any; rawLines: stri
       try {
         const tornBuf = buf.subarray(tornStart);
         const flushOpt = (zlib as any).constants?.ZSTD_e_flush;
-        if (typeof flushOpt === 'number') {
+        if (typeof flushOpt === 'number' && typeof (zlib as any).zstdDecompressSync === 'function') {
           const recovered = (zlib as any).zstdDecompressSync(tornBuf, {
             finishFlush: flushOpt,
             maxOutputLength: 64 * 1024 * 1024,
@@ -259,6 +272,14 @@ export function readSessionFile(filePath: string): { header: any; rawLines: stri
           if (recovered && recovered.length > 0) {
             decompressedChunks.push(recovered);
           }
+        } else {
+          // fzstd pure-JS fallback for torn frame
+          try {
+            const rawDecompressed = fzstd.decompress(new Uint8Array(tornBuf.buffer, tornBuf.byteOffset, tornBuf.byteLength));
+            if (rawDecompressed && rawDecompressed.length > 0) {
+              decompressedChunks.push(Buffer.from(rawDecompressed));
+            }
+          } catch {}
         }
       } catch {
         // 撕裂尾帧恢复失败时仅忽略撕裂尾部，保留前面已解出的完整帧

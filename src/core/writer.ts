@@ -986,14 +986,29 @@ export function confirmMemory(
 
     saveVersionSnapshot(db, memory, 'confirm', actor, now);
 
-    const boostConf = actor === 'user' ? 0.2 : 0.1;
-    const newConfidence = Math.min(1.0, memory.confidence + boostConf);
-    const newUtility = Math.min(1.0, memory.utility + 0.15);
-    let newStatus = memory.status === 'candidate' ? 'active' : memory.status;
-    let approvedAt = memory.status === 'candidate' ? now : memory.approved_at;
-    let approvedBy = memory.status === 'candidate' ? actor : memory.approved_by;
+    // 信任边界：仅用户/系统可无条件激活候选；模型(llm/assistant)只能激活带有用户证据的候选。
+    // 否则模型可先 memory_note 再 memory_confirm 自我批准，或将网页/工具输出中的提示注入“洗白”为常驻记忆。
+    const trustedActor = actor === 'user' || actor === 'system';
+    let originKinds: string[] = [];
+    try {
+      const raw: unknown = (memory as any).origin_kinds;
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (Array.isArray(parsed)) originKinds = parsed.map(String);
+    } catch {}
+    const canActivate = trustedActor || originKinds.includes('user');
+    const promote = memory.status === 'candidate' && canActivate;
 
-    if (memory.status === 'candidate' && memory.slot_key) {
+    const boostConf = actor === 'user' ? 0.2 : 0.1;
+    let newConfidence = Math.min(1.0, memory.confidence + boostConf);
+    if (memory.status === 'candidate' && !canActivate) {
+      newConfidence = Math.min(newConfidence, 0.7);
+    }
+    const newUtility = Math.min(1.0, memory.utility + 0.15);
+    let newStatus = promote ? 'active' : memory.status;
+    let approvedAt = promote ? now : memory.approved_at;
+    let approvedBy = promote ? actor : memory.approved_by;
+
+    if (promote && memory.slot_key) {
       const existingSlot = db.get<MemoryRecord>(
         `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id != ?`,
         [memory.scope, memory.workspace_id || '', memory.session_id || '', memory.slot_key, id]
@@ -1030,10 +1045,12 @@ export function confirmMemory(
     );
 
     const updated = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
+    const pendingNote =
+      memory.status === 'candidate' && !promote ? '; remains candidate pending user approval (no user-origin evidence)' : '';
     return {
       success: true,
       memory: updated,
-      message: `Memory '${id}' confirmed (confidence: ${newConfidence.toFixed(2)}, utility: ${newUtility.toFixed(2)})`,
+      message: `Memory '${id}' confirmed (confidence: ${newConfidence.toFixed(2)}, utility: ${newUtility.toFixed(2)})${pendingNote}`,
     };
   });
 }
@@ -1057,6 +1074,16 @@ export function mergeMemories(
     const target = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [targetId]);
     if (!source) return { success: false, message: `Source memory '${sourceId}' not found` };
     if (!target) return { success: false, message: `Target memory '${targetId}' not found` };
+    if (target.status === 'archived' || target.status === 'rejected' || target.status === 'superseded') {
+      return { success: false, message: `Target memory '${targetId}' is ${target.status}; cannot merge into it` };
+    }
+    if (source.status === 'superseded' || source.status === 'archived' || source.status === 'rejected') {
+      return { success: false, message: `Source memory '${sourceId}' is already ${source.status}` };
+    }
+    // 用户锁定（frozen）或置顶（pinned）的记忆只能由用户本人合并，防止模型/自动流程覆盖
+    if (actor !== 'user' && (source.status === 'frozen' || source.pinned)) {
+      return { success: false, message: `Source memory '${sourceId}' is ${source.status === 'frozen' ? 'frozen' : 'pinned'} by user; only the user can merge it` };
+    }
 
     // 保存快照
     saveVersionSnapshot(db, source, 'merge_source', actor, now);
@@ -1098,6 +1125,7 @@ export function mergeMemories(
        WHERE id = ?`,
       [now, now, sourceId]
     );
+    removeCachedRuntimeEmbedding(sourceId);
 
     // 5. 强化 target 的效用与成功计数
     const newUtility = Math.min(1.0, target.utility + 0.1);
