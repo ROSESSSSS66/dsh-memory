@@ -65,11 +65,19 @@ export function redactSecrets(input: string): RedactResult {
   }
 
   // 5. 常见厂商独立 API Key / Access Token (如 sk-..., ghp_..., github_pat_..., AKIA..., xox...)
-  const standaloneKeyRegex = /\b(sk-(?:ant-api\d{2}-|proj-|live-|test-)?[a-zA-Z0-9_\-]{20,}|gh[pousr]_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{50,}|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9a-zA-Z]{10,48})\b/g;
+  const standaloneKeyRegex = /\b(sk-(?:ant-api\d{2}-|proj-|live-|test-)?[a-zA-Z0-9_\-]{20,}|gh[pousr]_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{50,}|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[baprs]-[0-9a-zA-Z]{10,48})\b/g;
   if (standaloneKeyRegex.test(text)) {
     detectedKinds.push('API_KEY');
     standaloneKeyRegex.lastIndex = 0;
     text = text.replace(standaloneKeyRegex, '[REDACTED:API_KEY]');
+  }
+
+  // 5b. 其它主流厂商密钥：Google (AIza...)、Stripe (sk_live_/rk_live_)、GitLab (glpat-)、HuggingFace (hf_)、npm (npm_)
+  const vendorKeyRegex = /\b(AIza[0-9A-Za-z_\-]{35}|(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{20,}|glpat-[0-9a-zA-Z_\-]{20,}|hf_[a-zA-Z0-9]{30,}|npm_[a-zA-Z0-9]{36})\b/g;
+  if (vendorKeyRegex.test(text)) {
+    if (!detectedKinds.includes('API_KEY')) detectedKinds.push('API_KEY');
+    vendorKeyRegex.lastIndex = 0;
+    text = text.replace(vendorKeyRegex, '[REDACTED:API_KEY]');
   }
 
   // 6. 显式敏感字段赋值 (例如 api_key = "...", password: "...")
@@ -85,6 +93,15 @@ export function redactSecrets(input: string): RedactResult {
     hasSensitive: detectedKinds.length > 0,
     detectedKinds,
   };
+}
+
+/**
+ * 仅允许形如 XXX_API_KEY / XXX_KEY / XXX_TOKEN 的环境变量名作为 LLM 密钥来源，
+ * 防止通过配置把任意环境变量（如云凭据、数据库口令）作为 Bearer 发往外部端点。
+ */
+export function isSafeApiKeyEnvName(name: string): boolean {
+  if (typeof name !== 'string') return false;
+  return /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(name) && /(API_?KEY|_KEY|_TOKEN)$/i.test(name);
 }
 
 /**

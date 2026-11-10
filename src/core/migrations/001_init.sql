@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS memory_relations (
   PRIMARY KEY (from_id, to_id, rel)
 );
 CREATE INDEX IF NOT EXISTS ix_mem_rel_to ON memory_relations(to_id, rel);
+CREATE INDEX IF NOT EXISTS ix_rel_type ON memory_relations(rel, from_id, to_id);
 
 -- 版本快照：每次修改 memories 前，把旧行的完整 JSON 存到这里
 CREATE TABLE IF NOT EXISTS memory_versions (

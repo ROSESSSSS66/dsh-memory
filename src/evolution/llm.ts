@@ -2,8 +2,35 @@ import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import type { LLMTaskKind } from './types.js';
 import { reserve, settle, cancel } from './ledger.js';
-import { redactSecrets, isOfflineEndpointAllowed, isWorkspaceExcluded } from '../core/privacy.js';
+import { redactSecrets, isOfflineEndpointAllowed, isWorkspaceExcluded, isSafeApiKeyEnvName } from '../core/privacy.js';
 import { estimateTokens } from '../core/tokens.js';
+
+/** 重试退避：可被外部 signal 打断，且不会超过 jobDeadline */
+function backoffDelay(attempt: number, signal?: AbortSignal, jobDeadline?: number): Promise<void> {
+  let ms = Math.min(4_000, 400 * 2 ** (attempt - 1));
+  if (jobDeadline) ms = Math.min(ms, Math.max(0, jobDeadline - Date.now() - 1_000));
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** 丢弃未读取的响应体，及时释放 undici 连接 */
+async function drainResponse(res: any): Promise<void> {
+  try {
+    if (res?.body && typeof res.body.cancel === 'function') {
+      await res.body.cancel();
+    } else if (typeof res?.text === 'function') {
+      await res.text();
+    }
+  } catch {}
+}
 
 export interface OfflineLLMParams {
   jobKind: LLMTaskKind;
@@ -274,8 +301,9 @@ export async function callOfflineLLM(
 
   // 读取 API 密钥（优先直接配置的 apiKey，其次从环境变量读取）
   let apiKey = cfg.offlineLLM.apiKey || '';
-  if (!apiKey && cfg.offlineLLM.apiKeyEnv && process.env[cfg.offlineLLM.apiKeyEnv]) {
-    apiKey = process.env[cfg.offlineLLM.apiKeyEnv]!;
+  const keyEnv = (cfg.offlineLLM.apiKeyEnv || '').trim();
+  if (!apiKey && keyEnv && isSafeApiKeyEnvName(keyEnv) && process.env[keyEnv]) {
+    apiKey = process.env[keyEnv]!;
   }
   if (!apiKey && usingHostFallback) {
     apiKey =
@@ -363,12 +391,8 @@ export async function callOfflineLLM(
         signal: timeoutController.signal,
       });
 
-      clearTimeout(timeoutTimer);
-      if (params.signal) {
-        params.signal.removeEventListener('abort', onExternalAbort);
-      }
-
       if (!res.ok) {
+        await drainResponse(res);
         // 记录失败账本
         settle(db, {
           ledgerId,
@@ -377,17 +401,21 @@ export async function callOfflineLLM(
           note: `http_${res.status}`,
         });
 
-        // 4xx 不重试
-        if (res.status >= 400 && res.status < 500) {
+        // 4xx 不重试（429 限流除外）
+        if (res.status >= 400 && res.status < 500 && res.status !== 429) {
           return { ok: false, error: `http_${res.status}`, ledgerId };
         }
 
-        // 5xx 瞬时错误且还有尝试机会时，重试
+        // 5xx / 429 瞬时错误且还有尝试机会时，退避后重试
         lastError = `http_${res.status}`;
+        if (currentAttempt < maxAttempts) {
+          await backoffDelay(currentAttempt, params.signal, params.jobDeadline);
+          if (params.signal?.aborted) return { ok: false, error: 'aborted', ledgerId };
+        }
         continue;
       }
 
-      // 请求成功，解析返回内容
+      // 请求成功，解析返回内容（响应体读取仍受超时控制，防止服务端挂起流式输出）
       const data: any = await res.json();
       const rawContent = extractResponseContent(data);
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
@@ -454,11 +482,6 @@ export async function callOfflineLLM(
         };
       }
     } catch (err: any) {
-      clearTimeout(timeoutTimer);
-      if (params.signal) {
-        params.signal.removeEventListener('abort', onExternalAbort);
-      }
-
       const isAbort = err?.name === 'AbortError' || timeoutController.signal.aborted;
       const note = isAbort ? 'timeout_or_abort' : 'network_error';
 
@@ -477,8 +500,16 @@ export async function callOfflineLLM(
         return { ok: false, error: lastError, ledgerId };
       }
 
-      // 仅瞬时网络故障重试
+      // 仅瞬时网络故障重试（指数退避）
+      if (currentAttempt < maxAttempts) {
+        await backoffDelay(currentAttempt, params.signal, params.jobDeadline);
+      }
       continue;
+    } finally {
+      clearTimeout(timeoutTimer);
+      if (params.signal) {
+        params.signal.removeEventListener('abort', onExternalAbort);
+      }
     }
   }
 

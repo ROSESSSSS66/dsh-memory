@@ -153,6 +153,7 @@ export function auditMemoryHealth(
         id: string;
         scope: string;
         workspace_id: string | null;
+        session_id: string | null;
         type: string;
         summary: string;
         content: string;
@@ -163,7 +164,7 @@ export function auditMemoryHealth(
         confidence: number;
         updated_at: number;
       }>(
-        `SELECT id, scope, workspace_id, type, summary, content, slot_key, hash, embedding, utility, confidence, updated_at
+        `SELECT id, scope, workspace_id, session_id, type, summary, content, slot_key, hash, embedding, utility, confidence, updated_at
          FROM memories
          WHERE status IN ('active', 'frozen')
            AND (workspace_id = ? OR scope IN ('user', 'global'))
@@ -175,6 +176,7 @@ export function auditMemoryHealth(
         id: string;
         scope: string;
         workspace_id: string | null;
+        session_id: string | null;
         type: string;
         summary: string;
         content: string;
@@ -185,7 +187,7 @@ export function auditMemoryHealth(
         confidence: number;
         updated_at: number;
       }>(
-        `SELECT id, scope, workspace_id, type, summary, content, slot_key, hash, embedding, utility, confidence, updated_at
+        `SELECT id, scope, workspace_id, session_id, type, summary, content, slot_key, hash, embedding, utility, confidence, updated_at
          FROM memories
          WHERE status IN ('active', 'frozen')
          ORDER BY utility DESC, confidence DESC, updated_at DESC
@@ -196,6 +198,10 @@ export function auditMemoryHealth(
   let embeddingsReadyCount = 0;
   const tokenCache = new Map<string, Set<string>>();
   const vecCache = new Map<string, Float32Array | null>();
+  // 预计算每行的数字指纹与规范化槽位，避免在 O(n²) 内层循环中重复跑正则
+  const numsCache = new Map<string, string>();
+  const slotCache = new Map<string, string>();
+  const normSlot = (s: string | null) => (s ? s.toLowerCase().replace(/[\s\-_.]+/g, '') : '');
 
   for (const r of activeRows) {
     if (r.embedding && r.embedding.byteLength > 0) {
@@ -205,6 +211,8 @@ export function auditMemoryHealth(
     }
     tokenCache.set(r.id, tokenSet(`${r.summary} ${r.content}`));
     vecCache.set(r.id, getOrComputeEmbedding(r));
+    numsCache.set(r.id, (r.content.match(/\d+(?:\.\d+)?/g) || []).join(','));
+    slotCache.set(r.id, normSlot(r.slot_key));
   }
 
   const duplicatePairs: DuplicatePairItem[] = [];
@@ -214,21 +222,21 @@ export function auditMemoryHealth(
     const vecA = vecCache.get(a.id);
     for (let j = i + 1; j < activeRows.length && duplicatePairs.length < maxDuplicates; j++) {
       const b = activeRows[j];
-      // 仅比较相同作用域的记忆
+      // 仅比较相同作用域的记忆（session 作用域还必须是同一会话）
       const sameScope =
-        a.scope === b.scope && (a.scope === 'global' || a.workspace_id === b.workspace_id);
+        a.scope === b.scope &&
+        (a.scope === 'global' || a.workspace_id === b.workspace_id) &&
+        (a.scope !== 'session' || (a.session_id || '') === (b.session_id || ''));
       if (!sameScope) continue;
 
-      const normSlot = (s: string | null) =>
-        s ? s.toLowerCase().replace(/[\s\-_.]+/g, '') : '';
       const sameSlot = Boolean(
-        a.slot_key && b.slot_key && normSlot(a.slot_key) === normSlot(b.slot_key)
+        a.slot_key && b.slot_key && slotCache.get(a.id) === slotCache.get(b.id)
       );
       const setB = tokenCache.get(b.id)!;
       if (a.slot_key && b.slot_key && !sameSlot) continue;
       if (!sameSlot) {
-        const numsA = (a.content.match(/\d+(?:\.\d+)?/g) || []).join(',');
-        const numsB = (b.content.match(/\d+(?:\.\d+)?/g) || []).join(',');
+        const numsA = numsCache.get(a.id)!;
+        const numsB = numsCache.get(b.id)!;
         if (numsA && numsB && numsA !== numsB) continue;
       }
       const sim = jaccard(setA, setB);
@@ -349,9 +357,15 @@ export function auditMemoryHealth(
 
   // 统计尚未建立任何拓扑关系边的孤岛记忆数 (A-Mem Zettelkasten 连通度诊断)
   const connectedIdSet = new Set<string>();
-  const allRelRows = db.all<{ from_id: string; to_id: string }>(
-    `SELECT from_id, to_id FROM memory_relations WHERE rel IN ('related', 'derived_from', 'supersedes')`
-  );
+  const auditIdsJson = JSON.stringify(activeRows.map((r) => r.id));
+  const allRelRows = activeRows.length
+    ? db.all<{ from_id: string; to_id: string }>(
+        `SELECT from_id, to_id FROM memory_relations
+         WHERE rel IN ('related', 'derived_from', 'supersedes')
+           AND (from_id IN (SELECT value FROM json_each(?)) OR to_id IN (SELECT value FROM json_each(?)))`,
+        [auditIdsJson, auditIdsJson]
+      )
+    : [];
   for (const rel of allRelRows) {
     connectedIdSet.add(rel.from_id);
     connectedIdSet.add(rel.to_id);
@@ -501,6 +515,7 @@ export function weaveZettelkastenLinks(
         id: string;
         scope: string;
         workspace_id: string | null;
+        session_id: string | null;
         type: string;
         summary: string;
         content: string;
@@ -508,7 +523,7 @@ export function weaveZettelkastenLinks(
         hash: string;
         embedding: Uint8Array | Buffer | null;
       }>(
-        `SELECT id, scope, workspace_id, type, summary, content, slot_key, hash, embedding
+        `SELECT id, scope, workspace_id, session_id, type, summary, content, slot_key, hash, embedding
          FROM memories
          WHERE status IN ('active', 'frozen')
            AND type != 'meta'
@@ -522,6 +537,7 @@ export function weaveZettelkastenLinks(
         id: string;
         scope: string;
         workspace_id: string | null;
+        session_id: string | null;
         type: string;
         summary: string;
         content: string;
@@ -529,7 +545,7 @@ export function weaveZettelkastenLinks(
         hash: string;
         embedding: Uint8Array | Buffer | null;
       }>(
-        `SELECT id, scope, workspace_id, type, summary, content, slot_key, hash, embedding
+        `SELECT id, scope, workspace_id, session_id, type, summary, content, slot_key, hash, embedding
          FROM memories
          WHERE status IN ('active', 'frozen')
            AND type != 'meta'
@@ -542,8 +558,13 @@ export function weaveZettelkastenLinks(
 
   const existingPairs = new Set<string>();
   const connectedIds = new Set<string>();
+  // 仅加载与本批活跃记忆相关的关系边，避免随关系表增长而全表加载
+  const activeIdsJson = JSON.stringify(activeRows.map((r) => r.id));
   const relRows = db.all<{ from_id: string; to_id: string }>(
-    `SELECT from_id, to_id FROM memory_relations WHERE rel IN ('related', 'derived_from', 'supersedes')`
+    `SELECT from_id, to_id FROM memory_relations
+     WHERE rel IN ('related', 'derived_from', 'supersedes')
+       AND (from_id IN (SELECT value FROM json_each(?)) OR to_id IN (SELECT value FROM json_each(?)))`,
+    [activeIdsJson, activeIdsJson]
   );
   for (const r of relRows) {
     existingPairs.add(`${r.from_id}->${r.to_id}`);

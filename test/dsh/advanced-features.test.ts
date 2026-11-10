@@ -7,7 +7,7 @@ import type { Db } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
 import { MemoryTools } from '../../src/dsh/tools.js';
 import { MemoryCommands } from '../../src/dsh/commands.js';
-import { upsertCandidate } from '../../src/core/writer.js';
+import { upsertCandidate, approveCandidate } from '../../src/core/writer.js';
 import { SessionListener } from '../../src/dsh/session-listener.js';
 import { IngestQueue } from '../../src/ingest/queue.js';
 
@@ -57,10 +57,35 @@ describe('Ecosystem Features Merged into DSH Memory', () => {
       const confirmRes = tools.confirm({ id }, { workspaceId: ws1 });
       expect(confirmRes).toContain('confirmed');
 
+      // 安全策略：模型无法将纯工具来源（不可信）的候选直接激活，只提升置信度并等待用户审批
       const updated = db.get('SELECT * FROM memories WHERE id = ?', [id]);
-      expect(updated.status).toBe('active');
-      expect(updated.confidence).toBeGreaterThan(0.5);
+      expect(updated.status).toBe('candidate');
+      expect(updated.confidence).toBeGreaterThan(0.4);
+      expect(updated.confidence).toBeLessThanOrEqual(0.7);
       expect(updated.utility).toBeGreaterThan(0.5);
+
+      // 带有用户证据的候选可以被模型确认激活
+      const userRes = upsertCandidate(
+        db,
+        {
+          type: 'semantic',
+          content: '团队约定所有接口返回统一的错误码结构',
+          scope: 'workspace',
+          workspaceId: ws1,
+          source_kind: 'llm_extract',
+          confidence: 0.6,
+          status: 'candidate',
+          origin_kinds: ['user'],
+          sources: [{ session_id: sess1, seq: 2, kind: 'user' }],
+          actor: 'llm',
+        },
+        now
+      );
+      const userCandId = (userRes as any).id;
+      expect(tools.confirm({ id: userCandId }, { workspaceId: ws1 })).toContain('confirmed');
+      const promoted = db.get('SELECT * FROM memories WHERE id = ?', [userCandId]);
+      expect(promoted.status).toBe('active');
+      expect(promoted.confidence).toBeGreaterThan(0.5);
     });
 
     it('memory_merge should combine two memories and supersede source', () => {
@@ -127,6 +152,10 @@ describe('Ecosystem Features Merged into DSH Memory', () => {
         { workspaceId: ws1, sessionId: sess1 }
       );
       expect(confirmRes).toContain('confirmed');
+      // 模型无法自我批准自己写入的 note，仍需用户审批
+      expect(confirmRes).toContain('pending user approval');
+      expect(db.get('SELECT status FROM memories WHERE id = ?', [noteId]).status).toBe('candidate');
+      approveCandidate(db, noteId, 'user', Date.now());
 
       // 3. search
       const searchRes = tools.unified(

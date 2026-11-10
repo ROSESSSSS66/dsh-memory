@@ -585,10 +585,15 @@ export class MemoryTools {
     if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const rawContent = (params.content || '').trim();
     if (!rawContent) return 'Error: content is required for reconciliation';
+    if (rawContent.length > 2000) return 'Error: content too long for reconciliation (max 2000 characters)';
 
     const wsId = workspaceId(agentCtx.workspaceId);
     const sessionId = agentCtx.sessionId || 'default_session';
-    const type = (params.type || 'semantic') as any;
+    // 工具参数 kind 取值为 fact/preference/procedure，需映射到合法 MemoryType，否则会触发 DB CHECK 约束异常
+    const kindMap: Record<string, MemoryType> = { fact: 'semantic', procedure: 'procedural' };
+    const validTypes: MemoryType[] = ['episodic', 'semantic', 'procedural', 'belief', 'preference', 'goal', 'failure', 'meta'];
+    const rawType = String(params.type || 'semantic').toLowerCase();
+    const type: MemoryType = kindMap[rawType] || (validTypes.includes(rawType as MemoryType) ? (rawType as MemoryType) : 'semantic');
 
     const candInput = {
       type,

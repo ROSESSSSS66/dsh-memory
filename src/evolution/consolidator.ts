@@ -361,31 +361,39 @@ text: ${m.content}`
   // 6. 事务内写入 candidate 与 derived_from 关系
   let candidateId: string | undefined;
 
-  db.transaction(() => {
-    const candidateItem = parseRes.items[0];
-    const upsertRes = upsertCandidate(db, candidateItem, now);
-    if (!('id' in upsertRes)) {
-      throw new Error(`upsert_failed: ${(upsertRes as any).reason}`);
-    }
-    candidateId = upsertRes.id;
+  try {
+    db.transaction(() => {
+      const candidateItem = parseRes.items[0];
+      const upsertRes = upsertCandidate(db, candidateItem, now);
+      if (!('id' in upsertRes)) {
+        throw new Error(`upsert_failed: ${(upsertRes as any).reason}`);
+      }
+      candidateId = upsertRes.id;
 
-    // 为每个源记录建立指向 candidate 的 derived_from 关系
-    const snapshotMetadata = JSON.stringify({
-      sources: cluster.snapshots.map(s => ({
-        memory_id: s.id,
-        content_rev: s.content_rev,
-        hash: s.hash,
-      })),
+      // 为每个源记录建立指向 candidate 的 derived_from 关系
+      const snapshotMetadata = JSON.stringify({
+        sources: cluster.snapshots.map(s => ({
+          memory_id: s.id,
+          content_rev: s.content_rev,
+          hash: s.hash,
+        })),
+      });
+
+      for (const s of cluster.snapshots) {
+        db.run(
+          `INSERT OR IGNORE INTO memory_relations (from_id, to_id, rel, metadata, created_at)
+           VALUES (?, ?, 'derived_from', ?, ?)`,
+          [candidateId, s.id, snapshotMetadata, now]
+        );
+      }
     });
-
-    for (const s of cluster.snapshots) {
-      db.run(
-        `INSERT OR IGNORE INTO memory_relations (from_id, to_id, rel, metadata, created_at)
-         VALUES (?, ?, 'derived_from', ?, ?)`,
-        [candidateId, s.id, snapshotMetadata, now]
-      );
-    }
-  });
+  } catch (err: any) {
+    return {
+      success: false,
+      clusterKey: cluster.clusterKey,
+      error: `transaction_failed: ${err?.message || err}`,
+    };
+  }
 
   return {
     success: true,

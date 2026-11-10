@@ -3,6 +3,7 @@ import type { JobHandlerResult } from '../jobs/types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { sources } from '../core/store.js';
 import { upsertCandidate, saveVersionSnapshot } from '../core/writer.js';
+import { removeCachedRuntimeEmbedding } from '../core/vector.js';
 import { PROMPT_REPAIR } from './prompts.js';
 import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
@@ -393,6 +394,7 @@ export function approveRepairProposal(
             `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
             [now, now, conflictingSlot.id]
           );
+          removeCachedRuntimeEmbedding(conflictingSlot.id);
         }
       }
 
@@ -404,6 +406,7 @@ export function approveRepairProposal(
          WHERE id = ?`,
         [now, now, target.id]
       );
+      removeCachedRuntimeEmbedding(target.id);
 
       // 建立 supersedes 关系
       db.run(
@@ -460,6 +463,7 @@ export function approveRepairProposal(
               `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
               [now, now, conflictingSlot.id]
             );
+            removeCachedRuntimeEmbedding(conflictingSlot.id);
           }
         }
       }
@@ -472,6 +476,7 @@ export function approveRepairProposal(
          WHERE id = ?`,
         [now, now, target.id]
       );
+      removeCachedRuntimeEmbedding(target.id);
 
       // 逐个激活各子候选并建立 supersedes 关系
       for (const cid of candidateIds) {
@@ -496,6 +501,7 @@ export function approveRepairProposal(
          WHERE id = ?`,
         [now, target.id]
       );
+      removeCachedRuntimeEmbedding(target.id);
     }
 
     // 4. 更新提案状态为 approved

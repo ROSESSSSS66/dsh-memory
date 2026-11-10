@@ -73,18 +73,26 @@ export function generateShortCodes(
       continue;
     }
 
-    // 2. 数据库作用域唯一性校验
-    if (db && scopeCtx) {
+    // 2. 数据库作用域唯一性校验 (批量单次查询，利用 B-Tree 索引快速前缀检测)
+    if (db && scopeCtx && memories.length > 0) {
       try {
         const scope = scopeFilterSQL({
           workspaceId: scopeCtx.workspaceId,
           sessionId: scopeCtx.sessionId || '',
         });
-        for (const m of memories) {
-          const code = result.get(m.id)!;
+        const batchSize = 50;
+        for (let i = 0; i < memories.length; i += batchSize) {
+          const slice = memories.slice(i, i + batchSize);
+          const clauses: string[] = [];
+          const params: any[] = [...scope.params];
+          for (const m of slice) {
+            const code = result.get(m.id)!;
+            clauses.push('(id >= ? AND id < ? AND id != ?)');
+            params.push(code, code + '\uffff', m.id);
+          }
           const row = db.get<{ cnt: number }>(
-            `SELECT COUNT(*) as cnt FROM memories WHERE id >= ? AND id < ? AND ${scope.sql} AND id != ?`,
-            [code, code + '\uffff', ...scope.params, m.id]
+            `SELECT COUNT(*) as cnt FROM memories WHERE (${scope.sql}) AND (${clauses.join(' OR ')})`,
+            params
           );
           if (row && row.cnt > 0) {
             hasCollision = true;

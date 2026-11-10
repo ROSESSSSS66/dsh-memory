@@ -130,24 +130,26 @@ export function recall(
     s.add(row.entity.toLowerCase().trim());
   }
 
-  // 查询是否有处于 active 状态的矛盾项
-  const relRows = db.all<{ from_id: string; to_id: string; target_id: string }>(
-    `SELECT r.from_id, r.to_id, target.id as target_id
+  // 查询是否有处于 active 状态的矛盾项 (利用 memory_relations 联合主键与 memories(id) 快速索引查找)
+  const relRows = db.all<{ cand_id: string }>(
+    `SELECT r.from_id as cand_id
      FROM memory_relations r
-     JOIN memories target ON (target.id = r.to_id OR target.id = r.from_id)
+     JOIN memories target ON target.id = r.to_id
      WHERE r.rel = 'contradicts'
        AND target.status IN ('active', 'frozen')
-       AND (r.from_id IN (${placeholders}) OR r.to_id IN (${placeholders}))`,
+       AND r.from_id IN (${placeholders})
+     UNION
+     SELECT r.to_id as cand_id
+     FROM memory_relations r
+     JOIN memories target ON target.id = r.from_id
+     WHERE r.rel = 'contradicts'
+       AND target.status IN ('active', 'frozen')
+       AND r.to_id IN (${placeholders})`,
     [...idList, ...idList]
   );
   const contradictionsSet = new Set<string>();
   for (const rel of relRows) {
-    if (allIds.has(rel.from_id) && rel.target_id === rel.to_id) {
-      contradictionsSet.add(rel.from_id);
-    }
-    if (allIds.has(rel.to_id) && rel.target_id === rel.from_id) {
-      contradictionsSet.add(rel.to_id);
-    }
+    contradictionsSet.add(rel.cand_id);
   }
 
   // 4. 融合与打分 (绝对相关性门槛 -> GraphRAG 一跳协同 -> RRF -> 综合评分 -> 相对排名过滤)

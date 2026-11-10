@@ -144,11 +144,11 @@ export function govern(
   const selectedFeatures: Array<{ tokens: Set<string>; vec: Float32Array | null; type: string }> = [];
 
   function testBudget(items: RenderItem[]): number {
+    // 候选迭代评估阶段无需逐次走完整数据库短码范围查询；短码长度微小变化 (至多2字节)
+    // 对 token 预算计数影响极小，且在第 6 步收尾阶段会携带 opts.db 进行最终严格复核
     const text = render(items, {
       strategyVersion,
       layer,
-      db: opts.db,
-      scopeCtx: opts.scopeCtx,
     });
     return budgetTokens(text);
   }
