@@ -62,9 +62,8 @@ export function mutateStrategy(
   // 5. dynamicBudgetTokens 变异
   const dynamicCap = Math.max(0, cfg.hardBudgetTokens - cfg.stableBudgetTokens);
   const minDyn = Math.min(800, dynamicCap);
-  const dynamicBudgetTokens = Math.round(
-    mut(base.dynamicBudgetTokens || 1600, minDyn, dynamicCap)
-  );
+  const dynamicBudgetTokens = cfg.dynamicBudgetTokens === 0 || base.dynamicBudgetTokens === 0
+    ? 0 : Math.round(mut(base.dynamicBudgetTokens ?? 1600, minDyn, dynamicCap));
 
   // 6. maxItems 变异
   const maxItems = Math.round(mut(base.maxItems || 6, 1, cfg.maxLabItems || 12));

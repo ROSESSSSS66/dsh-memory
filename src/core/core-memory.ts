@@ -1,10 +1,20 @@
 import type { Db, MemoryRecord, CoreMemoryBlock, CoreMemoryEntry, Scope, MemoryType } from '../types.js';
 import { workspaceId as resolveWorkspaceId, scopeFilterSQL } from './scope.js';
-import { upsertCandidate, editContent } from './writer.js';
-import { estimateTokens } from './tokens.js';
+import { upsertCandidate, editContent, pin } from './writer.js';
 import { redactSecrets } from './privacy.js';
 
 export const DEFAULT_CORE_BLOCKS: CoreMemoryBlock[] = ['human', 'persona', 'project'];
+
+interface CoreMemoryWriteOptions {
+  workspaceId?: string;
+  sessionId?: string;
+  actor?: string;
+}
+
+interface CoreMemoryWriteResult {
+  id: string;
+  action: 'created' | 'updated' | 'proposed' | 'unchanged';
+}
 
 function resolveBlockScopeAndType(block: string): { scope: Scope; type: MemoryType } {
   const b = block.toLowerCase().trim();
@@ -90,66 +100,80 @@ export function setCoreMemory(
   db: Db,
   block: CoreMemoryBlock,
   content: string,
-  options?: { workspaceId?: string; actor?: string }
-): { id: string; action: 'created' | 'updated' } {
-  const normBlock = block.toLowerCase().trim();
-  const cleanContent = redactSecrets(content.trim()).text;
-  if (!cleanContent) {
-    throw new Error(`Core memory block '${normBlock}' content cannot be empty.`);
-  }
+  options?: CoreMemoryWriteOptions
+): CoreMemoryWriteResult {
+  return db.transaction(() => {
+    const normBlock = block.toLowerCase().trim();
+    const cleanContent = redactSecrets(content.trim()).text;
+    if (!cleanContent) {
+      throw new Error(`Core memory block '${normBlock}' content cannot be empty.`);
+    }
 
-  const { scope, type } = resolveBlockScopeAndType(normBlock);
-  const wsId = scope === 'workspace' ? resolveWorkspaceId(options?.workspaceId || process.cwd()) : undefined;
-  const slotKey = `core:${normBlock}`;
-  const actor = (options?.actor || 'user') as any;
-  const now = Date.now();
+    const { scope, type } = resolveBlockScopeAndType(normBlock);
+    const wsId = scope === 'workspace' ? resolveWorkspaceId(options?.workspaceId || process.cwd()) : undefined;
+    const slotKey = `core:${normBlock}`;
+    const actor = options?.actor ?? 'user';
+    const trusted = actor === 'user' || actor === 'system';
+    const now = Date.now();
 
-  const existing = getCoreMemory(db, normBlock, { workspaceId: wsId });
-  if (existing) {
-    const editRes = editContent(
+    const existing = getCoreMemory(db, normBlock, { workspaceId: wsId });
+    if (existing && !trusted && existing.content === cleanContent) {
+      return { id: existing.id, action: 'unchanged' };
+    }
+    if (existing && trusted) {
+      const editRes = editContent(
+        db,
+        existing.id,
+        cleanContent,
+        `[Core Memory] ${normBlock.toUpperCase()}`,
+        actor,
+        now
+      );
+      if (!editRes.ok) {
+        throw new Error(`Failed to update core memory '${normBlock}'`);
+      }
+      // 确保 pinned=1 与 importance=10
+      db.run(`UPDATE memories SET pinned = 1, importance = 10, confidence = 1.0, utility = 1.0 WHERE id = ?`, [existing.id]);
+      return { id: existing.id, action: 'updated' };
+    }
+
+    const summary = `[Core Memory] ${normBlock.toUpperCase()}`;
+    const upsertRes = upsertCandidate(
       db,
-      existing.id,
-      cleanContent,
-      `[Core Memory] ${normBlock.toUpperCase()}`,
-      actor,
+      {
+        type,
+        content: cleanContent,
+        summary,
+        slot_key: slotKey,
+        scope,
+        workspaceId: wsId,
+        source_kind: trusted ? actor : 'assistant',
+        confidence: trusted ? 1.0 : 0.5,
+        importance: 10,
+        origin_kinds: [trusted ? actor : 'assistant'],
+        sources: [{
+          session_id: options?.sessionId || 'core_memory',
+          seq: 0,
+          kind: trusted ? 'manual' : 'assistant',
+          excerpt: cleanContent.slice(0, 100),
+        }],
+        actor: trusted ? actor : 'llm',
+        status: trusted ? 'active' : 'candidate',
+      },
       now
     );
-    if (!editRes.ok) {
-      throw new Error(`Failed to update core memory '${normBlock}'`);
+
+    if ('id' in upsertRes) {
+      // Candidates only enter the stable layer after explicit approval.
+      if (trusted) {
+        pin(db, upsertRes.id, actor, now);
+        db.run(`UPDATE memories SET importance = 10, confidence = 1.0, utility = 1.0 WHERE id = ?`, [upsertRes.id]);
+      }
+      return { id: upsertRes.id, action: trusted ? 'created' : 'proposed' };
     }
-    // 确保 pinned=1 与 importance=10
-    db.run(`UPDATE memories SET pinned = 1, importance = 10, confidence = 1.0, utility = 1.0 WHERE id = ?`, [existing.id]);
-    return { id: existing.id, action: 'updated' };
-  }
 
-  const summary = `[Core Memory] ${normBlock.toUpperCase()}`;
-  const upsertRes = upsertCandidate(
-    db,
-    {
-      type,
-      content: cleanContent,
-      summary,
-      slot_key: slotKey,
-      scope,
-      workspaceId: wsId,
-      source_kind: 'user',
-      confidence: 1.0,
-      importance: 10,
-      origin_kinds: ['user'],
-      sources: [{ session_id: 'core_memory', seq: 0, kind: 'manual', excerpt: cleanContent.slice(0, 100) }],
-      actor: 'user',
-      status: 'active',
-    },
-    now
-  );
-
-  if ('id' in upsertRes) {
-    // 强制设为 pinned=1
-    db.run(`UPDATE memories SET pinned = 1, importance = 10, confidence = 1.0, utility = 1.0 WHERE id = ?`, [upsertRes.id]);
-    return { id: upsertRes.id, action: 'created' };
-  }
-
-  throw new Error(`Failed to initialize core memory '${normBlock}': ${JSON.stringify(upsertRes)}`);
+    throw new Error(`Failed to initialize core memory '${normBlock}': ${JSON.stringify(upsertRes)}`);
+  });
 }
 
 /**
@@ -159,23 +183,25 @@ export function appendCoreMemory(
   db: Db,
   block: CoreMemoryBlock,
   textToAppend: string,
-  options?: { workspaceId?: string; actor?: string }
-): { id: string; newContent: string } {
-  const normBlock = block.toLowerCase().trim();
-  const addition = redactSecrets(textToAppend.trim()).text;
-  if (!addition) {
-    throw new Error('Cannot append empty text to core memory block.');
-  }
+  options?: CoreMemoryWriteOptions
+): CoreMemoryWriteResult & { newContent: string } {
+  return db.transaction(() => {
+    const normBlock = block.toLowerCase().trim();
+    const addition = redactSecrets(textToAppend.trim()).text;
+    if (!addition) {
+      throw new Error('Cannot append empty text to core memory block.');
+    }
 
-  const existing = getCoreMemory(db, normBlock, options);
-  if (!existing) {
-    const initRes = setCoreMemory(db, normBlock, addition, options);
-    return { id: initRes.id, newContent: addition };
-  }
+    const existing = getCoreMemory(db, normBlock, options);
+    if (!existing) {
+      const initRes = setCoreMemory(db, normBlock, addition, options);
+      return { ...initRes, newContent: addition };
+    }
 
-  const newContent = `${existing.content}\n${addition}`;
-  setCoreMemory(db, normBlock, newContent, options);
-  return { id: existing.id, newContent };
+    const newContent = `${existing.content}\n${addition}`;
+    const result = setCoreMemory(db, normBlock, newContent, options);
+    return { ...result, newContent };
+  });
 }
 
 /**

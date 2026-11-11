@@ -392,10 +392,10 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               superseded: st.byStatus.superseded || 0,
               archived: st.byStatus.archived || 0,
             },
-            dynamicBudgetTokens: cfg.dynamicBudgetTokens || 1600,
-            stableBudgetTokens: cfg.stableBudgetTokens || 600,
+            dynamicBudgetTokens: cfg.dynamicBudgetTokens ?? 1600,
+            stableBudgetTokens: cfg.stableBudgetTokens ?? 600,
             stableLayerTokens: stableLayer.stableTokens,
-            hardBudgetTokens: cfg.hardBudgetTokens || 3200,
+            hardBudgetTokens: cfg.hardBudgetTokens ?? 3200,
             pendingRepairsCount,
             activeStrategyVersion: activeStrat.version,
             coreMemoryCount: coreBlocks.length,
@@ -459,7 +459,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               blocks,
               totalTokens,
               stableLayerTokens: stableLayer.stableTokens,
-              stableBudgetTokens: cfg.stableBudgetTokens || 600,
+              stableBudgetTokens: cfg.stableBudgetTokens ?? 600,
             });
             return;
           }
@@ -670,11 +670,11 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               text: stableLayer.text,
               stableTokens: stableLayer.estimatedTokens ?? stableLayer.stableTokens,
               stableByteTokens: stableLayer.stableTokens,
-              stableBudgetTokens: cfg.stableBudgetTokens || 600,
+              stableBudgetTokens: cfg.stableBudgetTokens ?? 600,
               visibleCount: stableLayer.visibleRefs.size,
             },
-            dynamicBudgetTokens: cfg.dynamicBudgetTokens || 1600,
-            hardBudgetTokens: cfg.hardBudgetTokens || 3200,
+            dynamicBudgetTokens: cfg.dynamicBudgetTokens ?? 1600,
+            hardBudgetTokens: cfg.hardBudgetTokens ?? 3200,
             strategyVersion: activeStrat.version,
             recallSimulation,
             recentInjections,
@@ -1389,6 +1389,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             res.writeHead(200, {
               'Content-Type': 'text/markdown; charset=utf-8',
               'Content-Disposition': 'attachment; filename="dsh-memories.md"',
+              'Cache-Control': 'no-store, no-cache, must-revalidate',
               'Access-Control-Allow-Origin': (res as any).__trustedOrigin || 'http://127.0.0.1',
             });
             res.end(fullMd);
@@ -1397,7 +1398,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           sendJson(res, 200, {
             ok: true,
-            version: '0.7.0',
+            version: '0.8.0',
             exportedAt: Date.now(),
             total: items.length,
             memories: items.map(({ embedding: _emb, ...rest }) => rest),
@@ -1708,6 +1709,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               headers,
               body: requestBody,
               signal: AbortSignal.timeout(10000),
+              redirect: 'manual',
             });
 
             const latencyMs = Date.now() - start;

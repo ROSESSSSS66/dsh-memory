@@ -548,7 +548,8 @@ export function mapToCandidateInput(
     return {
       session_id: entry.session_id,
       seq: entry.original_seq,
-      kind: entry.kind,
+      // repair merely reinterprets historical excerpts via LLM, not direct live user confirmation
+      kind: options.taskKind === 'repair' ? 'llm_repair' : entry.kind,
       excerpt: ev.quote.trim(),
     };
   });

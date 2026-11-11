@@ -7,7 +7,7 @@ import type { Db, RawEvent } from '../types.js';
 import { workspaceId } from '../core/scope.js';
 import { isWorkspaceExcluded, redactSecrets } from '../core/privacy.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
-import { IGNORED_EVENT_TYPES } from '../dsh/session-listener.js';
+import { IGNORED_EVENT_TYPES, isIgnoredUserMessageSource } from '../dsh/session-listener.js';
 import { runRules } from './rules.js';
 
 export const ZSTD_MAGIC = 0xFD2FB528;
@@ -449,7 +449,7 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
           stats.filteredEvents++;
           continue;
         }
-        if (source?.kind === 'runtime-context') {
+        if (isIgnoredUserMessageSource(source)) {
           stats.filteredEvents++;
           continue;
         }

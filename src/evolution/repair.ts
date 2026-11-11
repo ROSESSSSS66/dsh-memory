@@ -1,5 +1,5 @@
 import type { Db, MemoryRecord } from '../types.js';
-import type { JobHandlerResult } from '../jobs/types.js';
+import { jobFailure, type JobHandlerResult } from '../jobs/types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { sources } from '../core/store.js';
 import { upsertCandidate, saveVersionSnapshot } from '../core/writer.js';
@@ -8,6 +8,9 @@ import { PROMPT_REPAIR } from './prompts.js';
 import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
 import type { EvidenceLedger, EvidenceLedgerEntry } from './types.js';
+import { memoryWorkspaceIds, canSendMemoriesOffline } from '../core/privacy.js';
+import { hasUserEvidence } from '../core/trust.js';
+import { sameMemoryOwner } from './review-snapshot.js';
 
 export interface RepairProposalRecord {
   id: number;
@@ -107,6 +110,9 @@ export function executeRepair(
     if (mem.status !== 'active') {
       return { action: 'skipped', nonRetryable: true, reason: `Target memory status is ${mem.status}` };
     }
+    if (!canSendMemoriesOffline(db, [mem], cfg.excludeWorkspaces)) {
+      return { action: 'failed', nonRetryable: true, error: 'workspace_excluded' };
+    }
 
     // 2. 更新 last_repair_at 保证重启无法绕过 7 天冷却
     db.run('UPDATE memories SET last_repair_at = ? WHERE id = ?', [now, mem.id]);
@@ -188,6 +194,10 @@ export function executeRepair(
         maxOutputTokens: PROMPT_REPAIR.maxOutputTokens,
         cwd: realCwd,
         workspaceId: mem.workspace_id || '',
+        dataWorkspaceIds: [
+          ...memoryWorkspaceIds(db, [mem]),
+          ...db.all<{ workspace_id: string }>('SELECT workspace_id FROM session_workspace_owners WHERE session_id = ?', [payload.sessionId]).map(r => r.workspace_id),
+        ],
         signal: options.signal,
         fetchFn: options.fetchFn,
       },
@@ -195,7 +205,7 @@ export function executeRepair(
     );
 
     if (!llmRes.ok) {
-      return { action: 'failed', nonRetryable: false, error: llmRes.error };
+      return jobFailure(llmRes.error);
     }
 
     // 7. 解析与校验 B-4 合同
@@ -231,6 +241,7 @@ export function executeRepair(
             ...item,
             scope: mem.scope,
             workspaceId: mem.workspace_id || undefined,
+            sessionId: mem.scope === 'session' ? mem.session_id || undefined : undefined,
             status: 'candidate',
             actor: 'llm',
           },
@@ -269,6 +280,7 @@ export function executeRepair(
               ...item,
               scope: mem.scope,
               workspaceId: mem.workspace_id || undefined,
+              sessionId: mem.scope === 'session' ? mem.session_id || undefined : undefined,
               status: 'candidate',
               actor: 'llm',
             },
@@ -360,6 +372,22 @@ export function approveRepairProposal(
     }
 
     const candidateIds: string[] = JSON.parse(proposal.candidate_ids);
+    if (new Set(candidateIds).size !== candidateIds.length) {
+      return { ok: false, reason: 'Repair candidates must be distinct' };
+    }
+    const trustedApprover = approvedBy === 'user' || approvedBy === 'system';
+    if (!trustedApprover) {
+      if (target.pinned) return { ok: false, reason: 'Target memory is pinned' };
+      if (proposal.action === 'invalidate' || candidateIds.length === 0) {
+        return { ok: false, reason: 'user_approval_required' };
+      }
+      for (const id of candidateIds) {
+        const candidate = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
+        if (!candidate || candidate.source_kind === 'llm_extract' || !hasUserEvidence(db, candidate)) {
+          return { ok: false, reason: 'user_evidence_required' };
+        }
+      }
+    }
 
     // 3. 执行应用
     if (proposal.action === 'revise') {
@@ -370,6 +398,9 @@ export function approveRepairProposal(
       const candidateMem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [candId]);
       if (!candidateMem || candidateMem.status !== 'candidate') {
         return { ok: false, reason: `Candidate ${candId} not found or not in candidate status` };
+      }
+      if (!sameMemoryOwner(target, candidateMem)) {
+        return { ok: false, reason: 'Repair candidates must belong to the target scope' };
       }
 
       // 检查候选槽位冲突（排除将要被取代的 target.id）
@@ -388,6 +419,9 @@ export function approveRepairProposal(
         if (conflictingSlot) {
           if (conflictingSlot.status === 'frozen') {
             return { ok: false, reason: `Slot '${candidateMem.slot_key}' is frozen` };
+          }
+          if (conflictingSlot.pinned && !trustedApprover) {
+            return { ok: false, reason: `Slot '${candidateMem.slot_key}' is pinned` };
           }
           saveVersionSnapshot(db, conflictingSlot, 'repair_slot_supersede', approvedBy, now);
           db.run(
@@ -429,10 +463,14 @@ export function approveRepairProposal(
 
       // 检查子候选间槽位冲突
       const seenSlots = new Set<string>();
+      const slotConflicts: MemoryRecord[] = [];
       for (const cid of candidateIds) {
         const cMem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [cid]);
         if (!cMem || cMem.status !== 'candidate') {
           return { ok: false, reason: `Candidate ${cid} not found or not in candidate status` };
+        }
+        if (!sameMemoryOwner(target, cMem)) {
+          return { ok: false, reason: 'Repair candidates must belong to the target scope' };
         }
         if (cMem.slot_key) {
           if (seenSlots.has(cMem.slot_key)) {
@@ -458,14 +496,22 @@ export function approveRepairProposal(
             if (conflictingSlot.status === 'frozen') {
               return { ok: false, reason: `Slot '${cMem.slot_key}' is frozen` };
             }
-            saveVersionSnapshot(db, conflictingSlot, 'repair_slot_supersede', approvedBy, now);
-            db.run(
-              `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
-              [now, now, conflictingSlot.id]
-            );
-            removeCachedRuntimeEmbedding(conflictingSlot.id);
+            if (conflictingSlot.pinned && !trustedApprover) {
+              return { ok: false, reason: `Slot '${cMem.slot_key}' is pinned` };
+            }
+            slotConflicts.push(conflictingSlot);
           }
         }
+      }
+
+      // Returning a validation error commits the transaction, so finish all checks before writes.
+      for (const conflictingSlot of slotConflicts) {
+        saveVersionSnapshot(db, conflictingSlot, 'repair_slot_supersede', approvedBy, now);
+        db.run(
+          `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+          [now, now, conflictingSlot.id]
+        );
+        removeCachedRuntimeEmbedding(conflictingSlot.id);
       }
 
       // 保存快照并将目标置为 superseded

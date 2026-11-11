@@ -156,5 +156,15 @@ describe('Markdown Sync & Frontmatter (汲取自 LZMW/dsh-memory)', () => {
     const restoreRes = restoreFromTrash(db, id, trashDir);
     expect(restoreRes.restored).toBe(true);
     expect(db.get(`SELECT status FROM memories WHERE id = ?`, [id]).status).toBe('active');
+
+    // 当数据库中原记录已被物理删除时，从 .md 文件 fallback 恢复也应直接进入 active 状态
+    db.run(`DELETE FROM memories WHERE id = ?`, [id]);
+    const fallbackRes = restoreFromTrash(db, id, trashDir);
+    expect(fallbackRes.restored).toBe(true);
+    const restoredRow = db.get<{ status: string; approved_by: string; content: string }>(
+      `SELECT status, approved_by, content FROM memories WHERE content LIKE '%部署前务必执行%'`
+    );
+    expect(restoredRow?.status).toBe('active');
+    expect(restoredRow?.approved_by).toBe('user');
   });
 });

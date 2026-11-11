@@ -433,7 +433,7 @@ describe('Web Server API & Sidebar Backend (web.ts)', () => {
     expect(batchJson.ok).toBe(true);
     expect(batchJson.affected).toBe(1);
 
-    // 5. Test export endpoint (JSON)
+    // 5. Test export endpoint (JSON & Markdown Cache-Control)
     let expBody = '';
     const expReq: any = {
       method: 'GET',
@@ -443,6 +443,18 @@ describe('Web Server API & Sidebar Backend (web.ts)', () => {
     const expJson = JSON.parse(expBody);
     expect(expJson.ok).toBe(true);
     expect(expJson.memories.length).toBeGreaterThanOrEqual(1);
+
+    let mdHeaders: Record<string, string> = {};
+    let mdBody = '';
+    await registeredHandler(
+      { method: 'GET', url: '/api/dsh-memory/export?format=markdown' },
+      {
+        writeHead: (_status: number, headers: Record<string, string>) => { mdHeaders = headers; },
+        end: (d: string) => { mdBody = d; },
+      }
+    );
+    expect(mdHeaders['Cache-Control']).toBe('no-store, no-cache, must-revalidate');
+    expect(mdBody).toContain('# DSH 长期记忆知识库导出');
 
     // 6. Test import endpoint (JSON)
     let impBody = '';

@@ -227,4 +227,70 @@ describe('User Commands (commands.ts)', () => {
     expect(doctorRes.kind).toBe('success');
     expect(doctorRes.text).toContain('记忆库健康度体检报告');
   });
+
+  it('scopes pending, approve-repair, reject-repair to current workspace and handles ambiguous history IDs', () => {
+    const wsForeign = workspaceId('test-ws-foreign');
+    const foreignMem = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: 'Foreign workspace secret config',
+        scope: 'workspace',
+        workspaceId: wsForeign,
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's_for', seq: 1, kind: 'user' }],
+        actor: 'user',
+      },
+      fixedNow
+    );
+    const foreignId = (foreignMem as any).id;
+    const foreignCand = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: 'Foreign workspace revised config',
+        scope: 'workspace',
+        workspaceId: wsForeign,
+        source_kind: 'llm_extract',
+        status: 'candidate',
+        confidence: 0.8,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's_for', seq: 2, kind: 'llm_repair' }],
+        actor: 'llm',
+      },
+      fixedNow + 1
+    );
+    const foreignCandId = (foreignCand as any).id;
+    db.run(
+      `INSERT INTO repair_proposals (job_id, memory_id, content_rev, action, candidate_ids, reason, status, created_at, expires_at)
+       VALUES (1, ?, 1, 'revise', ?, 'foreign reason', 'candidate', ?, ?)`,
+      [foreignId, JSON.stringify([foreignCandId]), fixedNow, fixedNow + 86400_000]
+    );
+    const propId = db.get<{ id: number }>('SELECT id FROM repair_proposals')!.id;
+
+    expect(commands.pending({ workspaceId: ws1 })).toBe('No pending candidates or repair proposals.');
+    expect(commands.handleCommand(`approve-repair ${propId}`, { workspaceId: ws1 }).text).toContain('not found in current scope');
+    expect(commands.handleCommand(`reject-repair ${propId}`, { workspaceId: ws1 }).text).toContain('not found in current scope');
+    expect(db.get<{ status: string }>('SELECT status FROM repair_proposals WHERE id = ?', [propId])?.status).toBe('candidate');
+
+    // Foreign workspace itself can still inspect and reject/approve it.
+    expect(commands.pending({ workspaceId: wsForeign })).toContain(`Proposal #${propId}`);
+
+    // Ambiguous short code in history should return friendly output without throwing.
+    db.run(
+      `INSERT INTO memories (
+        id, type, status, content, summary, scope, workspace_id, origin_kinds, source_kind,
+        confidence, utility, use_count, success_count, fail_count, token_cost,
+        summary_cost, hash, version, content_rev, pinned, created_at, updated_at
+      ) VALUES
+      ('m_hist011111111111', 'semantic', 'active', 'Hist one.', 'H1', 'workspace', ?, '["user"]', 'user', 0.9, 0.5, 0, 0, 0, 5, 2, 'hh1', 1, 1, 0, 1, 1),
+      ('m_hist022222222222', 'semantic', 'active', 'Hist two.', 'H2', 'workspace', ?, '["user"]', 'user', 0.9, 0.5, 0, 0, 0, 5, 2, 'hh2', 1, 1, 0, 1, 1)`,
+      [ws1, ws1]
+    );
+    const histRes = commands.handleCommand('history m_hist0', { workspaceId: ws1 });
+    expect(histRes.kind).toBe('success');
+    expect(histRes.text).toContain('Ambiguous short id');
+  });
 });

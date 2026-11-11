@@ -17,6 +17,7 @@ describe('M1-T1: db.ts & Migrations', () => {
       'memory_relations',
       'memory_versions',
       'raw_events',
+      'session_workspace_owners',
       'injections',
       'turn_metrics',
       'strategies',
@@ -43,7 +44,7 @@ describe('M1-T1: db.ts & Migrations', () => {
 
     // 验证 meta 初始化值
     const versionRow = db.get<{ value: string }>("SELECT value FROM meta WHERE key='schema_version'");
-    expect(versionRow?.value).toBe('1');
+    expect(versionRow?.value).toBe('2');
 
     const contractRow = db.get<{ value: string }>("SELECT value FROM meta WHERE key='contract_version'");
     expect(contractRow?.value).toBe('1.1');
@@ -60,10 +61,31 @@ describe('M1-T1: db.ts & Migrations', () => {
       // 再次打开并执行迁移
       const db2 = openDb(tmpFile);
       const versionRow = db2.get<{ value: string }>("SELECT value FROM meta WHERE key='schema_version'");
-      expect(versionRow?.value).toBe('1');
+      expect(versionRow?.value).toBe('2');
       db2.close();
     } finally {
       try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
+    }
+  });
+
+  it('backfills durable session owners when upgrading a version 1 database', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-owner-migration-'));
+    const file = path.join(directory, 'memory.db');
+    let db = openDb(file);
+    try {
+      db.exec('DROP TRIGGER raw_event_owner_insert; DROP TRIGGER raw_event_owner_update; DROP TABLE session_workspace_owners;');
+      db.run("UPDATE meta SET value = '1' WHERE key = 'schema_version'");
+      db.run(`INSERT INTO raw_events (session_id, seq, workspace_id, type, time, origin_kind)
+        VALUES ('legacy-session', 1, 'private-workspace', 'user/message', 1, 'user')`);
+      db.close();
+      db = openDb(file);
+      db.run('DELETE FROM raw_events');
+      expect(db.all('SELECT * FROM session_workspace_owners')).toEqual([
+        { session_id: 'legacy-session', workspace_id: 'private-workspace' },
+      ]);
+    } finally {
+      db.close();
+      fs.rmSync(directory, { recursive: true, force: true });
     }
   });
 

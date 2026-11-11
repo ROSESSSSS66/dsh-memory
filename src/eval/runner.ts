@@ -5,11 +5,11 @@ import { workspaceId } from '../core/scope.js';
 import { upsertCandidate } from '../core/writer.js';
 import { buildQueryPlan } from '../retrieval/query.js';
 import { recall } from '../retrieval/recall.js';
-import { render } from '../retrieval/render.js';
+import { renderStableLayer } from '../dsh/prompt-section.js';
 import { budgetTokens } from '../core/tokens.js';
 import { buildEvalReport } from './metrics.js';
 import type { EvalCase, CaseResult, EvalReport } from './types.js';
-import type { StrategyConfig, MemoryRecord } from '../types.js';
+import type { StrategyConfig } from '../types.js';
 
 /**
  * 运行单个评测用例 (独立内存库，固定 now/workspace)
@@ -59,19 +59,9 @@ export function runCase(
     }
 
     // 2. 渲染稳定层
-    const stableRecords = memDb.all<MemoryRecord>(
-      `SELECT * FROM memories
-       WHERE scope = 'workspace' AND workspace_id = ?
-         AND pinned = 1 AND status IN ('active', 'frozen')
-       ORDER BY id ASC`,
-      [wsId]
-    );
-
-    const stableRendered = render(stableRecords, {
-      layer: 'stable',
-      strategyVersion: 1,
-    });
-    const stableTokens = budgetTokens(stableRendered);
+    const stable = renderStableLayer(memDb, { workspaceId: wsId }, cfg);
+    const stableRendered = stable.text;
+    const stableTokens = stable.stableTokens;
 
     // 检查稳定层期望
     let stablePass = true;
@@ -85,10 +75,13 @@ export function runCase(
       now: fixedNow,
     });
 
-    const dynamicBudget = strategy?.dynamicBudgetTokens || cfg.dynamicBudgetTokens || 1600;
+    const dynamicBudget = cfg.dynamicBudgetTokens === 0 ? 0 : Math.min(
+      strategy?.dynamicBudgetTokens ?? cfg.dynamicBudgetTokens ?? 1600,
+      cfg.hardBudgetTokens - stable.estimatedTokens
+    );
 
     const startPerf = performance.now();
-    const stableAlreadyInjected = new Set(stableRecords.map((m) => `${m.id}@${m.content_rev}`));
+    const stableAlreadyInjected = stable.visibleRefs;
     const recallResult = recall(memDb, plan, {
       workspaceId: wsId,
       sessionId: 'eval_session',
@@ -96,6 +89,7 @@ export function runCase(
       alreadyInjected: stableAlreadyInjected,
       strategy,
       now: fixedNow,
+      cfg,
     });
     const latencyMs = performance.now() - startPerf;
 
@@ -121,7 +115,7 @@ export function runCase(
     }
 
     // 4.3 预算约束
-    const maxAllowedTokens = testCase.expect.maxTokens || dynamicBudget;
+    const maxAllowedTokens = testCase.expect.maxTokens ?? dynamicBudget;
     const dynamicBudgetPass = dynamicTokens <= maxAllowedTokens;
     const hardBudgetPass = stableTokens + dynamicTokens <= cfg.hardBudgetTokens;
     const budgetPass = dynamicBudgetPass && hardBudgetPass;

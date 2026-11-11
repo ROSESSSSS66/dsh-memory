@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -15,6 +15,12 @@ import { MemoryCommands } from '../../src/dsh/commands.js';
 import { MemoryTools } from '../../src/dsh/tools.js';
 import { apply } from '../../src/dsh/plugin.js';
 
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn();
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
+
 describe('v0.4.0 Auto-Bootstrap, SYNAPSE Spreading Activation & A-Mem Zettelkasten Linking', () => {
   let db: Db;
   let tmpDir: string;
@@ -23,6 +29,7 @@ describe('v0.4.0 Auto-Bootstrap, SYNAPSE Spreading Activation & A-Mem Zettelkast
   beforeEach(() => {
     db = openDb(':memory:');
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bootstrap-test-'));
+    vi.mocked(os.homedir).mockReturnValue(tmpDir);
 
     // Prepare a mock project workspace with package.json, tsconfig.json, src/, and .dsh/memory-bank
     fs.writeFileSync(
@@ -275,7 +282,7 @@ describe('v0.4.0 Auto-Bootstrap, SYNAPSE Spreading Activation & A-Mem Zettelkast
     expect(rehearsedScore).toBeGreaterThan(coldScore + 0.15);
   });
 
-  it('exposes /memory init CLI command, memory tool init action, and plugin autoBootstrap option', () => {
+  it('exposes /memory init CLI command, memory tool init action, and plugin autoBootstrap option', async () => {
     const cmds = new MemoryCommands(db);
     const cliOut = cmds.init({ workspaceId: tmpDir, sessionId: 's1' }, true);
     expect(cliOut).toContain('工作区记忆冷启动初始化完成');
@@ -290,15 +297,27 @@ describe('v0.4.0 Auto-Bootstrap, SYNAPSE Spreading Activation & A-Mem Zettelkast
 
     // Verify plugin apply() with autoBootstrap: true on a fresh database
     const dbPath = path.join(tmpDir, 'plugin-auto.db');
+    let dispose: (() => Promise<void>) | undefined;
     const mockCtx: any = {
       baseDir: tmpDir,
-      on: () => {},
+      on: (name: string, handler: () => Promise<void>) => {
+        if (name === 'dispose') dispose = handler;
+        return () => {};
+      },
     };
-    apply(mockCtx, { dbPath, dataDir: tmpDir, autoBootstrap: true });
-    const verifyDb = openDb(dbPath);
-    const cnt =
-      verifyDb.get<{ c: number }>(`SELECT COUNT(*) as c FROM memories WHERE status IN ('active', 'frozen')`)?.c ?? 0;
-    expect(cnt).toBeGreaterThanOrEqual(3);
-    verifyDb.close();
+    await apply(mockCtx, { dbPath, dataDir: tmpDir, autoBootstrap: true });
+    try {
+      const verifyDb = openDb(dbPath);
+      try {
+        const cnt =
+          verifyDb.get<{ c: number }>(`SELECT COUNT(*) as c FROM memories WHERE status IN ('active', 'frozen')`)?.c ?? 0;
+        expect(cnt).toBeGreaterThanOrEqual(3);
+      } finally {
+        verifyDb.close();
+      }
+      expect(dispose).toBeTypeOf('function');
+    } finally {
+      await dispose?.();
+    }
   });
 });

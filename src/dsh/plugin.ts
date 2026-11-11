@@ -7,12 +7,14 @@ import { IngestQueue } from '../ingest/queue.js';
 import { registerSessionListener } from './session-listener.js';
 import { PromptSectionManager } from './prompt-section.js';
 import { registerPreStep } from './pre-step.js';
+import { registerMemoryVisibility, type MemoryVisibilityReader } from './memory-visibility.js';
 import { MemoryTools } from './tools.js';
 import { MemoryCommands } from './commands.js';
 import { workspaceId } from '../core/scope.js';
 import { isWorkspaceExcluded } from '../core/privacy.js';
 import { JobScheduler, recoverJobsOnStartup } from '../jobs/scheduler.js';
 import { registerJobHandler, unregisterJobHandler } from '../jobs/runner.js';
+import { jobFailure } from '../jobs/types.js';
 import {
   distillSession,
   findEligibleDistillSession,
@@ -42,6 +44,59 @@ import type { Db } from '../types.js';
 export const name = 'dsh-memory';
 export const inject = ['agents', 'sessionProjections', 'systemPrompt', 'tools', 'commands', 'webServer'];
 
+function extractSessionCwd(session: any): string {
+  if (!session || typeof session !== 'object') return '';
+  const direct = typeof session.cwd === 'string' ? session.cwd.trim() : '';
+  if (direct) return direct;
+  const headerCwd = typeof session.header?.cwd === 'string' ? session.header.cwd.trim() : '';
+  if (headerCwd) return headerCwd;
+  const ws = typeof session.workspaceId === 'string' ? session.workspaceId.trim() : '';
+  return ws;
+}
+
+function extractAgentCwd(agent: any): string {
+  if (!agent || typeof agent !== 'object') return '';
+  const direct = typeof agent.cwd === 'string' ? agent.cwd.trim() : '';
+  if (direct) return direct;
+  return extractSessionCwd(agent.session);
+}
+
+function resolveCtxAgentCwd(ctx: any, sessionId?: string): string {
+  try {
+    const list = typeof ctx?.agents?.list === 'function' ? ctx.agents.list() : undefined;
+    if (Array.isArray(list) && list.length > 0) {
+      if (sessionId) {
+        const matched = list.find((a: any) => a?.session?.id === sessionId);
+        const matchedCwd = extractAgentCwd(matched);
+        if (matchedCwd) return matchedCwd;
+      }
+      for (const a of list) {
+        const c = extractAgentCwd(a);
+        if (c) return c;
+      }
+    }
+  } catch {}
+  return '';
+}
+
+function resolveSessionWorkspaceId(db: Db, sessionId?: string): string {
+  if (!sessionId) return '';
+  try {
+    const owner = db.get<{ workspace_id: string }>(
+      "SELECT workspace_id FROM session_workspace_owners WHERE session_id = ? AND workspace_id != '' LIMIT 1",
+      [sessionId]
+    );
+    if (owner?.workspace_id) return owner.workspace_id;
+    const raw = db.get<{ workspace_id: string }>(
+      "SELECT workspace_id FROM raw_events WHERE session_id = ? AND workspace_id != '' LIMIT 1",
+      [sessionId]
+    );
+    return raw?.workspace_id || '';
+  } catch {
+    return '';
+  }
+}
+
 export const Config = {
   '~standard': {
     version: 1,
@@ -59,10 +114,84 @@ export const Config = {
   default: DEFAULTS,
 };
 
-export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap?: boolean }) {
+export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap?: boolean }) {
   let db: Db | undefined;
   let promptSections: PromptSectionManager | undefined;
   let queue: IngestQueue | undefined;
+  let scheduler: JobScheduler | undefined;
+  let unlistenSession: (() => void) | undefined;
+  let unlistenPressure: (() => void) | undefined;
+  let unlistenAgentDisposed: (() => void) | undefined;
+  let visibility: MemoryVisibilityReader | undefined;
+  let unlistenPreStep: (() => void) | undefined;
+  let unlistenTurnStopping: (() => void) | undefined;
+  let unlistenWeb: (() => void) | undefined;
+  const regDisposers: Array<() => void> = [];
+  let handlersRegistered = false;
+  let disposed = false;
+  let cleanupPromise: Promise<void> | undefined;
+
+  const cleanup = (logClean = false): Promise<void> => {
+    disposed = true;
+    if (cleanupPromise) return cleanupPromise;
+    cleanupPromise = (async () => {
+      try {
+        for (const disp of regDisposers.splice(0, regDisposers.length)) {
+          try {
+            disp();
+          } catch {}
+        }
+        try {
+          unlistenWeb?.();
+        } catch {}
+        unlistenWeb = undefined;
+        try {
+          unlistenTurnStopping?.();
+        } catch {}
+        unlistenTurnStopping = undefined;
+        try {
+          unlistenSession?.();
+        } catch {}
+        unlistenSession = undefined;
+        try {
+          unlistenPressure?.();
+        } catch {}
+        unlistenPressure = undefined;
+        try {
+          unlistenAgentDisposed?.();
+        } catch {}
+        unlistenAgentDisposed = undefined;
+        try {
+          unlistenPreStep?.();
+        } catch {}
+        unlistenPreStep = undefined;
+        try {
+          visibility?.dispose();
+        } catch {}
+        visibility = undefined;
+
+        const stopSchedPromise = scheduler ? scheduler.stopAndWait() : Promise.resolve();
+        if (handlersRegistered) {
+          for (const kind of ['distill', 'reflect', 'consolidate', 'maintain', 'curate', 'repair', 'evolve']) {
+            unregisterJobHandler(kind);
+          }
+          handlersRegistered = false;
+        }
+        try {
+          promptSections?.disposeAll();
+        } catch {}
+        await Promise.allSettled([queue ? queue.close() : Promise.resolve(), stopSchedPromise]);
+        try {
+          db?.close();
+        } catch {}
+        db = undefined;
+        if (logClean) {
+          console.log('[dsh-memory] Plugin disposed cleanly');
+        }
+      } catch {}
+    })();
+    return cleanupPromise;
+  };
 
   try {
     const initialCfg = validateConfig(config);
@@ -92,6 +221,13 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     }
 
     if (!db) return;
+    if (typeof ctx.on === 'function') {
+      ctx.on('dispose', () => cleanup(true));
+    }
+    if (disposed) {
+      await cleanup();
+      return;
+    }
     const currentDb: Db = db;
 
     // 合并存储中的用户自定义动态配置 (LLM 配置、风控与隐私选项)，并保持全局共享 cfg 引用实时同步
@@ -131,20 +267,29 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     } catch {}
 
     // 1.2 初始化离线任务调度器与全自动处理器
-    const scheduler = new JobScheduler(currentDb, cfg);
+    const localScheduler = new JobScheduler(currentDb, cfg);
+    scheduler = localScheduler;
+    handlersRegistered = true;
 
     registerJobHandler('distill', async (job, signal) => {
       const liveCfg = getLiveCfg();
       const payload = job.payload ? JSON.parse(job.payload) : {};
-      const cwd = payload.cwd || ctx?.agent?.cwd || process.cwd();
+      const payloadCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : '';
+      const payloadWsId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : '';
+      const cwd =
+        payloadCwd ||
+        resolveCtxAgentCwd(ctx, payload.sessionId) ||
+        payloadWsId ||
+        resolveSessionWorkspaceId(currentDb, payload.sessionId) ||
+        process.cwd();
       const res = await distillSession(currentDb, liveCfg, { sessionId: payload.sessionId, cwd, signal });
       if (!res.success) {
-        return { action: 'failed', error: res.error || 'distill_failed', nonRetryable: true };
+        return jobFailure(res.error || 'distill_failed');
       }
       if (res.sessionId && res.consumedCount > 0) {
         const nextBatch = findEligibleDistillSession(currentDb, liveCfg, true, res.sessionId);
         if (nextBatch) {
-          scheduler.enqueue('distill', `${nextBatch.sessionId}:seq:${nextBatch.minSeq}`, {
+          localScheduler.enqueue('distill', `${nextBatch.sessionId}:seq:${nextBatch.minSeq}`, {
             sessionId: nextBatch.sessionId,
             cwd,
           });
@@ -161,34 +306,45 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     registerJobHandler('consolidate', async (job, signal) => {
       const liveCfg = getLiveCfg();
       const payload = job.payload ? JSON.parse(job.payload) : {};
-      const wsId = payload.workspaceId || workspaceId(process.cwd());
+      const payloadCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : '';
+      const payloadWsId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : '';
+      const wsId = payloadWsId
+        ? workspaceId(payloadWsId)
+        : resolveSessionWorkspaceId(currentDb, payload.sessionId) ||
+          workspaceId(payloadCwd || resolveCtxAgentCwd(ctx, payload.sessionId) || process.cwd());
       const clusters = findConsolidationClusters(currentDb, wsId, liveCfg);
       for (const c of clusters) {
         const res = await consolidateCluster(currentDb, liveCfg, c, { signal });
         if (!res.success) {
-          return { action: 'failed', error: res.error || 'consolidate_failed', nonRetryable: true };
+          return jobFailure(res.error || 'consolidate_failed');
         }
       }
       return { action: 'done' };
     });
 
-    registerJobHandler('maintain', async (_job, signal) => {
+    registerJobHandler('maintain', async (job, signal) => {
       const liveCfg = getLiveCfg();
-      const rawCwd = ctx?.agent?.cwd || process.cwd();
-      const maintainWsId = workspaceId(rawCwd);
+      const payload = job?.payload ? JSON.parse(job.payload) : {};
+      const payloadCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : '';
+      const payloadWsId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : '';
+      const rawCwd =
+        payloadCwd ||
+        resolveCtxAgentCwd(ctx, payload.sessionId) ||
+        process.cwd();
+      const maintainWsId = payloadWsId
+        ? workspaceId(payloadWsId)
+        : resolveSessionWorkspaceId(currentDb, payload.sessionId) || workspaceId(rawCwd);
       pruneInvalidMemories(currentDb, { workspaceId: maintainWsId });
       archiveColdMemories(currentDb, liveCfg);
       expireCandidates(currentDb);
       autoPinMemories(currentDb);
       checkAndRepairFts(currentDb);
       backfillMissingEmbeddings(currentDb, { limit: 500 });
-      try {
-        await curateMemoriesWithLLM(currentDb, liveCfg, {
-          workspaceId: maintainWsId,
-          cwd: rawCwd,
-          signal,
-        });
-      } catch {}
+      const curateResult = await curateMemoriesWithLLM(currentDb, liveCfg, {
+        workspaceId: maintainWsId,
+        cwd: rawCwd,
+        signal,
+      });
       autoHealMemoryHealth(currentDb, { workspaceId: maintainWsId });
       weaveZettelkastenLinks(currentDb, { maxNewLinks: 25 });
       cleanOldTelemetry(currentDb);
@@ -206,26 +362,31 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
         const lastCnt = lastRow ? Number(lastRow.value) || 0 : 0;
         if (sampleCnt >= 5 && sampleCnt >= lastCnt + 5) {
           const bucket6h = Math.floor(Date.now() / (6 * 3600_000));
-          scheduler.enqueue('evolve', `auto_evolve:${bucket6h}:n${sampleCnt}`, { auto: true });
+          localScheduler.enqueue('evolve', `auto_evolve:${bucket6h}:n${sampleCnt}`, { auto: true });
         }
       } catch {}
 
-      return { action: 'done' };
+      return curateResult.ok ? { action: 'done' } : jobFailure(curateResult.error || 'curate_failed');
     });
 
     registerJobHandler('curate', async (job, signal) => {
       const liveCfg = getLiveCfg();
       const payload = job.payload ? JSON.parse(job.payload) : {};
-      const rawCwd = payload.cwd || ctx?.agent?.cwd || process.cwd();
-      const wsId = payload.workspaceId || workspaceId(rawCwd);
+      const payloadCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : '';
+      const payloadWsId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : '';
+      const rawCwd =
+        payloadCwd ||
+        resolveCtxAgentCwd(ctx, payload.sessionId) ||
+        process.cwd();
+      const wsId = payloadWsId
+        ? workspaceId(payloadWsId)
+        : resolveSessionWorkspaceId(currentDb, payload.sessionId) || workspaceId(rawCwd);
       const res = await curateMemoriesWithLLM(currentDb, liveCfg, {
         workspaceId: wsId,
         cwd: rawCwd,
         signal,
       });
-      if (!res.ok && res.error !== 'daily_tokens_exceeded' && res.error !== 'daily_calls_exceeded') {
-        return { action: 'failed', error: res.error || 'curate_failed' };
-      }
+      if (!res.ok) return jobFailure(res.error || 'curate_failed');
       return { action: 'done' };
     });
 
@@ -257,19 +418,27 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
     });
 
     // 2. 初始化摄入队列与 Session 事件监听器
-    queue = new IngestQueue(currentDb, cfg);
-    const unlistenSession = registerSessionListener(ctx, queue, cfg);
+    const localQueue = new IngestQueue(currentDb, cfg);
+    queue = localQueue;
+    unlistenSession = registerSessionListener(ctx, localQueue, cfg);
 
     // 2.1 监听上下文压力事件，自适应触发后台抽取 (汲取自 creativedswork/dsh-expmem)
-    const unlistenPressure = ctx.on
+    unlistenPressure = ctx.on
       ? ctx.on('memory/context-pressure', (evt: any) => {
           if (evt?.sessionId) {
             const liveCfg = getLiveCfg();
             const eligible = findEligibleDistillSession(currentDb, liveCfg, true, evt.sessionId);
             const minSeq = eligible?.minSeq ?? 1;
-            const rawCwd = evt?.agent?.cwd || ctx?.agent?.cwd || process.cwd();
+            const rawCwd =
+              extractAgentCwd(evt?.agent) ||
+              extractSessionCwd(evt?.session) ||
+              (typeof evt?.cwd === 'string' ? evt.cwd.trim() : '') ||
+              resolveCtxAgentCwd(ctx, evt.sessionId) ||
+              (typeof evt?.workspaceId === 'string' ? evt.workspaceId.trim() : '') ||
+              resolveSessionWorkspaceId(currentDb, evt.sessionId) ||
+              process.cwd();
             if (isWorkspaceExcluded(rawCwd, liveCfg.excludeWorkspaces)) return;
-            scheduler.enqueue('distill', `${evt.sessionId}:seq:${minSeq}`, {
+            localScheduler.enqueue('distill', `${evt.sessionId}:seq:${minSeq}`, {
               sessionId: evt.sessionId,
               cwd: rawCwd,
             });
@@ -279,19 +448,69 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
 
     // 3. 初始化稳定层 Prompt Section 管理器
     promptSections = new PromptSectionManager(currentDb, cfg);
+    unlistenAgentDisposed = typeof ctx.on === 'function'
+      ? ctx.on('agent/disposed', (evt: any) => {
+          const agentId = evt?.agent?.id || evt?.id || evt?.agentId;
+          if (typeof agentId === 'string' && agentId) {
+            promptSections?.disposeAgent(agentId);
+          }
+        })
+      : undefined;
+
+    // Register before publishing consumers; the host rebuilds visibility from committed session logs.
+    const registeredVisibility = await registerMemoryVisibility(ctx);
+    if (disposed) {
+      try {
+        registeredVisibility.dispose();
+      } catch {}
+      await cleanup();
+      return;
+    }
+    visibility = registeredVisibility;
 
     // 4. 注册 pre-step 动态注入瀑布监听器
-    const unlistenPreStep = registerPreStep(ctx, {
+    unlistenPreStep = registerPreStep(ctx, {
       db: currentDb,
       promptSections,
       cfg,
+      getVisibleRefs: session => visibility?.getVisibleRefs(session) ?? null,
+      flushIngest: () => localQueue.flush(),
     });
 
     // 5. 初始化模型工具
     const tools = new MemoryTools({ db: currentDb, cfg });
-    const regDisposers: Array<() => void> = [];
     const addDisp = (d: any) => {
       if (typeof d === 'function') regDisposers.push(d);
+    };
+    const resolveRuntimeScope = (input?: {
+      agent?: any;
+      session?: any;
+      sessionId?: string;
+      cwd?: string;
+      workspaceId?: string;
+      turn?: number;
+      position?: { turn?: number };
+    }) => {
+      const agent = input?.agent;
+      const session = input?.session || agent?.session;
+      const rawSessionId =
+        (typeof input?.sessionId === 'string' && input.sessionId.trim()) ||
+        (typeof session?.id === 'string' && session.id.trim()) ||
+        '';
+      const sessId = rawSessionId || 'default_session';
+      const cwd =
+        extractAgentCwd(agent) ||
+        extractSessionCwd(session) ||
+        (typeof input?.cwd === 'string' ? input.cwd.trim() : '') ||
+        resolveCtxAgentCwd(ctx, rawSessionId || undefined) ||
+        (typeof input?.workspaceId === 'string' ? input.workspaceId.trim() : '') ||
+        resolveSessionWorkspaceId(currentDb, rawSessionId || undefined) ||
+        process.cwd();
+      const turn =
+        typeof input?.turn === 'number'
+          ? input.turn
+          : (input?.position?.turn ?? agent?.position?.turn ?? 0);
+      return { cwd, sessId, explicitSessionId: rawSessionId || undefined, turn };
     };
 
     if (ctx.tools?.register) {
@@ -311,10 +530,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
             render: (_args: any, value: string) => [{ type: 'text', text: value }],
           },
           execute: async (args: any, exec: any) => {
-            const agent = exec?.agent || ctx.agent;
-            const cwd = agent?.cwd || process.cwd();
-            const sessId = agent?.session?.id || 'default_session';
-            const turn = agent?.position?.turn ?? 0;
+            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
             return tools.search(args, { workspaceId: cwd, sessionId: sessId, turn });
           },
         })
@@ -333,10 +549,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
             render: (_args: any, value: string) => [{ type: 'text', text: value }],
           },
           execute: async (args: any, exec: any) => {
-            const agent = exec?.agent || ctx.agent;
-            const cwd = agent?.cwd || process.cwd();
-            const sessId = agent?.session?.id || 'default_session';
-            const turn = agent?.position?.turn ?? 0;
+            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
             return tools.expand(args, { workspaceId: cwd, sessionId: sessId, turn });
           },
         })
@@ -358,10 +571,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
             render: (_args: any, value: string) => [{ type: 'text', text: value }],
           },
           execute: async (args: any, exec: any) => {
-            const agent = exec?.agent || ctx.agent;
-            const cwd = agent?.cwd || process.cwd();
-            const sessId = agent?.session?.id || 'default_session';
-            const turn = agent?.position?.turn ?? 0;
+            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
             return tools.feedback(args, { workspaceId: cwd, sessionId: sessId, turn });
           },
         })
@@ -385,10 +595,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
             render: (_args: any, value: string) => [{ type: 'text', text: value }],
           },
           execute: async (args: any, exec: any) => {
-            const agent = exec?.agent || ctx.agent;
-            const cwd = agent?.cwd || process.cwd();
-            const sessId = agent?.session?.id || 'default_session';
-            const turn = agent?.position?.turn ?? 0;
+            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
             return tools.note(args, { workspaceId: cwd, sessionId: sessId, turn });
           },
         })
@@ -407,9 +614,8 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
             render: (_args: any, value: string) => [{ type: 'text', text: value }],
           },
           execute: async (args: any, exec: any) => {
-            const agent = exec?.agent || ctx.agent;
-            const cwd = agent?.cwd || process.cwd();
-            return tools.confirm(args, { workspaceId: cwd });
+            const { cwd, explicitSessionId } = resolveRuntimeScope(exec);
+            return tools.confirm(args, { workspaceId: cwd, sessionId: explicitSessionId });
           },
         })
       );
@@ -429,9 +635,8 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
             render: (_args: any, value: string) => [{ type: 'text', text: value }],
           },
           execute: async (args: any, exec: any) => {
-            const agent = exec?.agent || ctx.agent;
-            const cwd = agent?.cwd || process.cwd();
-            return tools.merge(args, { workspaceId: cwd });
+            const { cwd, explicitSessionId } = resolveRuntimeScope(exec);
+            return tools.merge(args, { workspaceId: cwd, sessionId: explicitSessionId });
           },
         })
       );
@@ -475,10 +680,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
             render: (_args: any, value: string) => [{ type: 'text', text: value }],
           },
           execute: async (args: any, exec: any) => {
-            const agent = exec?.agent || ctx.agent;
-            const cwd = agent?.cwd || process.cwd();
-            const sessId = agent?.session?.id || 'default_session';
-            const turn = agent?.position?.turn ?? 0;
+            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
             return tools.unified(args, { workspaceId: cwd, sessionId: sessId, turn });
           },
         })
@@ -489,7 +691,7 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
         ctx.tools.register({
           name: 'memory_core',
           description:
-            '读写常驻模型上下文的核心记忆块 (human 用户画像, persona 智能体准则, project 项目强制规则)。',
+            '读取核心记忆块，或提出等待用户审批的修改 (human 用户画像, persona 智能体准则, project 项目规则)。',
           parameters: {
             action: { type: 'string', required: true, description: '操作: read | set | append' },
             block: {
@@ -504,18 +706,17 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
             render: (_args: any, value: string) => [{ type: 'text', text: value }],
           },
           execute: async (args: any, exec: any) => {
-            const agent = exec?.agent || ctx.agent;
-            const cwd = agent?.cwd || process.cwd();
+            const { cwd, explicitSessionId } = resolveRuntimeScope(exec);
             if (args.action === 'read') return tools.coreRead({ block: args.block }, { workspaceId: cwd });
             if (args.action === 'set')
               return tools.coreSet(
                 { block: args.block || 'project', content: args.content || '' },
-                { workspaceId: cwd }
+                { workspaceId: cwd, sessionId: explicitSessionId }
               );
             if (args.action === 'append')
               return tools.coreAppend(
                 { block: args.block || 'project', text: args.text || args.content || '' },
-                { workspaceId: cwd }
+                { workspaceId: cwd, sessionId: explicitSessionId }
               );
             return `Error: unknown action '${args.action}'. Supported: read, set, append`;
           },
@@ -534,9 +735,8 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
           input: {
             hint: 'init | stats | doctor | heal | inspect <id> | list [page] | confirm <id> | merge <src> <tgt> | restore <id> | core [block] [text] | reconcile <text> | graph [id|limit] | export-md <dir> | import-md <dir> | export-bank [dir] | import-bank [dir] | migrate <fmt> <path> | history <id> | rollback <id> <v> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <id> | reject-repair <id> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
           },
-          handler: ({ agent, rawInput }: any) => {
-            const cwd = agent?.cwd || process.cwd();
-            const sessId = agent?.session?.id || 'default_session';
+          handler: ({ agent, session, rawInput }: any) => {
+            const { cwd, sessId } = resolveRuntimeScope({ agent, session });
             return commands.handleCommand(rawInput, {
               workspaceId: cwd,
               sessionId: sessId,
@@ -548,39 +748,53 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
 
     // 6.2 注册 turn-stopping 全自动闭环调度监听器
     let lastTurnWeaveAt = 0;
-    const unlistenTurnStopping =
+    unlistenTurnStopping =
       typeof ctx.on === 'function'
         ? ctx.on('agent/turn-stopping', (evt: any) => {
             try {
               const now = Date.now();
               const liveCfg = getLiveCfg();
+              const session = evt?.session || evt?.agent?.session;
               const sessId =
-                evt?.sessionId ||
-                evt?.agent?.session?.id ||
-                ctx?.agent?.session?.id;
-              const rawCwd =
-                evt?.agent?.cwd ||
-                evt?.agent?.session?.cwd ||
-                ctx?.agent?.cwd ||
-                process.cwd();
+                (typeof evt?.sessionId === 'string' && evt.sessionId.trim()) ||
+                (typeof session?.id === 'string' && session.id.trim()) ||
+                undefined;
+              const { cwd: rawCwd } = resolveRuntimeScope({
+                agent: evt?.agent,
+                session,
+                sessionId: sessId,
+                cwd: evt?.cwd,
+                workspaceId: evt?.workspaceId,
+              });
               if (isWorkspaceExcluded(rawCwd, liveCfg.excludeWorkspaces)) return;
-              const wsId = workspaceId(rawCwd);
+              const wsId =
+                (typeof evt?.workspaceId === 'string' && evt.workspaceId.trim()
+                  ? workspaceId(evt.workspaceId.trim())
+                  : '') || workspaceId(rawCwd);
 
               if (sessId) {
                 const eligible =
                   findEligibleDistillSession(currentDb, liveCfg, true, sessId) ||
                   findEligibleDistillSession(currentDb, liveCfg, true);
                 if (eligible) {
-                  scheduler.enqueue('distill', `${eligible.sessionId}:seq:${eligible.minSeq}`, {
-                    sessionId: eligible.sessionId,
-                    cwd: rawCwd,
-                  });
+                  const distillCwd =
+                    eligible.sessionId === sessId
+                      ? rawCwd
+                      : eligible.workspaceId ||
+                        resolveSessionWorkspaceId(currentDb, eligible.sessionId) ||
+                        rawCwd;
+                  if (!isWorkspaceExcluded(distillCwd, liveCfg.excludeWorkspaces)) {
+                    localScheduler.enqueue('distill', `${eligible.sessionId}:seq:${eligible.minSeq}`, {
+                      sessionId: eligible.sessionId,
+                      cwd: distillCwd,
+                    });
+                  }
                 }
               }
               const clusters = findConsolidationClusters(currentDb, wsId, liveCfg);
               if (clusters.length > 0) {
                 const bucket1h = Math.floor(now / 3600_000);
-                scheduler.enqueue('consolidate', `auto_consolidate:${wsId}:${bucket1h}`, {
+                localScheduler.enqueue('consolidate', `auto_consolidate:${wsId}:${bucket1h}`, {
                   workspaceId: wsId,
                 });
               }
@@ -592,46 +806,25 @@ export function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap
                 weaveZettelkastenLinks(currentDb, { workspaceId: wsId, maxNewLinks: 15, now });
               }
               const bucket10m = Math.floor(now / 600_000);
-              scheduler.enqueue('maintain', `auto_maintain:${bucket10m}`, { auto: true });
+              localScheduler.enqueue('maintain', `auto_maintain:${bucket10m}`, {
+                auto: true,
+                workspaceId: wsId,
+                cwd: rawCwd,
+              });
 
-              scheduler.scheduleTurnStopping();
+              localScheduler.scheduleTurnStopping();
             } catch {}
           })
         : () => {};
 
     // 6.3 注册 Web 端点（供 DSH 前端侧栏面板访问）
-    const unlistenWeb = registerWebRoutes(ctx, currentDb, cfg);
-
-    // 7. 卸载与清理
-    if (typeof ctx.on === 'function') {
-      ctx.on('dispose', () => {
-        try {
-          for (const disp of regDisposers) {
-            try {
-              disp();
-            } catch {}
-          }
-          unlistenWeb();
-          unlistenTurnStopping();
-          unlistenSession();
-          if (unlistenPressure) unlistenPressure();
-          unlistenPreStep();
-          const stopSchedPromise = scheduler.stopAndWait();
-          for (const kind of ['distill', 'reflect', 'consolidate', 'maintain', 'curate', 'repair', 'evolve']) {
-            unregisterJobHandler(kind);
-          }
-          promptSections?.disposeAll();
-          Promise.allSettled([queue ? queue.close() : Promise.resolve(), stopSchedPromise]).finally(() => {
-            try {
-              db?.close();
-            } catch {}
-          });
-          console.log('[dsh-memory] Plugin disposed cleanly');
-        } catch {}
-      });
+    unlistenWeb = registerWebRoutes(ctx, currentDb, cfg);
+    if (disposed) {
+      await cleanup(true);
     }
   } catch (err: any) {
     console.warn('[dsh-memory] Initialization failed (gracefully degraded):', err?.message || err);
+    await cleanup();
   }
 }
 

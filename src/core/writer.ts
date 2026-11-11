@@ -20,6 +20,7 @@ import {
 import { estimateTokens } from './tokens.js';
 import { workspaceId } from './scope.js';
 import { redactSecrets } from './privacy.js';
+import { hasUserEvidence } from './trust.js';
 import {
   computeLocalEmbedding,
   cosineSimilarity,
@@ -294,32 +295,32 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
     );
 
     if (existingSame) {
-      let isReplay = true;
-      for (const s of c.sources) {
-        const srcRow = db.get(
-          `SELECT 1 FROM memory_sources WHERE memory_id = ? AND content_rev = ? AND session_id = ? AND seq = ?`,
-          [existingSame.id, existingSame.content_rev, s.session_id, s.seq]
-        );
-        if (!srcRow) {
-          isReplay = false;
+      const isInactive =
+        existingSame.status === 'superseded' ||
+        existingSame.status === 'archived' ||
+        existingSame.status === 'rejected';
+      const hasMissingSource = c.sources.some(
+        (s) =>
+          !db.get(
+            `SELECT 1 FROM memory_sources WHERE memory_id = ? AND content_rev = ? AND session_id = ? AND seq = ?`,
+            [existingSame.id, existingSame.content_rev, s.session_id, s.seq]
+          )
+      );
+      const isReplay = !hasMissingSource;
+
+      // 若旧记录已处于 superseded / archived / rejected 状态，用户显式确认时必须重新激活 (避免 A->B->A 状态死锁)
+      if (isInactive && (isExplicitUser || initialStatus === 'active')) {
+        for (const s of c.sources) {
           db.run(
             `INSERT OR IGNORE INTO memory_sources(memory_id, content_rev, session_id, seq, kind, excerpt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [existingSame.id, existingSame.content_rev, s.session_id, s.seq, s.kind, s.excerpt || null, now]
           );
         }
-      }
-
-      const isInactive =
-        existingSame.status === 'superseded' ||
-        existingSame.status === 'archived' ||
-        existingSame.status === 'rejected';
-
-      // 若旧记录已处于 superseded / archived / rejected 状态，用户显式确认时必须重新激活 (避免 A->B->A 状态死锁)
-      if (isInactive && (isExplicitUser || initialStatus === 'active')) {
         db.run(
           `UPDATE memories
            SET status = 'active',
                valid_to = NULL,
+               invalidated_at = NULL,
                confidence = ?,
                approved_at = ?,
                approved_by = ?,
@@ -331,9 +332,44 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
         return { action: 'merged', id: existingSame.id };
       }
 
-      // 同一证据再次重放，confidence/use_count 不变
+      // 同一证据再次重放，confidence/use_count/archived 状态保持不变
       if (isReplay) {
         return { action: 'merged', id: existingSame.id };
+      }
+
+      if (isInactive) {
+        // 非显式用户的新证据再次命中已归档/取代/拒绝记录：递增 content_rev 隔离旧证据并清除旧审批与置顶标记
+        const nextContentRev = existingSame.content_rev + 1;
+        saveVersionSnapshot(db, existingSame, 'resurrect_candidate', c.actor || 'system', now);
+        for (const s of c.sources) {
+          db.run(
+            `INSERT OR IGNORE INTO memory_sources(memory_id, content_rev, session_id, seq, kind, excerpt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [existingSame.id, nextContentRev, s.session_id, s.seq, s.kind, s.excerpt || null, now]
+          );
+        }
+        db.run(
+          `UPDATE memories
+           SET status = 'candidate',
+               content_rev = ?,
+               version = version + 1,
+               approved_at = NULL,
+               approved_by = NULL,
+               pinned = 0,
+               valid_to = NULL,
+               invalidated_at = NULL,
+               confidence = ?,
+               updated_at = ?
+           WHERE id = ?`,
+          [nextContentRev, confidence, now, existingSame.id]
+        );
+        return { action: 'merged', id: existingSame.id };
+      }
+
+      for (const s of c.sources) {
+        db.run(
+          `INSERT OR IGNORE INTO memory_sources(memory_id, content_rev, session_id, seq, kind, excerpt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [existingSame.id, existingSame.content_rev, s.session_id, s.seq, s.kind, s.excerpt || null, now]
+        );
       }
 
       // 用户确认且之前是 candidate，则激活
@@ -341,12 +377,6 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
         db.run(
           `UPDATE memories SET status = 'active', approved_at = ?, approved_by = 'user', updated_at = ? WHERE id = ?`,
           [now, now, existingSame.id]
-        );
-      } else if (isInactive) {
-        // 非显式用户的新证据再次命中已归档/取代记录，恢复为 candidate 待审状态
-        db.run(
-          `UPDATE memories SET status = 'candidate', valid_to = NULL, confidence = ?, updated_at = ? WHERE id = ?`,
-          [confidence, now, existingSame.id]
         );
       } else if (existingSame.status === 'candidate') {
         // 未批准记录使用 noisy-or 聚合独立证据
@@ -619,6 +649,9 @@ export function approveCandidate(
     if (memory.status !== 'candidate') {
       return { action: 'rejected', reason: `invalid_status_${memory.status}` };
     }
+    if (approvedBy !== 'user' && approvedBy !== 'system' && !hasUserEvidence(db, memory)) {
+      return { action: 'rejected', reason: 'user_evidence_required' };
+    }
 
     // 检查是否有未决的 repair_proposals (原记忆或候选记忆均不能单独批准)
     const pendingRepair = db.get(
@@ -628,6 +661,8 @@ export function approveCandidate(
     if (pendingRepair) {
       return { action: 'rejected', reason: 'pending_repair_proposals' };
     }
+
+    const isCoreBlock = Boolean(memory.slot_key?.startsWith('core:'));
 
     // 检查槽位冲突
     if (memory.slot_key) {
@@ -649,16 +684,16 @@ export function approveCandidate(
         addRelation(db, memory.id, existingSlot.id, 'supersedes', now);
 
         db.run(
-          `UPDATE memories SET status = 'active', approved_at = ?, approved_by = ?, updated_at = ? WHERE id = ?`,
-          [now, approvedBy, now, id]
+          `UPDATE memories SET status = 'active', approved_at = ?, approved_by = ?, pinned = CASE WHEN ? THEN 1 ELSE pinned END, importance = CASE WHEN ? THEN 10 ELSE importance END, utility = CASE WHEN ? THEN 1.0 ELSE utility END, updated_at = ? WHERE id = ?`,
+          [now, approvedBy, isCoreBlock ? 1 : 0, isCoreBlock ? 1 : 0, isCoreBlock ? 1 : 0, now, id]
         );
         return { action: 'superseded', id: memory.id, oldId: existingSlot.id };
       }
     }
 
     db.run(
-      `UPDATE memories SET status = 'active', approved_at = ?, approved_by = ?, updated_at = ? WHERE id = ?`,
-      [now, approvedBy, now, id]
+      `UPDATE memories SET status = 'active', approved_at = ?, approved_by = ?, pinned = CASE WHEN ? THEN 1 ELSE pinned END, importance = CASE WHEN ? THEN 10 ELSE importance END, utility = CASE WHEN ? THEN 1.0 ELSE utility END, updated_at = ? WHERE id = ?`,
+      [now, approvedBy, isCoreBlock ? 1 : 0, isCoreBlock ? 1 : 0, isCoreBlock ? 1 : 0, now, id]
     );
     return { action: 'approved', id };
   });
@@ -989,13 +1024,7 @@ export function confirmMemory(
     // 信任边界：仅用户/系统可无条件激活候选；模型(llm/assistant)只能激活带有用户证据的候选。
     // 否则模型可先 memory_note 再 memory_confirm 自我批准，或将网页/工具输出中的提示注入“洗白”为常驻记忆。
     const trustedActor = actor === 'user' || actor === 'system';
-    let originKinds: string[] = [];
-    try {
-      const raw: unknown = (memory as any).origin_kinds;
-      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      if (Array.isArray(parsed)) originKinds = parsed.map(String);
-    } catch {}
-    const canActivate = trustedActor || originKinds.includes('user');
+    const canActivate = trustedActor || hasUserEvidence(db, memory);
     const promote = memory.status === 'candidate' && canActivate;
 
     const boostConf = actor === 'user' ? 0.2 : 0.1;
@@ -1084,6 +1113,18 @@ export function mergeMemories(
     if (actor !== 'user' && (source.status === 'frozen' || source.pinned)) {
       return { success: false, message: `Source memory '${sourceId}' is ${source.status === 'frozen' ? 'frozen' : 'pinned'} by user; only the user can merge it` };
     }
+    if (actor !== 'user') {
+      if (target.status === 'frozen' || target.pinned) {
+        return { success: false, message: 'Only the user can merge into a protected target' };
+      }
+      if (source.scope !== target.scope || source.workspace_id !== target.workspace_id || source.session_id !== target.session_id) {
+        return { success: false, message: 'Automatic merge requires matching ownership' };
+      }
+      if ((source.status === 'active' && target.status === 'candidate') ||
+          (target.status === 'candidate' && source.hash !== target.hash)) {
+        return { success: false, message: 'A model proposal cannot inherit approval evidence through merge' };
+      }
+    }
 
     // 保存快照
     saveVersionSnapshot(db, source, 'merge_source', actor, now);
@@ -1091,8 +1132,8 @@ export function mergeMemories(
 
     // 1. 将 source 的 sources 转移/追加到 target
     const srcSources = db.all<{ session_id: string; seq: number; kind: string; excerpt?: string | null }>(
-      `SELECT session_id, seq, kind, excerpt FROM memory_sources WHERE memory_id = ?`,
-      [sourceId]
+      `SELECT session_id, seq, kind, excerpt FROM memory_sources WHERE memory_id = ? AND content_rev = ?`,
+      [sourceId, source.content_rev]
     );
     for (const s of srcSources) {
       db.run(

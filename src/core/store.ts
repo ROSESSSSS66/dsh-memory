@@ -9,7 +9,7 @@ import type {
   GraphNode,
   GraphLink,
 } from '../types.js';
-import { workspaceId } from './scope.js';
+import { workspaceId, scopeFilterSQL } from './scope.js';
 
 export interface ListFilter {
   type?: MemoryType;
@@ -41,19 +41,19 @@ export function get(
 ): MemoryRecord | undefined {
   if (!idOrShortId) return undefined;
 
-  // 完整 ID
-  if (idOrShortId.startsWith('m_') && idOrShortId.length >= 18) {
-    return db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [idOrShortId]);
-  }
+  const fullId = idOrShortId.startsWith('m_') && idOrShortId.length >= 18;
+  const prefix = idOrShortId.startsWith('m_') ? idOrShortId : 'm_' + idOrShortId;
+  let sql = fullId ? 'SELECT * FROM memories WHERE id = ?'
+    : 'SELECT * FROM memories WHERE id >= ? AND id < ?';
+  const params: unknown[] = fullId ? [idOrShortId] : [prefix, prefix + '\uffff'];
 
-  // 短码查询: 必须以 m_ 开头
-  const pattern = idOrShortId.startsWith('m_') ? idOrShortId + '%' : 'm_' + idOrShortId + '%';
-  let sql = 'SELECT * FROM memories WHERE id LIKE ?';
-  const params: unknown[] = [pattern];
-
-  if (scopeCtx?.workspaceId) {
-    sql += ' AND (workspace_id = ? OR workspace_id IS NULL)';
-    params.push(workspaceId(scopeCtx.workspaceId));
+  if (scopeCtx && (scopeCtx.workspaceId !== undefined || scopeCtx.sessionId !== undefined)) {
+    const scope = scopeFilterSQL({
+      workspaceId: workspaceId(scopeCtx.workspaceId || ''),
+      sessionId: scopeCtx.sessionId,
+    });
+    sql += ` AND ${scope.sql}`;
+    params.push(...scope.params);
   }
 
   const matches = db.all<MemoryRecord>(sql, params);

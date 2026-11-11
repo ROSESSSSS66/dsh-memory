@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { Db, MemoryRecord } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import { ftsText, contentHash } from '../core/text.js';
@@ -17,6 +18,9 @@ import { saveVersionSnapshot, editContent, addRelation } from '../core/writer.js
 import { PROMPT_CURATE } from './prompts.js';
 import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
+import { memoryPrivacyFilterSQL, memoryWorkspaceIds } from '../core/privacy.js';
+import { hasUserEvidence } from '../core/trust.js';
+import { getUnchangedReviewedMemory, sameMemoryOwner } from './review-snapshot.js';
 
 export function getBackupTimestamp(date: Date = new Date()): string {
   const y = date.getFullYear();
@@ -197,6 +201,40 @@ export function cleanOldTelemetry(
   };
 }
 
+function writeDatabaseSnapshot(db: Db, targetPath: string, overwrite = true): void {
+  const tempPath = path.join(path.dirname(targetPath), `.tmp-snapshot-${randomUUID()}.db`);
+  try {
+    // VACUUM INTO includes committed WAL pages. A plain main-file copy does not.
+    db.exec(`VACUUM INTO '${tempPath.replace(/'/g, "''")}'`);
+    const checkDb = openDb(tempPath, { readOnly: true });
+    try {
+      const integrity = checkDb.get<{ integrity_check: string }>('PRAGMA integrity_check');
+      if (integrity?.integrity_check !== 'ok') throw new Error('Snapshot failed integrity check');
+      for (const name of ['memories', 'memory_versions', 'injections', 'meta']) {
+        if (!checkDb.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [name])) {
+          throw new Error(`Snapshot missing required table: ${name}`);
+        }
+      }
+    } finally {
+      checkDb.close();
+    }
+    if (overwrite) fs.renameSync(tempPath, targetPath);
+    else {
+      try {
+        fs.linkSync(tempPath, targetPath);
+      } catch (err: any) {
+        if (err?.code === 'EXDEV' || err?.code === 'ENOTSUP' || err?.code === 'EPERM') {
+          fs.copyFileSync(tempPath, targetPath, fs.constants.COPYFILE_EXCL);
+        } else {
+          throw err;
+        }
+      }
+    }
+  } finally {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  }
+}
+
 /**
  * 数据库安全热备与轮换 (只保留最近 7 份) (§10)
  */
@@ -213,36 +251,7 @@ export function backupDatabase(
   const ts = getBackupTimestamp(new Date(now));
   const finalName = `memory-${ts}.db`;
   const finalPath = path.join(backupDir, finalName);
-  const tempPath = path.join(backupDir, `temp-${ts}-${Math.random().toString(36).slice(2, 8)}.db`);
-
-  // 使用 SQLite 备份命令 VACUUM INTO
-  try {
-    db.exec(`VACUUM INTO '${tempPath.replace(/'/g, "''")}'`);
-  } catch {
-    // 回退到文件流拷贝
-    if (fs.existsSync(dbFilePath)) {
-      fs.copyFileSync(dbFilePath, tempPath);
-    } else {
-      throw new Error(`cannot backup non-existent file: ${dbFilePath}`);
-    }
-  }
-
-  // PRAGMA integrity_check 校验
-  try {
-    const checkDb = openDb(tempPath);
-    const integrity = checkDb.get<{ integrity_check: string }>('PRAGMA integrity_check');
-    checkDb.close();
-    if (integrity?.integrity_check !== 'ok') {
-      try { fs.unlinkSync(tempPath); } catch {}
-      throw new Error('Backup failed integrity check');
-    }
-  } catch (err) {
-    try { fs.unlinkSync(tempPath); } catch {}
-    throw err;
-  }
-
-  // 原子改名
-  fs.renameSync(tempPath, finalPath);
+  writeDatabaseSnapshot(db, finalPath);
 
   // 轮换：保留最近 7 份
   const files = fs
@@ -287,50 +296,10 @@ export function exportDatabaseFile(
     fs.mkdirSync(targetDir, { recursive: true });
   }
 
-  const tempName = `.tmp-export-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`;
-  const tempPath = path.join(targetDir, tempName);
-
   try {
-    try {
-      db.exec(`VACUUM INTO '${tempPath.replace(/'/g, "''")}'`);
-    } catch {
-      if (fs.existsSync(dbFilePath)) {
-        fs.copyFileSync(dbFilePath, tempPath);
-      } else {
-        return {
-          success: false,
-          path: resolvedTarget,
-          error: `Cannot export in-memory or non-existent file database without VACUUM: ${dbFilePath}`,
-        };
-      }
-    }
-
-    // 校验临时库
-    const checkDb = openDb(tempPath);
-    const integrity = checkDb.get<{ integrity_check: string }>('PRAGMA integrity_check');
-    if (integrity?.integrity_check !== 'ok') {
-      checkDb.close();
-      try { fs.unlinkSync(tempPath); } catch {}
-      return { success: false, path: resolvedTarget, error: 'Exported database failed PRAGMA integrity_check' };
-    }
-
-    const tables = checkDb.all<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type='table'"
-    ).map(t => t.name);
-    for (const req of ['memories', 'memory_versions', 'injections', 'meta']) {
-      if (!tables.includes(req)) {
-        checkDb.close();
-        try { fs.unlinkSync(tempPath); } catch {}
-        return { success: false, path: resolvedTarget, error: `Exported database missing required table: ${req}` };
-      }
-    }
-    checkDb.close();
-
-    // 原子改名
-    fs.renameSync(tempPath, resolvedTarget);
+    writeDatabaseSnapshot(db, resolvedTarget, false);
     return { success: true, path: resolvedTarget };
   } catch (err: any) {
-    try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}
     return { success: false, path: resolvedTarget, error: err.message };
   }
 }
@@ -352,7 +321,7 @@ export function importDatabaseFile(
   // 1. 在只读临时连接检查
   let sourceDb: Db;
   try {
-    sourceDb = openDb(resolvedSource);
+    sourceDb = openDb(resolvedSource, { readOnly: true });
   } catch (err: any) {
     return { success: false, importedRecords: 0, error: `Cannot open source database: ${err.message}` };
   }
@@ -383,12 +352,8 @@ export function importDatabaseFile(
     }
 
     // 2. 如果存在本地文件库，保留 .bak 备份
-    if (currentDbFilePath && currentDbFilePath !== ':memory:' && fs.existsSync(currentDbFilePath)) {
-      try {
-        fs.copyFileSync(currentDbFilePath, `${currentDbFilePath}.bak`);
-      } catch {
-        // ignore backup notice
-      }
+    if (currentDbFilePath && currentDbFilePath !== ':memory:') {
+      writeDatabaseSnapshot(currentDb, `${currentDbFilePath}.bak`);
     }
 
     // 3. 读取 sourceDb 的全部有效记忆、版本历史及关联图谱/证据并在事务内无损导入到 currentDb
@@ -402,11 +367,23 @@ export function importDatabaseFile(
           'SELECT memory_id, content_rev, session_id, seq, kind, excerpt, created_at FROM memory_sources'
         )
       : [];
+    const sourceOwners = tables.includes('session_workspace_owners')
+      ? sourceDb.all<{ session_id: string; workspace_id: string }>('SELECT * FROM session_workspace_owners')
+      : tables.includes('raw_events')
+        ? sourceDb.all<{ session_id: string; workspace_id: string }>(
+            "SELECT DISTINCT session_id, workspace_id FROM raw_events WHERE workspace_id != ''")
+        : [];
     const relations = tables.includes('memory_relations')
       ? sourceDb.all<any>('SELECT from_id, to_id, rel, metadata, created_at FROM memory_relations')
       : [];
 
     currentDb.transaction(() => {
+      for (const owner of sourceOwners) {
+        currentDb.run(
+          'INSERT OR IGNORE INTO session_workspace_owners (session_id, workspace_id) VALUES (?, ?)',
+          [owner.session_id, owner.workspace_id]
+        );
+      }
       for (const m of memories) {
         currentDb.run(
           `INSERT OR REPLACE INTO memories (
@@ -634,6 +611,7 @@ export async function curateMemoriesWithLLM(
     : '';
   const params: unknown[] = options.workspaceId ? [workspaceId(options.workspaceId)] : [];
 
+  const privacy = memoryPrivacyFilterSQL(cfg.excludeWorkspaces);
   const candidates = db.all<MemoryRecord>(
     `SELECT * FROM memories
      WHERE status IN ('active', 'candidate')
@@ -641,13 +619,14 @@ export async function curateMemoriesWithLLM(
        AND type != 'meta'
        AND COALESCE(slot_key, '') NOT LIKE 'core:%'
        ${wsFilter}
+       AND ${privacy.sql}
      ORDER BY
        (CASE WHEN status = 'candidate' THEN 0 ELSE 1 END) ASC,
        (CASE WHEN fail_count > 0 THEN 0 ELSE 1 END) ASC,
        utility ASC,
        updated_at DESC
      LIMIT 20`,
-    params
+    [...params, ...privacy.params]
   );
 
   if (candidates.length === 0) {
@@ -691,6 +670,7 @@ export async function curateMemoriesWithLLM(
       maxOutputTokens: PROMPT_CURATE.maxOutputTokens,
       cwd: realCwd,
       workspaceId: wsId,
+      dataWorkspaceIds: memoryWorkspaceIds(db, candidates),
       signal: options.signal,
       fetchFn: options.fetchFn,
     },
@@ -734,8 +714,8 @@ export async function curateMemoriesWithLLM(
   db.transaction(() => {
     // 3.1 执行 LLM 判定的无效记忆舍弃
     for (const id of discard_ids) {
-      const target = reviewedMap.get(id);
-      if (!target || target.status === 'frozen' || target.pinned === 1) continue;
+      const target = getUnchangedReviewedMemory(db, reviewedMap, id);
+      if (!target) continue;
       saveVersionSnapshot(db, target, 'llm_curate_discard', 'llm', now);
       const nextStatus = target.status === 'candidate' ? 'rejected' : 'archived';
       db.run(
@@ -754,82 +734,113 @@ export async function curateMemoriesWithLLM(
     // 3.2 执行 LLM 判定的记忆原地更新与冗余吸收
     for (const upd of updates) {
       if (discard_ids.includes(upd.target_id)) continue;
-      const target = reviewedMap.get(upd.target_id);
-      if (!target || target.status === 'frozen') continue;
+      const target = getUnchangedReviewedMemory(db, reviewedMap, upd.target_id);
+      if (!target) continue;
 
-      const editRes = editContent(db, target.id, upd.text, undefined, 'llm', now);
-      if (!editRes.ok) continue;
+      // Validate the entire update before editing any of its dependencies.
+      const absorbed = [...new Set(upd.absorb_ids || [])]
+        .filter(id => id !== target.id)
+        .map(id => getUnchangedReviewedMemory(db, reviewedMap, id));
+      if (absorbed.some(m => !m || !sameMemoryOwner(target, m))) continue;
+      const nextSlot = upd.slot_key !== undefined ? upd.slot_key : target.slot_key;
+      const slotConflict = nextSlot ? db.get<MemoryRecord>(
+        `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ?
+         AND COALESCE(session_id, '') = ? AND slot_key = ?
+         AND status IN ('active', 'frozen') AND id != ?`,
+        [target.scope, target.workspace_id || '', target.session_id || '', nextSlot, target.id]
+      ) : undefined;
+      if (slotConflict && !getUnchangedReviewedMemory(db, reviewedMap, slotConflict.id)) continue;
+      const canActivate = target.status === 'active' || hasUserEvidence(db, target);
+      const absorbedHasActiveOrUserEvidence = absorbed.some(
+        (m) => !!m && (m.status === 'active' || hasUserEvidence(db, m))
+      );
+      if (!canActivate && (absorbedHasActiveOrUserEvidence || slotConflict)) continue;
 
-      let nextSlot = upd.slot_key !== undefined ? upd.slot_key : target.slot_key;
-      // 先吸收并取代被合并的冗余兄弟记忆，释放潜在槽位占用
-      for (const absId of upd.absorb_ids || []) {
-        const absMem = reviewedMap.get(absId);
-        if (!absMem || absMem.id === target.id || absMem.status === 'frozen') continue;
-        saveVersionSnapshot(db, absMem, 'llm_curate_merged', 'llm', now);
-        db.run(
-          `UPDATE memories SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ? WHERE id = ?`,
-          [now, now, now, absMem.id]
-        );
-        removeCachedRuntimeEmbedding(absMem.id);
-        addRelation(db, target.id, absMem.id, 'supersedes', now);
-      }
-      if (nextSlot) {
-        const slotConflict = db.get<MemoryRecord>(
-          `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id != ?`,
-          [target.scope, target.workspace_id || '', target.session_id || '', nextSlot, target.id]
-        );
-        if (slotConflict) {
-          if (slotConflict.status === 'frozen') {
-            nextSlot = target.slot_key === nextSlot ? null : target.slot_key;
-          } else {
+      try {
+        const applied = db.transaction(() => {
+          const prevContentRev = target.content_rev;
+          const editRes = editContent(db, target.id, upd.text, undefined, 'llm', now);
+          if (!editRes.ok) return null;
+
+          // 继承并保留目标记忆与被吸收冗余记忆的来源证据至新 content_rev
+          db.run(
+            `INSERT OR IGNORE INTO memory_sources
+             (memory_id, content_rev, session_id, seq, kind, excerpt, created_at)
+             SELECT ?, ?, session_id, seq, kind, excerpt, created_at
+             FROM memory_sources
+             WHERE memory_id = ? AND content_rev = ?`,
+            [target.id, editRes.content_rev, target.id, prevContentRev]
+          );
+
+          // 先吸收并取代被合并的冗余兄弟记忆，释放潜在槽位占用
+          for (const absMem of absorbed) {
+            if (!absMem) continue;
+            db.run(
+              `INSERT OR IGNORE INTO memory_sources
+               (memory_id, content_rev, session_id, seq, kind, excerpt, created_at)
+               SELECT ?, ?, session_id, seq, kind, excerpt, created_at
+               FROM memory_sources
+               WHERE memory_id = ? AND content_rev = ?`,
+              [target.id, editRes.content_rev, absMem.id, absMem.content_rev]
+            );
+            saveVersionSnapshot(db, absMem, 'llm_curate_merged', 'llm', now);
+            db.run(
+              `UPDATE memories SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+              [now, now, now, absMem.id]
+            );
+            addRelation(db, target.id, absMem.id, 'supersedes', now);
+          }
+          if (slotConflict && !absorbed.some(m => m?.id === slotConflict.id)) {
             saveVersionSnapshot(db, slotConflict, 'llm_curate_slot_supersede', 'llm', now);
             db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ? WHERE id = ?`, [now, now, now, slotConflict.id]);
-            removeCachedRuntimeEmbedding(slotConflict.id);
             addRelation(db, target.id, slotConflict.id, 'supersedes', now);
           }
+
+          const nextType = upd.type || target.type;
+          const savedSummary =
+            db.get<{ summary: string }>('SELECT summary FROM memories WHERE id = ?', [target.id])?.summary ||
+            upd.text.slice(0, 80);
+          const newHash = contentHash(nextType, upd.text);
+          const newVec = computeLocalEmbedding(
+            `${savedSummary}\n${upd.text}${nextSlot ? `\n${nextSlot}` : ''}`
+          );
+
+          db.run(
+            `UPDATE memories
+             SET type = ?, slot_key = ?, confidence = ?, status = ?,
+                 approved_at = COALESCE(approved_at, ?), approved_by = COALESCE(approved_by, ?),
+                 hash = ?, embedding = ?, updated_at = ?
+             WHERE id = ?`,
+            [
+              nextType,
+              nextSlot,
+              upd.confidence,
+              canActivate ? 'active' : 'candidate',
+              canActivate ? now : null,
+              canActivate ? 'llm-curator' : null,
+              newHash,
+              encodeEmbeddingBlob(newVec),
+              now,
+              target.id,
+            ]
+          );
+          return { newHash, newVec };
+        });
+
+        if (!applied) continue;
+
+        for (const absMem of absorbed) {
+          if (absMem) removeCachedRuntimeEmbedding(absMem.id);
         }
-      }
-      const nextType = upd.type || target.type;
-      const newHash = contentHash(nextType, upd.text);
-      const newVec = computeLocalEmbedding(
-        `${upd.text.slice(0, 80)}\n${upd.text}${nextSlot ? `\n${nextSlot}` : ''}`
-      );
-
-      db.run(
-        `UPDATE memories
-         SET type = ?, slot_key = ?, confidence = ?, status = 'active',
-             approved_at = COALESCE(approved_at, ?), approved_by = COALESCE(approved_by, 'llm-curator'),
-             hash = ?, embedding = ?, updated_at = ?
-         WHERE id = ?`,
-        [
-          nextType,
-          nextSlot,
-          upd.confidence,
-          now,
-          newHash,
-          encodeEmbeddingBlob(newVec),
-          now,
-          target.id,
-        ]
-      );
-      removeCachedRuntimeEmbedding(target.id);
-      primeRuntimeVectorCache(target.id, newHash, newVec);
-      updatedIds.push(target.id);
-      llmUpdated++;
-
-      // 吸收并取代被合并的冗余兄弟记忆
-      for (const absId of ([] as string[])) {
-        const absMem = reviewedMap.get(absId);
-        if (!absMem || absMem.id === target.id || absMem.status === 'frozen') continue;
-        saveVersionSnapshot(db, absMem, 'llm_curate_merged', 'llm', now);
-        db.run(
-          `UPDATE memories
-           SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ?
-           WHERE id = ?`,
-          [now, now, now, absMem.id]
-        );
-        removeCachedRuntimeEmbedding(absMem.id);
-        addRelation(db, target.id, absMem.id, 'supersedes', now);
+        if (slotConflict && !absorbed.some(m => m?.id === slotConflict.id)) {
+          removeCachedRuntimeEmbedding(slotConflict.id);
+        }
+        removeCachedRuntimeEmbedding(target.id);
+        primeRuntimeVectorCache(target.id, applied.newHash, applied.newVec);
+        updatedIds.push(target.id);
+        llmUpdated++;
+      } catch {
+        continue;
       }
     }
   });

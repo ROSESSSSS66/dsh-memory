@@ -27,6 +27,10 @@ export function renderStableLayer(
   strategyVersion: number = 1
 ): { text: string; visibleRefs: Set<string>; stableTokens: number; estimatedTokens: number } {
   try {
+    const maxStableTokens = Math.min(cfg.stableBudgetTokens ?? 600, cfg.hardBudgetTokens ?? 3200);
+    if (maxStableTokens <= 0) {
+      return { text: '', visibleRefs: new Set(), stableTokens: 0, estimatedTokens: 0 };
+    }
     const scope = scopeFilterSQL({
       workspaceId: ctx.workspaceId,
       sessionId: ctx.sessionId || '',
@@ -46,41 +50,26 @@ export function renderStableLayer(
       return { text: '', visibleRefs: new Set(), stableTokens: 0, estimatedTokens: 0 };
     }
 
-    // 装箱预算检查
-    let selected = [...rows];
-    const maxStableTokens = cfg.stableBudgetTokens || 600;
+    const sortedByUtil = [...rows].sort((a, b) => a.utility - b.utility);
+    const renderSuffix = (offset: number) => {
+      const selected = sortedByUtil.slice(offset).sort((a, b) => a.id.localeCompare(b.id));
+      const text = render(
+        selected.map(memory => ({ memory, form: 'content' as const })),
+        { strategyVersion, layer: 'stable', db, scopeCtx: ctx }
+      );
+      return { selected, text, tokens: budgetTokens(text) };
+    };
 
-    // 先测试全选时预算
-    let currentText = render(
-      selected.map((m) => ({ memory: m, form: 'content' as const })),
-      { strategyVersion, layer: 'stable', db, scopeCtx: ctx }
-    );
-    let currentTokens = budgetTokens(currentText);
-
-    // 如果超预算，按 utility 从低到高剔除，直到符合预算
-    if (currentTokens > maxStableTokens) {
-      // 保持原有顺序索引，按 utility 升序排剔除队列
-      const sortedByUtil = [...selected].sort((a, b) => a.utility - b.utility);
-
-      while (sortedByUtil.length > 0 && currentTokens > maxStableTokens) {
-        const toRemove = sortedByUtil.shift()!;
-        selected = selected.filter((m) => m.id !== toRemove.id);
-
-        if (selected.length === 0) {
-          currentText = '';
-          currentTokens = 0;
-          break;
-        }
-
-        // 重新按 id 升序排列
-        selected.sort((a, b) => a.id.localeCompare(b.id));
-        currentText = render(
-          selected.map((m) => ({ memory: m, form: 'content' as const })),
-          { strategyVersion, layer: 'stable', db, scopeCtx: ctx }
-        );
-        currentTokens = budgetTokens(currentText);
-      }
+    // Removing lowest-utility records only reduces size, including short-code lengths.
+    // Find the first fitting suffix without re-rendering once per discarded record.
+    let low = 0;
+    let high = rows.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (renderSuffix(mid).tokens <= maxStableTokens) high = mid;
+      else low = mid + 1;
     }
+    const { selected, text: currentText, tokens: currentTokens } = renderSuffix(low);
 
     const visibleRefs = new Set<string>();
     for (const m of selected) {
@@ -148,10 +137,10 @@ export class PromptSectionManager {
       state.disposer = undefined;
     }
 
-    state.lastHash = hash;
-    state.visibleRefs = visibleRefs;
-    state.stableTokens = stableTokens;
-    state.estimatedTokens = estimatedTokens;
+    state.lastHash = undefined;
+    state.visibleRefs = new Set();
+    state.stableTokens = 0;
+    state.estimatedTokens = 0;
 
     // 注册到 agent.ctx.systemPrompt
     if (agent?.ctx?.systemPrompt?.section) {
@@ -162,6 +151,10 @@ export class PromptSectionManager {
           text,
           interpolate: false, // 严禁插值，防止用户记忆中的 {{ }} 破坏组装
         });
+        state.lastHash = hash;
+        state.visibleRefs = visibleRefs;
+        state.stableTokens = stableTokens;
+        state.estimatedTokens = estimatedTokens;
       } catch (err: any) {
         console.warn('[dsh-memory] Failed to register memory-stable section:', err?.message || err);
       }

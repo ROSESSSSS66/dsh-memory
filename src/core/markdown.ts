@@ -4,6 +4,7 @@ import type { Db, MemoryRecord, MarkdownFrontmatter, Scope, MemoryType, MemorySt
 import { upsertCandidate, restoreMemory } from './writer.js';
 import { redactSecrets } from './privacy.js';
 import { workspaceId as resolveWorkspaceId } from './scope.js';
+import { get } from './store.js';
 
 /**
  * 序列化单条记忆为 Markdown (带 YAML Frontmatter)
@@ -316,11 +317,15 @@ export function trashMemory(
 export function restoreFromTrash(
   db: Db,
   id: string,
-  trashDir?: string
+  trashDir?: string,
+  scopeCtx?: { workspaceId: string; sessionId?: string }
 ): { restored: boolean; message: string } {
   // 1. 如果还在 DB 中 (status='archived')，直接 restore
   const existing = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
   if (existing) {
+    if (scopeCtx && !get(db, id, scopeCtx)) {
+      return { restored: false, message: `Memory '${id}' not found in current scope` };
+    }
     const res = restoreMemory(db, id);
     return { restored: res.success, message: res.message };
   }
@@ -332,6 +337,13 @@ export function restoreFromTrash(
     if (fs.existsSync(trashFile)) {
       const content = fs.readFileSync(trashFile, 'utf8');
       const parsed = parseMemoryMarkdown(content);
+      const scope = parsed.frontmatter.scope || 'workspace';
+      if (scopeCtx && scope !== 'user' && scope !== 'global' && (
+        resolveWorkspaceId(parsed.frontmatter.workspace_id || '') !== resolveWorkspaceId(scopeCtx.workspaceId) ||
+        (scope === 'session' && parsed.frontmatter.session_id !== scopeCtx.sessionId)
+      )) {
+        return { restored: false, message: `Memory '${id}' not found in current scope` };
+      }
       const res = upsertCandidate(
         db,
         {
@@ -340,8 +352,10 @@ export function restoreFromTrash(
           summary: parsed.summary,
           scope: parsed.frontmatter.scope || 'workspace',
           workspaceId: parsed.frontmatter.workspace_id || undefined,
+          sessionId: parsed.frontmatter.session_id || undefined,
           source_kind: 'system',
           origin_kinds: ['system'],
+          status: 'active',
           confidence: parsed.frontmatter.confidence ?? 0.8,
           sources: [{ session_id: 'trash_restore', seq: 0, kind: 'trash_restore' }],
           actor: 'user',

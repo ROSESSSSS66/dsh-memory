@@ -179,8 +179,8 @@ describe('Memory Health & Conflict Doctor (src/core/health.ts)', () => {
         source_kind: 'assistant',
         status: 'candidate',
         confidence: 0.85,
-        origin_kinds: ['tool'],
-        sources: [{ session_id: 's_auto', seq: 1, kind: 'tool' }],
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's_auto', seq: 1, kind: 'user_msg' }],
         actor: 'llm',
       },
       now

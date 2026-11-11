@@ -480,4 +480,66 @@ describe('M1-T3: writer.ts Pipeline Tests (12 Required Checks)', () => {
     expect(sensitiveRes.action).toBe('rejected');
     expect((sensitiveRes as any).reason).toBe('sensitive_content_detected');
   });
+
+  // 13. 非用户新证据命中已归档/置顶记录时必须递增 content_rev 并清空 pinned/approved/invalidated_at
+  it('13. should isolate sources and clear pinned/approval state on non-user resurrection of inactive memory', () => {
+    const inserted = upsertCandidate(db, {
+      type: 'semantic',
+      content: '归档前已置顶的项目规范',
+      source_kind: 'user',
+      confidence: 1.0,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's1', seq: 1, kind: 'user_msg' }],
+      actor: 'user',
+    });
+    const id = (inserted as any).id;
+    db.run('UPDATE memories SET pinned = 1 WHERE id = ?', [id]);
+    expect(forget(db, id)).toBe(true);
+
+    // 非显式用户的新证据再次命中同一正文
+    const resurrected = upsertCandidate(db, {
+      type: 'semantic',
+      content: '归档前已置顶的项目规范',
+      source_kind: 'assistant',
+      confidence: 0.7,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 's2', seq: 4, kind: 'assistant_msg' }],
+      actor: 'llm',
+    });
+    expect(resurrected).toEqual({ action: 'merged', id });
+
+    const memAfter = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id])!;
+    expect(memAfter.status).toBe('candidate');
+    expect(memAfter.content_rev).toBe(2);
+    expect(memAfter.pinned).toBe(0);
+    expect(memAfter.approved_at).toBeNull();
+    expect(memAfter.approved_by).toBeNull();
+    expect(memAfter.valid_to).toBeNull();
+    expect(memAfter.invalidated_at).toBeNull();
+
+    // 旧 rev=1 的 user source 留存，新 rev=2 只有 assistant_msg source（禁止自治自动晋升）
+    const rev2Sources = db.all<{ kind: string }>(
+      'SELECT kind FROM memory_sources WHERE memory_id = ? AND content_rev = ?',
+      [id, 2]
+    );
+    expect(rev2Sources.map((s) => s.kind)).toEqual(['assistant_msg']);
+    expect(approveCandidate(db, id, 'autonomous').action).toBe('rejected');
+
+    // 若用户先 archive 后再由用户显式重新写入同文本，invalidated_at 与 valid_to 同步清空
+    forget(db, id);
+    const reactivated = upsertCandidate(db, {
+      type: 'semantic',
+      content: '归档前已置顶的项目规范',
+      source_kind: 'user',
+      confidence: 0.95,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's3', seq: 1, kind: 'user_msg' }],
+      actor: 'user',
+    });
+    expect(reactivated).toEqual({ action: 'merged', id });
+    const memReactivated = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id])!;
+    expect(memReactivated.status).toBe('active');
+    expect(memReactivated.valid_to).toBeNull();
+    expect(memReactivated.invalidated_at).toBeNull();
+  });
 });

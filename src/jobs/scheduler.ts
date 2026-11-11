@@ -57,7 +57,9 @@ export function recoverJobsOnStartup(
 }
 
 export class JobScheduler {
-  private timers: Set<ReturnType<typeof setTimeout>> = new Set();
+  private timer?: ReturnType<typeof setTimeout>;
+  private activeCycle?: Promise<number>;
+  private idleUntil = Date.now() + 30_000;
   private isStopped = false;
   private db: Db;
   private cfg: PluginConfig;
@@ -65,13 +67,17 @@ export class JobScheduler {
   constructor(db: Db, cfg: PluginConfig) {
     this.db = db;
     this.cfg = cfg;
+    this.schedulePending();
   }
 
   /**
    * 将任务入队 (幂等)
    */
   enqueue(kind: string, key: string, payload?: any): boolean {
-    return enqueueJob(this.db, { kind, key, payload });
+    if (this.isStopped) return false;
+    const enqueued = enqueueJob(this.db, { kind, key, payload });
+    this.schedulePending();
+    return enqueued;
   }
 
   /**
@@ -79,13 +85,44 @@ export class JobScheduler {
    */
   async triggerNow(): Promise<number> {
     if (this.isStopped) return 0;
-    let executed = 0;
-    while (!this.isStopped) {
-      const ran = await runNextJob(this.db, this.cfg);
-      if (!ran) break;
-      executed++;
-    }
-    return executed;
+    if (this.activeCycle) return this.activeCycle;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    this.idleUntil = 0;
+    this.activeCycle = Promise.resolve().then(async () => {
+      let executed = 0;
+      while (!this.isStopped) {
+        const ran = await runNextJob(this.db, this.cfg);
+        if (!ran) break;
+        executed++;
+      }
+      return executed;
+    }).finally(() => {
+      this.activeCycle = undefined;
+      this.schedulePending();
+    });
+    return this.activeCycle;
+  }
+
+  private schedulePending(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    if (this.isStopped || this.activeCycle) return;
+    const next = this.db.get<{ due: number | null }>(
+      "SELECT MIN(next_eligible_at) AS due FROM jobs WHERE status IN ('queued', 'skipped')"
+    )?.due;
+    if (next == null) return;
+    // A busy global runner may leave an already-eligible job. Avoid a tight polling loop.
+    const delay = Math.min(2_147_483_647, Math.max(1_000, Math.max(next, this.idleUntil) - Date.now()));
+    this.timer = setTimeout(async () => {
+      this.timer = undefined;
+      try {
+        await this.triggerNow();
+      } catch (err: any) {
+        console.warn('[dsh-memory] scheduled job cycle failed:', err?.message || err);
+      }
+    }, delay);
+    this.timer.unref?.();
   }
 
   /**
@@ -93,23 +130,8 @@ export class JobScheduler {
    */
   scheduleTurnStopping(): void {
     if (this.isStopped) return;
-    for (const t of this.timers) {
-      clearTimeout(t);
-    }
-    this.timers.clear();
-    const timer = setTimeout(async () => {
-      this.timers.delete(timer);
-      // 定时器回调中的异常若不捕获会成为 unhandledRejection，在 Node 默认策略下会终止宿主进程
-      try {
-        await this.triggerNow();
-      } catch (err: any) {
-        console.warn('[dsh-memory] scheduled job cycle failed:', err?.message || err);
-      }
-    }, 30_000);
-    if (typeof (timer as any).unref === 'function') {
-      (timer as any).unref();
-    }
-    this.timers.add(timer);
+    this.idleUntil = Date.now() + 30_000;
+    this.schedulePending();
   }
 
   /**
@@ -118,14 +140,13 @@ export class JobScheduler {
   stop(): void {
     this.isStopped = true;
     abortRunningJob();
-    for (const t of this.timers) {
-      clearTimeout(t);
-    }
-    this.timers.clear();
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
   }
 
   async stopAndWait(): Promise<void> {
     this.stop();
     await abortAndAwaitRunningJob();
+    await this.activeCycle?.catch(() => {});
   }
 }

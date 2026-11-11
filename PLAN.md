@@ -76,7 +76,7 @@
 | zstd 解压 | 优先 `node:zlib` 的 `zstdDecompressSync`；不存在时用 `fzstd`（纯 JS） | 只在历史回填时用到 |
 | 测试 | `vitest` | |
 | 构建 | `tsup`，输出 ESM 到 `dist/` | 如果附录 A 显示 DSH 需要 CJS，改为输出 CJS |
-| 运行时依赖白名单 | `sql.js`（仅在需要回退时）、`fzstd` | **除此之外不允许添加运行时依赖** |
+| 运行时依赖白名单 | `sql.js`（仅在需要回退时）、`fzstd`、`zod`（仅用于宿主会话投影状态校验） | `zod` 对齐附录 A 的投影 schema；其他运行时依赖仍需单独说明用途 |
 
 ---
 

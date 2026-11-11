@@ -3,6 +3,7 @@ import type { IngestQueue } from '../ingest/queue.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { workspaceId } from '../core/scope.js';
 import { isWorkspaceExcluded, redactSecrets } from '../core/privacy.js';
+import { MemoryRefsSchema } from './memory-visibility.js';
 
 export const IGNORED_EVENT_TYPES = new Set([
   'session-log-deepseek/delivery-accepted',
@@ -18,6 +19,24 @@ export const IGNORED_EVENT_TYPES = new Set([
   'model/selection',
   'session/title',
 ]);
+
+export const IGNORED_USER_SOURCE_KINDS = new Set([
+  'runtime-context',
+  'time-context',
+  'skill-catalog',
+  'tool-jobs',
+]);
+
+export function isIgnoredUserMessageSource(source: any): boolean {
+  if (!source || typeof source !== 'object') return false;
+  if (typeof source.kind === 'string' && IGNORED_USER_SOURCE_KINDS.has(source.kind)) {
+    return true;
+  }
+  if (source.form === 'snapshot' || source.form === 'catalog') {
+    return true;
+  }
+  return false;
+}
 
 export class SessionListener {
   private queue: IngestQueue;
@@ -43,8 +62,8 @@ export class SessionListener {
     // 1. 忽略列表直接跳过
     if (IGNORED_EVENT_TYPES.has(event.type)) return;
 
-    // 2. 工作区排除检查
-    const cwd = session.cwd || session.workspaceId || '';
+    // 2. 工作区排除检查 (DSH 真实 Session 路径位于 session.header.cwd)
+    const cwd = session.cwd || session.header?.cwd || session.workspaceId || '';
     if (isWorkspaceExcluded(cwd, this.cfg.excludeWorkspaces)) {
       return;
     }
@@ -63,12 +82,30 @@ export class SessionListener {
 
     if (event.type === 'user/message') {
       const source = event.data?.source;
-      // 注入回声过滤：本插件自身注入的消息直接丢弃
+      // Committed plugin messages update telemetry, but never become extraction evidence.
       if (source?.kind === 'plugin' && source?.plugin === 'dsh-memory') {
+        const refs = MemoryRefsSchema.safeParse(source.memoryRefs);
+        const metadata = source.memoryInjection;
+        if (!refs.success) {
+          console.warn('[dsh-memory] Committed memory message has invalid memoryRefs');
+          return;
+        }
+        if (Number.isSafeInteger(metadata?.turn) && metadata.turn >= 0 &&
+            Number.isSafeInteger(metadata?.strategyVersion) && metadata.strategyVersion >= 1 &&
+            Array.isArray(metadata?.items) && metadata.items.length === refs.data.length &&
+            metadata.items.every((item: any) => Number.isSafeInteger(item?.tokens) && item.tokens >= 0 &&
+              (item.form === 'content' || item.form === 'summary'))) {
+          this.queue.push({
+            sessionId, time, turn: metadata.turn, strategyVersion: metadata.strategyVersion,
+            items: refs.data.map((ref, index) => ({
+              ref, rank: index + 1, tokens: metadata.items[index].tokens, form: metadata.items[index].form,
+            })),
+          });
+        }
         return;
       }
-      // DSH 自己的运行时快照注入也直接丢弃
-      if (source?.kind === 'runtime-context') {
+      // DSH 自己的运行时快照 / 时间上下文 / 技能目录 / 后台任务快照不纳入原始记忆事件
+      if (isIgnoredUserMessageSource(source)) {
         return;
       }
 
@@ -206,6 +243,7 @@ export class SessionListener {
         this.ctx.emit('memory/context-pressure', {
           sessionId,
           workspaceId: wsId,
+          ...(cwd ? { cwd } : {}),
           turn: currentTurn,
           eventCount,
         });

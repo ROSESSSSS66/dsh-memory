@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
-import type { Db, MemoryRecord } from '../../src/types.js';
+import type { CandidateInput, Db, MemoryRecord } from '../../src/types.js';
 import { DEFAULTS, type PluginConfig } from '../../src/config.js';
 import { workspaceId } from '../../src/core/scope.js';
 import { upsertCandidate, approveCandidate } from '../../src/core/writer.js';
@@ -63,6 +63,91 @@ describe('Query-Triggered Memory Repair (§5.17, M6)', () => {
       } as any;
     }) as any;
   }
+
+  function seed(content: string, extra: Partial<CandidateInput> = {}): string {
+    const result = upsertCandidate(db, {
+      type: 'semantic', content, scope: 'workspace', workspaceId: ws1,
+      source_kind: 'user', actor: 'user', origin_kinds: ['user'], confidence: 0.9,
+      sources: [{ session_id: sess1, seq: 1, kind: 'user', excerpt: content }],
+      ...extra,
+    }, fixedNow);
+    if (!('id' in result)) throw new Error(JSON.stringify(result));
+    return result.id;
+  }
+
+  function propose(target: string, action: string, candidates: string[]): number {
+    db.run(`INSERT INTO repair_proposals
+      (job_id, memory_id, content_rev, action, candidate_ids, reason, status, created_at, expires_at)
+      VALUES (1, ?, 1, ?, ?, 'test', 'candidate', ?, ?)`,
+    [target, action, JSON.stringify(candidates), fixedNow, fixedNow + 86400_000]);
+    return db.get<{ id: number }>('SELECT MAX(id) AS id FROM repair_proposals')!.id;
+  }
+
+  it.each(['frozen-slot', 'duplicate-slot', 'missing-candidate'] as const)(
+    'does not partially apply a split when a later candidate has a %s',
+    problem => {
+      const target = seed('The original deployment and database configuration.');
+      seed('Existing database configuration.', { slot_key: 'project.database' });
+      const first = seed('Proposed database configuration.', { actor: 'llm', slot_key: 'project.database' });
+      const second = seed('Proposed release configuration.', {
+        actor: 'llm', slot_key: problem === 'duplicate-slot' ? 'project.database' : 'project.release',
+      });
+      if (problem === 'frozen-slot') {
+        const frozen = seed('Frozen release configuration.', { slot_key: 'project.release' });
+        db.run("UPDATE memories SET status = 'frozen' WHERE id = ?", [frozen]);
+      } else if (problem === 'missing-candidate') {
+        db.run("UPDATE memories SET status = 'rejected' WHERE id = ?", [second]);
+      }
+      const proposal = propose(target, 'split', [first, second]);
+      const before = db.all('SELECT * FROM memories ORDER BY id');
+      const versions = db.all('SELECT * FROM memory_versions ORDER BY memory_id, version');
+      expect(approveRepairProposal(db, proposal, 'user', fixedNow)).toMatchObject({ ok: false });
+      expect(db.all('SELECT * FROM memories ORDER BY id')).toEqual(before);
+      expect(db.all('SELECT * FROM memory_versions ORDER BY memory_id, version')).toEqual(versions);
+      expect(db.get('SELECT status FROM repair_proposals WHERE id = ?', [proposal])?.status).toBe('candidate');
+    }
+  );
+
+  it.each(['revise', 'split'])('autonomous %s cannot replace a pinned slot occupant', action => {
+    const target = seed('The original deployment configuration.');
+    const pinned = seed('User-pinned database configuration.', { slot_key: 'project.database' });
+    db.run('UPDATE memories SET pinned = 1 WHERE id = ?', [pinned]);
+    const candidates = [seed('Proposed database configuration.', { actor: 'llm', slot_key: 'project.database' })];
+    if (action === 'split') candidates.push(seed('Proposed release policy.', { actor: 'llm' }));
+    const proposal = propose(target, action, candidates);
+    const before = db.all('SELECT * FROM memories ORDER BY id');
+    expect(approveRepairProposal(db, proposal, 'autonomous-doctor', fixedNow)).toMatchObject({ ok: false });
+    expect(db.all('SELECT * FROM memories ORDER BY id')).toEqual(before);
+  });
+
+  it.each(['revise', 'split'])('refuses %s candidates belonging to another workspace', action => {
+    const target = seed('The original deployment configuration.');
+    const candidates = [seed('A private configuration in another project.', {
+      actor: 'llm', workspaceId: workspaceId('/other/repair'),
+    })];
+    if (action === 'split') candidates.push(seed('Another release policy.', { actor: 'llm' }));
+    const proposal = propose(target, action, candidates);
+    const before = db.all('SELECT * FROM memories ORDER BY id');
+    expect(approveRepairProposal(db, proposal, 'user', fixedNow)).toMatchObject({ ok: false });
+    expect(db.all('SELECT * FROM memories ORDER BY id')).toEqual(before);
+  });
+
+  it('applies every part of a valid split including an occupied slot', () => {
+    const target = seed('The original deployment configuration.');
+    const occupant = seed('Existing database configuration.', { slot_key: 'project.database' });
+    const first = seed('New database configuration.', { actor: 'llm', slot_key: 'project.database' });
+    const second = seed('New release policy.', { actor: 'llm', slot_key: 'project.release' });
+    const proposal = propose(target, 'split', [first, second]);
+    expect(approveRepairProposal(db, proposal, 'user', fixedNow)).toEqual({ ok: true });
+    for (const id of [target, occupant]) {
+      expect(db.get('SELECT status FROM memories WHERE id = ?', [id])?.status).toBe('superseded');
+      expect(db.get('SELECT memory_id FROM memory_versions WHERE memory_id = ?', [id])).toBeDefined();
+    }
+    for (const id of [first, second]) {
+      expect(db.get('SELECT status FROM memories WHERE id = ?', [id])?.status).toBe('active');
+    }
+    expect(db.get('SELECT status FROM repair_proposals WHERE id = ?', [proposal])?.status).toBe('approved');
+  });
 
   it('M6: enqueueRepairJobIfEligible 应检查状态、7天冷却和排队去重', () => {
     // 写入活跃记忆

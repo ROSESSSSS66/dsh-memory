@@ -9,10 +9,12 @@ import {
   upsertCandidate,
   addRelation,
   saveVersionSnapshot,
-  invalidateMemory,
 } from '../core/writer.js';
 import { removeCachedRuntimeEmbedding } from '../core/vector.js';
 import { estimateTokens } from '../core/tokens.js';
+import { isWorkspaceExcluded, memoryPrivacyFilterSQL, memoryWorkspaceIds } from '../core/privacy.js';
+import { getUnchangedReviewedMemory, sameMemoryOwner } from './review-snapshot.js';
+import { hasUserEvidence } from '../core/trust.js';
 
 export interface DistillBatchOptions {
   sessionId?: string;
@@ -47,27 +49,32 @@ export function findEligibleDistillSession(
 ): { sessionId: string; workspaceId: string; count: number; minSeq: number } | null {
   const minEvents = isIdle ? 1 : cfg.distillMinEvents || 40;
 
-  const row = targetSessionId
-    ? db.get<{ session_id: string; workspace_id: string; cnt: number; min_seq: number }>(
+  const rows = targetSessionId
+    ? db.all<{ session_id: string; workspace_id: string; cnt: number; min_seq: number }>(
         `SELECT session_id, workspace_id, COUNT(*) as cnt, MIN(seq) as min_seq
          FROM raw_events
          WHERE processed < 2 AND session_id = ?
          GROUP BY session_id, workspace_id
-         HAVING cnt >= ?
-         LIMIT 1`,
+         HAVING cnt >= ?`,
         [targetSessionId, minEvents]
       )
-    : db.get<{ session_id: string; workspace_id: string; cnt: number; min_seq: number }>(
+    : db.all<{ session_id: string; workspace_id: string; cnt: number; min_seq: number }>(
         `SELECT session_id, workspace_id, COUNT(*) as cnt, MIN(seq) as min_seq
          FROM raw_events
          WHERE processed < 2
          GROUP BY session_id, workspace_id
          HAVING cnt >= ?
-         ORDER BY CASE WHEN COUNT(*) >= 5 THEN 0 ELSE 1 END, MIN(time) ASC
-         LIMIT 1`,
+         ORDER BY CASE WHEN COUNT(*) >= 5 THEN 0 ELSE 1 END, MIN(time) ASC`,
         [minEvents]
       );
 
+  const excludedSessions = new Set(
+    db.all<{ session_id: string; workspace_id: string }>('SELECT * FROM session_workspace_owners')
+      .filter(owner => isWorkspaceExcluded(owner.workspace_id, cfg.excludeWorkspaces))
+      .map(owner => owner.session_id)
+  );
+  const row = rows.find(r => !excludedSessions.has(r.session_id) &&
+    !isWorkspaceExcluded(r.workspace_id, cfg.excludeWorkspaces));
   if (!row) return null;
   return {
     sessionId: row.session_id,
@@ -97,10 +104,15 @@ export async function distillSession(
     targetSessionId = eligible.sessionId;
     workspaceId = eligible.workspaceId;
   } else {
-    const wsRow = db.get<{ workspace_id: string }>(
-      'SELECT workspace_id FROM raw_events WHERE session_id = ? LIMIT 1',
-      [targetSessionId]
-    );
+    const wsRow =
+      db.get<{ workspace_id: string }>(
+        "SELECT workspace_id FROM raw_events WHERE session_id = ? AND workspace_id != '' LIMIT 1",
+        [targetSessionId]
+      ) ||
+      db.get<{ workspace_id: string }>(
+        "SELECT workspace_id FROM session_workspace_owners WHERE session_id = ? AND workspace_id != '' LIMIT 1",
+        [targetSessionId]
+      );
     workspaceId = wsRow?.workspace_id || '';
   }
 
@@ -115,6 +127,12 @@ export async function distillSession(
   if (allUnprocessed.length === 0) {
     return { success: true, sessionId: targetSessionId, consumedCount: 0, itemsCreated: 0 };
   }
+  if (
+    isWorkspaceExcluded(workspaceId, cfg.excludeWorkspaces) ||
+    allUnprocessed.some(ev => isWorkspaceExcluded(ev.workspace_id, cfg.excludeWorkspaces))
+  ) {
+    return { success: false, sessionId: targetSessionId, consumedCount: 0, itemsCreated: 0, error: 'workspace_excluded' };
+  }
 
   // 2. 连续有界选批，严格计算完整输入预算 <= cfg.distillMaxInputTokens (默认 6000)
   const maxInputTokens = cfg.distillMaxInputTokens || 6000;
@@ -122,27 +140,24 @@ export async function distillSession(
   const testLedger: EvidenceLedger = new Map();
 
   // 查询当前工作区存量非冻结记忆摘要，供 LLM 自动识别过时/无效记忆并执行原地升级
+  const privacy = memoryPrivacyFilterSQL(cfg.excludeWorkspaces);
   const existingRows = workspaceId
-    ? db.all<{
-        id: string;
-        type: string;
-        status: string;
-        slot_key: string | null;
-        summary: string;
-        content: string;
-      }>(
-        `SELECT id, type, status, slot_key, summary, content
+    ? db.all<MemoryRecord>(
+        `SELECT *
          FROM memories
          WHERE (workspace_id = ? OR scope IN ('user', 'global'))
+           AND (scope != 'session' OR session_id = ?)
            AND status IN ('active', 'candidate')
            AND pinned = 0
            AND type != 'meta'
            AND COALESCE(slot_key, '') NOT LIKE 'core:%'
+           AND ${privacy.sql}
          ORDER BY updated_at DESC
          LIMIT 16`,
-        [workspaceId]
+        [workspaceId, targetSessionId, ...privacy.params]
       )
     : [];
+  const reviewedMap = new Map(existingRows.map(m => [m.id, m]));
   const existingMemoriesText = existingRows
     .map(
       (m) =>
@@ -203,6 +218,12 @@ export async function distillSession(
     options.cwd && options.cwd.trim() && !/^[0-9a-f]{16}$/i.test(options.cwd.trim())
       ? options.cwd.trim()
       : process.cwd();
+  const sessionOwnerWsIds = db
+    .all<{ workspace_id: string }>(
+      "SELECT workspace_id FROM session_workspace_owners WHERE session_id = ? AND workspace_id != ''",
+      [targetSessionId]
+    )
+    .map(r => r.workspace_id);
   const llmRes = await callOfflineLLM(
     db,
     {
@@ -213,6 +234,11 @@ export async function distillSession(
       maxOutputTokens: PROMPT_DISTILL.maxOutputTokens,
       cwd: realCwd,
       workspaceId,
+      dataWorkspaceIds: [
+        ...batchEvents.map(ev => ev.workspace_id),
+        ...sessionOwnerWsIds,
+        ...memoryWorkspaceIds(db, existingRows),
+      ],
       signal: options.signal,
       jobDeadline: options.jobDeadline,
       fetchFn: options.fetchFn,
@@ -258,7 +284,7 @@ export async function distillSession(
       // 5.1 执行 LLM 识别出的无效/过时记忆淘汰指令 (discard_ids)
       if (parseRes.discardIds && parseRes.discardIds.length > 0) {
         for (const discardId of parseRes.discardIds) {
-          const target = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [discardId]);
+          const target = getUnchangedReviewedMemory(db, reviewedMap, discardId);
           if (
             target &&
             target.status !== 'frozen' &&
@@ -291,11 +317,12 @@ export async function distillSession(
         }
 
         const oldMem = item.supersedesId
-          ? db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [item.supersedesId])
+          ? getUnchangedReviewedMemory(db, reviewedMap, item.supersedesId)
           : undefined;
 
         const upsertRes = upsertCandidate(db, item, now);
         if ('id' in upsertRes) {
+          const newMemory = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [upsertRes.id])!;
           if (upsertRes.action !== 'merged') {
             candidateIds.push(upsertRes.id);
           }
@@ -303,9 +330,21 @@ export async function distillSession(
           if (
             oldMem &&
             oldMem.id !== upsertRes.id &&
+            sameMemoryOwner(oldMem, newMemory) &&
             oldMem.status !== 'frozen' &&
             (oldMem.status === 'active' || oldMem.status === 'candidate')
           ) {
+            const canActivate = hasUserEvidence(db, newMemory) && !item.origin_kinds.includes('web');
+            if (oldMem.status === 'active' && !canActivate) continue;
+            const slotConflict = canActivate && newMemory.slot_key ? db.get<MemoryRecord>(
+              `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ?
+               AND COALESCE(session_id, '') = ? AND slot_key = ?
+               AND status IN ('active', 'frozen') AND id NOT IN (?, ?)`,
+              [newMemory.scope, newMemory.workspace_id || '', newMemory.session_id || '',
+                newMemory.slot_key, newMemory.id, oldMem.id]
+            ) : undefined;
+            // Validate every affected row before invalidating the old memory.
+            if (slotConflict && !getUnchangedReviewedMemory(db, reviewedMap, slotConflict.id)) continue;
             saveVersionSnapshot(db, oldMem, 'llm_auto_supersede', 'llm', now);
             db.run(
               `UPDATE memories
@@ -317,30 +356,14 @@ export async function distillSession(
             addRelation(db, upsertRes.id, oldMem.id, 'supersedes', now);
             itemsUpdated++;
 
-            if (
-              oldMem.status === 'active' &&
-              item.origin_kinds.includes('user') &&
-              !item.origin_kinds.includes('web')
-            ) {
-              let canActivate = true;
-              const newMemRow = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [upsertRes.id]);
-              if (newMemRow?.slot_key) {
-                const slotConflict = db.get<MemoryRecord>(
-                  `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ? AND COALESCE(session_id, '') = ? AND slot_key = ? AND status IN ('active', 'frozen') AND id != ?`,
-                  [newMemRow.scope, newMemRow.workspace_id || '', newMemRow.session_id || '', newMemRow.slot_key, newMemRow.id]
-                );
-                if (slotConflict) {
-                  if (slotConflict.status === 'frozen') {
-                    canActivate = false;
-                  } else {
-                    saveVersionSnapshot(db, slotConflict, 'llm_auto_supersede_slot', 'llm', now);
-                    db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ? WHERE id = ?`, [now, now, now, slotConflict.id]);
-                    removeCachedRuntimeEmbedding(slotConflict.id);
-                    addRelation(db, upsertRes.id, slotConflict.id, 'supersedes', now);
-                  }
-                }
+            if (oldMem.status === 'active' && canActivate) {
+              if (slotConflict) {
+                saveVersionSnapshot(db, slotConflict, 'llm_auto_supersede_slot', 'llm', now);
+                db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ? WHERE id = ?`, [now, now, now, slotConflict.id]);
+                removeCachedRuntimeEmbedding(slotConflict.id);
+                addRelation(db, upsertRes.id, slotConflict.id, 'supersedes', now);
               }
-              if (canActivate) db.run(
+              db.run(
                 `UPDATE memories
                  SET status = 'active', approved_at = ?, approved_by = 'llm-auto-update', updated_at = ?
                  WHERE id = ?`,

@@ -351,7 +351,7 @@ describe('§8.4 MVP 完整验收清单与回归门禁验证', () => {
     expect(foundBefore).toBe(false);
 
     // 2. 模拟用户审批
-    const approveRes = approveCandidate(db, candId, 'user_approver_01', fixedNow);
+    const approveRes = approveCandidate(db, candId, 'user', fixedNow);
     expect((approveRes as any).action).toBe('approved');
 
     // 3. 审批后查询：成功召回 active 记录

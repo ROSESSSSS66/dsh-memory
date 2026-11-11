@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
-import type { Db } from '../../src/types.js';
+import type { Db, MemoryRecord } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
+import { approveCandidate } from '../../src/core/writer.js';
+import { renderStableLayer } from '../../src/dsh/prompt-section.js';
 import {
   getCoreMemory,
   getAllCoreMemories,
@@ -77,5 +79,26 @@ describe('Letta/MemGPT-Inspired Core Memory (core-memory.ts)', () => {
     expect(rendered).toContain('### 🧠 Core Memory (Letta/MemGPT Scratchpad)');
     expect(rendered).toContain('- **[HUMAN]**: 用户姓名 Alex');
     expect(rendered).toContain('- **[PERSONA]**: 专业代码审查员');
+  });
+
+  it('should keep unapproved model core proposals unpinned until explicit approval', () => {
+    const proposal = setCoreMemory(db, 'project', 'Model-suggested build rule.', {
+      workspaceId: ws1,
+      actor: 'llm',
+    });
+    expect(proposal.action).toBe('proposed');
+
+    const before = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [proposal.id])!;
+    expect(before.status).toBe('candidate');
+    expect(before.pinned).toBe(0);
+    expect(renderStableLayer(db, { workspaceId: ws1 }).text).toBe('');
+
+    expect(approveCandidate(db, proposal.id, 'user').action).toBe('approved');
+    const after = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [proposal.id])!;
+    expect(after.status).toBe('active');
+    expect(after.pinned).toBe(1);
+    expect(after.importance).toBe(10);
+    expect(after.utility).toBe(1.0);
+    expect(renderStableLayer(db, { workspaceId: ws1 }).text).toContain('Model-suggested build rule.');
   });
 });
