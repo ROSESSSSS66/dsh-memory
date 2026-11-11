@@ -192,7 +192,7 @@ export class MemoryCommands {
     const wsId = workspaceId(ctx.workspaceId);
     let mem: MemoryRecord | undefined;
     try {
-      mem = get(this.db, rawId, { workspaceId: wsId });
+      mem = get(this.db, rawId, { workspaceId: wsId, sessionId: ctx.sessionId });
     } catch (err: any) {
       return `Error: ${err?.message || 'Lookup failed'}`;
     }
@@ -270,7 +270,7 @@ export class MemoryCommands {
    */
   public forget(idOrShortId: string, ctx: CommandContext): string {
     const wsId = workspaceId(ctx.workspaceId);
-    const mem = get(this.db, idOrShortId, { workspaceId: wsId });
+    const mem = get(this.db, idOrShortId, { workspaceId: wsId, sessionId: ctx.sessionId });
     if (!mem) return `Memory '${idOrShortId}' not found.`;
 
     // 安全回收站：先存根备份到 .trash 目录 (汲取自 LZMW/dsh-memory)
@@ -288,7 +288,7 @@ export class MemoryCommands {
    */
   public confirm(idOrShortId: string, ctx: CommandContext): string {
     const wsId = workspaceId(ctx.workspaceId);
-    const mem = get(this.db, idOrShortId, { workspaceId: wsId });
+    const mem = get(this.db, idOrShortId, { workspaceId: wsId, sessionId: ctx.sessionId });
     if (!mem) return `Memory '${idOrShortId}' not found.`;
 
     const res = confirmMemory(this.db, mem.id, 'user');
@@ -303,8 +303,8 @@ export class MemoryCommands {
       return 'Usage: /memory merge <sourceId> <targetId>';
     }
     const wsId = workspaceId(ctx.workspaceId);
-    const srcMem = get(this.db, sourceId, { workspaceId: wsId });
-    const tgtMem = get(this.db, targetId, { workspaceId: wsId });
+    const srcMem = get(this.db, sourceId, { workspaceId: wsId, sessionId: ctx.sessionId });
+    const tgtMem = get(this.db, targetId, { workspaceId: wsId, sessionId: ctx.sessionId });
     if (!srcMem) return `Source memory '${sourceId}' not found.`;
     if (!tgtMem) return `Target memory '${targetId}' not found.`;
 
@@ -319,15 +319,17 @@ export class MemoryCommands {
     const wsId = workspaceId(ctx.workspaceId);
     let mem: MemoryRecord | undefined;
     try {
-      mem = get(this.db, idOrShortId, { workspaceId: wsId });
-    } catch {}
+      mem = get(this.db, idOrShortId, { workspaceId: wsId, sessionId: ctx.sessionId });
+    } catch (err: any) {
+      return `Error: ${err?.message || 'Lookup failed'}`;
+    }
 
     const trashDir = path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory', '.trash');
     if (mem) {
       const res = restoreMemory(this.db, mem.id, 'user');
       return res.message;
     }
-    const res = restoreFromTrash(this.db, idOrShortId, trashDir);
+    const res = restoreFromTrash(this.db, idOrShortId, trashDir, { workspaceId: wsId, sessionId: ctx.sessionId });
     return res.message;
   }
 
@@ -410,7 +412,7 @@ export class MemoryCommands {
    */
   public setPin(idOrShortId: string, pinned: boolean, ctx: CommandContext): string {
     const wsId = workspaceId(ctx.workspaceId);
-    const mem = get(this.db, idOrShortId, { workspaceId: wsId });
+    const mem = get(this.db, idOrShortId, { workspaceId: wsId, sessionId: ctx.sessionId });
     if (!mem) return `Memory '${idOrShortId}' not found.`;
 
     if (pinned) {
@@ -426,7 +428,7 @@ export class MemoryCommands {
    */
   public setFreeze(idOrShortId: string, freeze: boolean, ctx: CommandContext): string {
     const wsId = workspaceId(ctx.workspaceId);
-    const mem = get(this.db, idOrShortId, { workspaceId: wsId });
+    const mem = get(this.db, idOrShortId, { workspaceId: wsId, sessionId: ctx.sessionId });
     if (!mem) return `Memory '${idOrShortId}' not found.`;
 
     const targetStatus = freeze ? 'frozen' : 'active';
@@ -443,7 +445,7 @@ export class MemoryCommands {
    */
   public approve(idOrShortId: string, ctx: CommandContext): string {
     const wsId = workspaceId(ctx.workspaceId);
-    const mem = get(this.db, idOrShortId, { workspaceId: wsId });
+    const mem = get(this.db, idOrShortId, { workspaceId: wsId, sessionId: ctx.sessionId });
     if (!mem) return `Memory '${idOrShortId}' not found.`;
 
     const res = approveCandidate(this.db, mem.id, 'user', Date.now());
@@ -463,7 +465,10 @@ export class MemoryCommands {
       workspaceId: wsId,
       limit: 20,
     });
-    const proposals = listRepairProposals(this.db, 'candidate');
+    const proposals = listRepairProposals(this.db, 'candidate').filter((p) => {
+      const target = get(this.db, p.memoryId, { workspaceId: wsId, sessionId: ctx.sessionId });
+      return Boolean(target);
+    });
 
     const lines: string[] = [];
     if (candidates.length > 0) {
@@ -645,18 +650,26 @@ export class MemoryCommands {
         output = this.inspect(rest[0], ctx);
       } else if (sub === 'history') {
         const wsId = workspaceId(ctx.workspaceId);
-        const mem = get(this.db, rest[0], { workspaceId: wsId });
-        const targetId = mem ? mem.id : rest[0];
-        const hist = history(this.db, targetId);
-        if (hist.length === 0) {
-          output = `No history found for memory '${rest[0]}'.`;
-        } else {
-          output = hist
-            .map(
-              (h) =>
-                `v${h.version} (${new Date(h.created_at).toISOString()}, by ${h.actor}): ${h.snapshot?.summary || h.snapshot?.content?.slice(0, 60) || h.reason}`
-            )
-            .join('\n');
+        let mem: MemoryRecord | undefined;
+        try {
+          mem = get(this.db, rest[0], { workspaceId: wsId, sessionId: ctx.sessionId });
+        } catch (err: any) {
+          output = err?.message || `Error resolving memory '${rest[0]}'`;
+        }
+        if (!output) {
+          const hist = mem ? history(this.db, mem.id) : [];
+          if (!mem) {
+            output = `Memory '${rest[0]}' not found in current scope.`;
+          } else if (hist.length === 0) {
+            output = `No history found for memory '${rest[0]}'.`;
+          } else {
+            output = hist
+              .map(
+                (h) =>
+                  `v${h.version} (${new Date(h.created_at).toISOString()}, by ${h.actor}): ${h.snapshot?.summary || h.snapshot?.content?.slice(0, 60) || h.reason}`
+              )
+              .join('\n');
+          }
         }
       } else if (sub === 'rollback') {
         const targetVersion = parseInt(rest[1], 10);
@@ -664,10 +677,13 @@ export class MemoryCommands {
           output = 'Usage: /memory rollback <id> <version>';
         } else {
           const wsId = workspaceId(ctx.workspaceId);
-          const mem = get(this.db, rest[0], { workspaceId: wsId });
-          const targetId = mem ? mem.id : rest[0];
-          const res = rollbackVersion(this.db, targetId, targetVersion, 'user', Date.now());
-          output = `Memory ${targetId} rolled back to version ${targetVersion} (new version v${res.version}).`;
+          const mem = get(this.db, rest[0], { workspaceId: wsId, sessionId: ctx.sessionId });
+          if (!mem) {
+            output = `Memory '${rest[0]}' not found in current scope.`;
+          } else {
+            const res = rollbackVersion(this.db, mem.id, targetVersion, 'user', Date.now());
+            output = `Memory ${mem.id} rolled back to version ${targetVersion} (new version v${res.version}).`;
+          }
         }
       } else if (sub === 'list') {
         const listFilter: { type?: any; status?: any; limit?: number; offset?: number } = {};
@@ -761,20 +777,38 @@ export class MemoryCommands {
         if (isNaN(pId)) {
           output = 'Usage: /memory approve-repair <proposalId>';
         } else {
-          const res = approveRepairProposal(this.db, pId);
-          output = res.ok
-            ? `Repair proposal #${pId} approved successfully.`
-            : `Failed to approve repair proposal #${pId}: ${res.reason}`;
+          const wsId = workspaceId(ctx.workspaceId);
+          const propRow = this.db.get<{ memory_id: string }>(
+            'SELECT memory_id FROM repair_proposals WHERE id = ?',
+            [pId]
+          );
+          if (propRow && !get(this.db, propRow.memory_id, { workspaceId: wsId, sessionId: ctx.sessionId })) {
+            output = `Failed to approve repair proposal #${pId}: Proposal #${pId} not found in current scope.`;
+          } else {
+            const res = approveRepairProposal(this.db, pId);
+            output = res.ok
+              ? `Repair proposal #${pId} approved successfully.`
+              : `Failed to approve repair proposal #${pId}: ${res.reason}`;
+          }
         }
       } else if (sub === 'reject-repair') {
         const pId = parseInt(rest[0], 10);
         if (isNaN(pId)) {
           output = 'Usage: /memory reject-repair <proposalId>';
         } else {
-          const res = rejectRepairProposal(this.db, pId);
-          output = res.ok
-            ? `Repair proposal #${pId} rejected.`
-            : `Failed to reject repair proposal #${pId}: ${res.reason}`;
+          const wsId = workspaceId(ctx.workspaceId);
+          const propRow = this.db.get<{ memory_id: string }>(
+            'SELECT memory_id FROM repair_proposals WHERE id = ?',
+            [pId]
+          );
+          if (propRow && !get(this.db, propRow.memory_id, { workspaceId: wsId, sessionId: ctx.sessionId })) {
+            output = `Failed to reject repair proposal #${pId}: Proposal #${pId} not found in current scope.`;
+          } else {
+            const res = rejectRepairProposal(this.db, pId);
+            output = res.ok
+              ? `Repair proposal #${pId} rejected.`
+              : `Failed to reject repair proposal #${pId}: ${res.reason}`;
+          }
         }
       } else if (sub === 'pending') {
         output = this.pending(ctx);

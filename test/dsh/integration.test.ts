@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -11,6 +11,7 @@ import { IngestQueue } from '../../src/ingest/queue.js';
 import { PromptSectionManager } from '../../src/dsh/prompt-section.js';
 import { handlePreStep } from '../../src/dsh/pre-step.js';
 import { MemoryCommands } from '../../src/dsh/commands.js';
+import { visibilityHarness } from '../helpers/visibility.js';
 
 describe('M2-T3 End-to-End Acceptance Integration', () => {
   let db: Db;
@@ -18,6 +19,7 @@ describe('M2-T3 End-to-End Acceptance Integration', () => {
   let listener: SessionListener;
   let promptSections: PromptSectionManager;
   let commands: MemoryCommands;
+  let visibility: ReturnType<typeof visibilityHarness>;
 
   const ws = workspaceId('test-ws-m2t3');
   const sess1 = 'session_one_id_1111';
@@ -30,7 +32,9 @@ describe('M2-T3 End-to-End Acceptance Integration', () => {
     listener = new SessionListener(queue);
     promptSections = new PromptSectionManager(db);
     commands = new MemoryCommands(db);
+    visibility = visibilityHarness(db);
   });
+  afterEach(async () => { await visibility.close(); await queue.close(); db.close(); });
 
   it('完整执行 M2-T3 核心验收流程 (验收项 1, 2, 3, 4, 6, 7)', async () => {
     // 步骤 1: 会话 1 中说 "记住：我的项目数据库是 PostgreSQL 16"
@@ -106,6 +110,9 @@ describe('M2-T3 End-to-End Acceptance Integration', () => {
     expect(injectedMsg.source.memoryRefs).toEqual([
       { id: memoryId, contentRev: 1 },
     ]);
+    await visibility.commitEvent(sess2Payload.agent.session, {
+      type: 'user/message', seq: 2, data: injectedMsg, surfaceOp: { op: 'append' },
+    });
 
     // 步骤 3: /memory stats 和 /memory inspect <id> 的输出正确，并且包含来源 session
     const statsOutput = commands.stats({ workspaceId: ws, sessionId: sess2 });
@@ -153,6 +160,7 @@ describe('M2-T3 End-to-End Acceptance Integration', () => {
       }), {
         db,
         promptSections,
+        getVisibleRefs: visibility.getVisibleRefs,
       });
 
       // 因为上一轮已经注入过 memoryId@1，后续问题不重复追加该记忆
@@ -167,7 +175,7 @@ describe('M2-T3 End-to-End Acceptance Integration', () => {
     expect(injections.length).toBe(1);
   });
 
-  it('验收项 5: 临时把数据库文件改名，让插件无法打开 → 插件初始化优雅降级，DSH 照常对话', () => {
+  it('验收项 5: 临时把数据库文件改名，让插件无法打开 → 插件初始化优雅降级，DSH 照常对话', async () => {
     // 传递一个指向无效/无权限目录的 dbPath 模拟无法打开
     const mockCtx = {
       tools: { register: () => {} },
@@ -176,10 +184,73 @@ describe('M2-T3 End-to-End Acceptance Integration', () => {
     };
 
     // apply 应正常捕获并打印降级提示，不抛出异常
-    expect(() => {
+    await expect(
       apply(mockCtx, {
         dbPath: 'Z:\\invalid_drive_path_cannot_open\\memory.db',
-      });
-    }).not.toThrow();
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it('cleans up visibility, listeners, handlers, and DB when disposed mid-apply or on registration failure', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-plugin-cleanup-'));
+    try {
+      // 1. Dispose arrives while awaiting sessionProjections.register
+      const dbPath1 = path.join(tmpDir, 'mid-dispose.db');
+      const listeners1: Record<string, Array<(arg?: any) => any>> = {};
+      const visDispose1 = vi.fn();
+      const toolRegister1 = vi.fn(() => () => {});
+      let resolveRegister!: (disp: () => void) => void;
+      const applyPromise1 = apply(
+        {
+          on: (evt: string, cb: (arg?: any) => any) => {
+            (listeners1[evt] ||= []).push(cb);
+            return () => {};
+          },
+          sessionProjections: {
+            register: () => new Promise<() => void>((resolve) => { resolveRegister = resolve; }),
+          },
+          tools: { register: toolRegister1 },
+        },
+        { dbPath: dbPath1, autoBootstrap: false }
+      );
+
+      // Wait a microtask for register() to be invoked, then fire dispose before it resolves.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(listeners1['dispose']).toHaveLength(1);
+      const disposeDone1 = listeners1['dispose'][0]();
+      resolveRegister(visDispose1);
+      await applyPromise1;
+      await disposeDone1;
+      expect(visDispose1).toHaveBeenCalledOnce();
+      expect(toolRegister1).not.toHaveBeenCalled();
+
+      // 2. Partial tool registration failure triggers full cleanup and deletes nothing lingering
+      const dbPath2 = path.join(tmpDir, 'fail-cleanup.db');
+      const firstToolDispose = vi.fn();
+      const visDispose2 = vi.fn();
+      const sessionUnlisten = vi.fn();
+      let calls = 0;
+      await expect(
+        apply(
+          {
+            on: (evt: string) => (evt === 'session/event' ? sessionUnlisten : () => {}),
+            sessionProjections: { register: async () => visDispose2 },
+            tools: {
+              register: () => {
+                calls++;
+                if (calls === 1) return firstToolDispose;
+                throw new Error('tool register failed');
+              },
+            },
+          },
+          { dbPath: dbPath2, autoBootstrap: false }
+        )
+      ).resolves.toBeUndefined();
+      expect(firstToolDispose).toHaveBeenCalledOnce();
+      expect(visDispose2).toHaveBeenCalledOnce();
+      expect(sessionUnlisten).toHaveBeenCalledOnce();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

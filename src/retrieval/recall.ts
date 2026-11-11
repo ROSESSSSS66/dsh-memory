@@ -185,7 +185,8 @@ export function recall(
   }
 
   // 5. 预算装箱
-  const budget = ctx.budget ?? strategy.dynamicBudgetTokens ?? cfg.dynamicBudgetTokens ?? 1600;
+  const budget = cfg.dynamicBudgetTokens === 0 ? 0
+    : ctx.budget ?? strategy.dynamicBudgetTokens ?? cfg.dynamicBudgetTokens ?? 1600;
   const scopeCtx = { workspaceId: ctx.workspaceId, sessionId: ctx.sessionId };
   const selected = govern(scored, {
     budget,

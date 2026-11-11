@@ -1,14 +1,16 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import type { Db } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
 import { PromptSectionManager } from '../../src/dsh/prompt-section.js';
 import { handlePreStep } from '../../src/dsh/pre-step.js';
 import { upsertCandidate } from '../../src/core/writer.js';
+import { visibilityHarness } from '../helpers/visibility.js';
 
 describe('Pre-Step Waterfall Injection (pre-step.ts)', () => {
   let db: Db;
   let promptSections: PromptSectionManager;
+  let visibility: ReturnType<typeof visibilityHarness>;
   const ws1 = workspaceId('test-ws-prestep');
   const sess1 = 'sess_prestep_001';
   const fixedNow = new Date('2026-11-04T12:00:00Z').getTime();
@@ -16,7 +18,9 @@ describe('Pre-Step Waterfall Injection (pre-step.ts)', () => {
   beforeEach(() => {
     db = openDb(':memory:');
     promptSections = new PromptSectionManager(db);
+    visibility = visibilityHarness(db);
   });
+  afterEach(async () => { await visibility.close(); db.close(); });
 
   it('在同一个会话里连续问 5 个与数据库相关的问题 → 同一条记忆只注入一次 (验收项 4)', async () => {
     // 写入一条数据库记忆
@@ -78,10 +82,16 @@ describe('Pre-Step Waterfall Injection (pre-step.ts)', () => {
       const decision = await handlePreStep(payload, next, {
         db,
         promptSections,
+        getVisibleRefs: visibility.getVisibleRefs,
       });
 
       expect(decision.kind).toBe('enter');
       currentMessages = decision.messages;
+      for (const message of currentMessages.filter(m => m.source?.plugin === 'dsh-memory')) {
+        await visibility.commitEvent(payload.agent.session, {
+          type: 'user/message', seq: turn * 10, data: message, surfaceOp: { op: 'append' },
+        });
+      }
     }
 
     // 检查 injections 表：同一条记忆 memId 在该 session 中必须只被注入过 1 次

@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Self-evolving long-term memory system for DeepSeek Desktop (DSH) with zero-prompt recall, associative knowledge graphs, and workspace memory sync.",
   "keywords": [
     "dsh",
@@ -66,7 +66,8 @@
     "eval": "node dist/eval-cli.js"
   },
   "dependencies": {
-    "fzstd": "^0.1.1"
+    "fzstd": "^0.1.1",
+    "zod": "^4.6.7"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

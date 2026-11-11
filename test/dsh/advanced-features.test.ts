@@ -302,11 +302,15 @@ describe('Ecosystem Features Merged into DSH Memory', () => {
     it('tools.coreSet, coreRead, coreAppend and /memory core command', () => {
       // 1. Tool: coreSet
       const setRes = tools.coreSet({ block: 'persona', content: '保持极致严谨' }, { workspaceId: ws1 });
-      expect(setRes).toContain('created');
+      expect(setRes).toContain('pending user approval');
+      const proposedId = db.get<{ id: string }>("SELECT id FROM memories WHERE slot_key = 'core:persona'")!.id;
+      commands.handleCommand(`approve ${proposedId}`, { workspaceId: ws1, sessionId: sess1 });
 
       // 2. Tool: coreAppend
       const appRes = tools.coreAppend({ block: 'persona', text: '遵循规范代码模式' }, { workspaceId: ws1 });
-      expect(appRes).toContain('Appended');
+      expect(appRes).toContain('pending user approval');
+      const appendedId = db.get<{ id: string }>("SELECT id FROM memories WHERE slot_key = 'core:persona' AND status = 'candidate'")!.id;
+      commands.handleCommand(`approve ${appendedId}`, { workspaceId: ws1, sessionId: sess1 });
 
       // 3. Tool: coreRead
       const readRes = tools.coreRead({ block: 'persona' }, { workspaceId: ws1 });
@@ -330,6 +334,9 @@ describe('Ecosystem Features Merged into DSH Memory', () => {
         { workspaceId: ws1, sessionId: sess1 }
       );
       expect(setRes).toContain("Core memory block 'project'");
+      expect(setRes).toContain('pending user approval');
+      const proposedId = db.get<{ id: string }>("SELECT id FROM memories WHERE slot_key = 'core:project'")!.id;
+      commands.handleCommand(`approve ${proposedId}`, { workspaceId: ws1, sessionId: sess1 });
 
       const readRes = tools.unified(
         { action: 'core_read', block: 'project' },

@@ -861,6 +861,20 @@ export function autoHealMemoryHealth(
   try {
     const pendingProposals = listRepairProposals(db, 'candidate');
     for (const prop of pendingProposals) {
+      if (options.workspaceId) {
+        const targetMem = db.get<{ scope: string; workspace_id: string | null }>(
+          'SELECT scope, workspace_id FROM memories WHERE id = ?',
+          [prop.memoryId]
+        );
+        if (
+          !targetMem ||
+          (targetMem.scope !== 'user' &&
+            targetMem.scope !== 'global' &&
+            targetMem.workspace_id !== options.workspaceId)
+        ) {
+          continue;
+        }
+      }
       if (prop.expiresAt > now) {
         const res = approveRepairProposal(db, prop.id, 'autonomous-doctor', now);
         if (res.ok) {
@@ -890,6 +904,8 @@ export function autoHealMemoryHealth(
           `SELECT id FROM memories
            WHERE status = 'candidate'
              AND confidence >= 0.5
+             AND EXISTS (SELECT 1 FROM memory_sources s WHERE s.memory_id = memories.id
+               AND s.content_rev = memories.content_rev AND s.kind IN ('user', 'user_msg'))
              AND source_kind != 'web'
              AND COALESCE(origin_kinds, '') NOT LIKE '%"web"%'
              AND NOT (source_kind = 'rule' AND COALESCE(origin_kinds, '') LIKE '%"tool"%')
@@ -902,6 +918,8 @@ export function autoHealMemoryHealth(
           `SELECT id FROM memories
            WHERE status = 'candidate'
              AND confidence >= 0.5
+             AND EXISTS (SELECT 1 FROM memory_sources s WHERE s.memory_id = memories.id
+               AND s.content_rev = memories.content_rev AND s.kind IN ('user', 'user_msg'))
              AND source_kind != 'web'
              AND COALESCE(origin_kinds, '') NOT LIKE '%"web"%'
              AND NOT (source_kind = 'rule' AND COALESCE(origin_kinds, '') LIKE '%"tool"%')

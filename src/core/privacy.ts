@@ -1,4 +1,5 @@
 import { workspaceId } from './scope.js';
+import type { Db, MemoryRecord } from '../types.js';
 
 export interface RedactResult {
   text: string;
@@ -16,6 +17,13 @@ export function redactSecrets(input: string): RedactResult {
 
   let text = input;
   const detectedKinds: string[] = [];
+
+  // Cookie values can contain several credentials; redact the whole header, including JSON arrays.
+  const cookieRegex = /\b((?:set-)?cookie)(['"]?\s*[:=]\s*)(\[(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\]\r\n])*\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gi;
+  text = text.replace(cookieRegex, (_match, name, separator) => {
+    if (!detectedKinds.includes('COOKIE')) detectedKinds.push('COOKIE');
+    return `${name}${separator}[REDACTED:COOKIE]`;
+  });
 
   // 1. PEM 私钥
   const pemRegex = /-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY-----/g;
@@ -117,6 +125,55 @@ export function isWorkspaceExcluded(cwdOrId: string, excludeList: string[] = [])
     }
   }
   return false;
+}
+
+/** Filter before LIMIT so private records cannot starve public batches. */
+export function memoryPrivacyFilterSQL(excludeList: string[] = []): { sql: string; params: string[] } {
+  const excluded = [...new Set(excludeList.flatMap(item => [item, workspaceId(item)]))];
+  if (excluded.length === 0) return { sql: '1 = 1', params: [] };
+  const placeholders = excluded.map(() => '?').join(',');
+  return {
+    sql: `(COALESCE(memories.workspace_id, '') NOT IN (${placeholders})
+      AND NOT EXISTS (
+        SELECT 1 FROM memory_sources s JOIN session_workspace_owners e ON e.session_id = s.session_id
+        WHERE s.memory_id = memories.id AND e.workspace_id IN (${placeholders})
+      )
+      AND (COALESCE(memories.workspace_id, '') != '' OR (
+        EXISTS (SELECT 1 FROM memory_sources s WHERE s.memory_id = memories.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM memory_sources s WHERE s.memory_id = memories.id
+          AND NOT EXISTS (SELECT 1 FROM session_workspace_owners o WHERE o.session_id = s.session_id)
+        )
+      )))`,
+    params: [...excluded, ...excluded],
+  };
+}
+
+/** Shared legacy records without retained provenance cannot bypass workspace exclusions. */
+export function canSendMemoriesOffline(db: Db, memories: MemoryRecord[], excludeList: string[]): boolean {
+  if (!excludeList.length || !memories.length) return true;
+  const ids = [...new Set(memories.map(m => m.id))];
+  const filter = memoryPrivacyFilterSQL(excludeList);
+  const count = db.get<{ count: number }>(
+    `SELECT COUNT(*) AS count FROM memories WHERE id IN (${ids.map(() => '?').join(',')}) AND ${filter.sql}`,
+    [...ids, ...filter.params]
+  )?.count;
+  return count === ids.length;
+}
+
+/** Include source owners for shared memories, which do not have a workspace_id of their own. */
+export function memoryWorkspaceIds(db: Db, memories: MemoryRecord[]): string[] {
+  const owners = new Set(memories.map(m => m.workspace_id || '').filter(Boolean));
+  if (memories.length) {
+    const rows = db.all<{ workspace_id: string }>(
+      `SELECT DISTINCT e.workspace_id FROM memory_sources s
+       JOIN session_workspace_owners e ON e.session_id = s.session_id
+       WHERE s.memory_id IN (${memories.map(() => '?').join(',')})`,
+      memories.map(m => m.id)
+    );
+    for (const row of rows) if (row.workspace_id) owners.add(row.workspace_id);
+  }
+  return [...owners];
 }
 
 /**

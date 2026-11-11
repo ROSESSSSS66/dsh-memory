@@ -2,7 +2,7 @@ import type { Db, MemoryRecord } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import type { EvidenceLedger } from './types.js';
 import { tokenSet, jaccard, extractEntities } from '../core/text.js';
-import { redactSecrets } from '../core/privacy.js';
+import { redactSecrets, memoryWorkspaceIds, canSendMemoriesOffline } from '../core/privacy.js';
 import { PROMPT_CONSOLIDATE } from './prompts.js';
 import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
@@ -217,6 +217,9 @@ export async function consolidateCluster(
   options: { signal?: AbortSignal; fetchFn?: typeof fetch; now?: number } = {}
 ): Promise<ConsolidateClusterResult> {
   const now = options.now ?? Date.now();
+  if (!canSendMemoriesOffline(db, cluster.memories, cfg.excludeWorkspaces)) {
+    return { success: false, clusterKey: cluster.clusterKey, error: 'workspace_excluded' };
+  }
 
   // 1. 发送前校验源记录快照未发生变化
   if (!verifySnapshots(db, cluster.snapshots)) {
@@ -313,6 +316,7 @@ text: ${m.content}`
       maxOutputTokens: PROMPT_CONSOLIDATE.maxOutputTokens,
       cwd: cluster.workspaceId,
       workspaceId: cluster.workspaceId,
+      dataWorkspaceIds: memoryWorkspaceIds(db, cluster.memories),
       signal: options.signal,
       fetchFn: options.fetchFn,
     },

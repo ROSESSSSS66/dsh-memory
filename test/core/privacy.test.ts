@@ -2,6 +2,20 @@ import { describe, it, expect } from 'vitest';
 import { redactSecrets } from '../../src/core/privacy.js';
 
 describe('Privacy Redaction Enhancements (privacy.ts)', () => {
+  it.each([
+    'Cookie: session=syntheticCookieValue; csrf=anotherCookieValue\r\nAccept: text/plain',
+    'set-cookie: sid=syntheticCookieValue; Path=/; HttpOnly',
+    '{"Cookie":"sid=syntheticCookieValue; csrf=anotherCookieValue","Accept":"text/plain"}',
+    "curl -H 'Cookie: sid=syntheticCookieValue; csrf=anotherCookieValue'",
+    'headers: {"Set-Cookie": ["sid=syntheticCookieValue; HttpOnly", "csrf=anotherCookieValue"]}',
+  ])('redacts complete credential-bearing cookie headers: %s', (raw) => {
+    const result = redactSecrets(raw);
+    expect(result.hasSensitive).toBe(true);
+    expect(result.text).not.toContain('syntheticCookieValue');
+    expect(result.text).not.toContain('anotherCookieValue');
+    expect(result.text).toContain('[REDACTED:COOKIE]');
+  });
+
   it('should redact PEM private keys', () => {
     const raw = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0\n-----END RSA PRIVATE KEY-----';
     const res = redactSecrets(raw);

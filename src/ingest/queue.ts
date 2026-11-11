@@ -1,6 +1,7 @@
 import type { Db, RawEvent } from '../types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { runRules } from './rules.js';
+import type { CommittedInjection } from '../dsh/memory-visibility.js';
 
 /** 缓冲区上限：数据库长期不可写时防止内存无限增长 */
 const MAX_BUFFERED_EVENTS = 5000;
@@ -13,7 +14,7 @@ export interface IngestQueueOptions {
 export class IngestQueue {
   private db: Db;
   private cfg: PluginConfig;
-  private buffer: RawEvent[] = [];
+  private buffer: Array<RawEvent | CommittedInjection> = [];
   private timer: NodeJS.Timeout | null = null;
   private batchSize: number;
   private flushIntervalMs: number;
@@ -39,7 +40,7 @@ export class IngestQueue {
     }
   }
 
-  public push(event: RawEvent): void {
+  public push(event: RawEvent | CommittedInjection): void {
     if (this.isClosed) return;
     this.buffer.push(event);
     // 防御：数据库长期不可写时缓冲区不能无限增长，丢弃最旧事件
@@ -69,6 +70,27 @@ export class IngestQueue {
 
       this.db.transaction(() => {
         for (const ev of batch) {
+          if ('items' in ev) {
+            for (const item of ev.items) {
+              const result = this.db.run(
+                `INSERT OR IGNORE INTO injections (
+                  session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
+                ) VALUES (?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?)`,
+                [ev.sessionId, ev.turn, item.ref.id, item.ref.contentRev, item.rank,
+                  item.tokens, item.form, ev.strategyVersion, ev.time]
+              );
+              if (Number(result.changes) > 0) {
+                this.db.run('UPDATE memories SET use_count = use_count + 1, last_used_at = ? WHERE id = ?',
+                  [ev.time, item.ref.id]);
+                this.db.run(
+                  `UPDATE turn_metrics SET injected = injected + 1, inject_tokens = inject_tokens + ?
+                   WHERE session_id = ? AND turn = ?`,
+                  [item.tokens, ev.sessionId, ev.turn]
+                );
+              }
+            }
+            continue;
+          }
           let res;
           try {
             res = this.db.run(
@@ -90,6 +112,9 @@ export class IngestQueue {
               ]
             );
           } catch (insErr: any) {
+            const isConstraint = (Number(insErr?.errcode) & 0xff) === 19 ||
+              String(insErr?.code || '').startsWith('SQLITE_CONSTRAINT');
+            if (!isConstraint) throw insErr;
             // 单条事件违反约束（如非法 origin_kind）只跳过该条，不拖垮整批
             console.warn('[dsh-memory] raw_event insert skipped:', insErr?.message || insErr);
             continue;
@@ -120,12 +145,7 @@ export class IngestQueue {
     } finally {
       this.isFlushing = false;
       this.activeFlushPromise = null;
-      if (!this.isClosed && this.buffer.length >= this.batchSize) {
-        // 若在清空期间又积累了足够事件，继续下一次 flush
-        setTimeout(() => {
-          this.flush().catch(() => {});
-        }, 0);
-      }
+      // Requeued storage failures retry on the existing interval, not a zero-delay loop.
     }
     };
     this.activeFlushPromise = run();

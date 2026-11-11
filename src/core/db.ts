@@ -10,10 +10,10 @@ const { DatabaseSync } = req('node:sqlite');
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export function openDb(dbPath: string = ':memory:'): Db {
-  const rawDb = new DatabaseSync(dbPath);
+export function openDb(dbPath: string = ':memory:', options: { readOnly?: boolean } = {}): Db {
+  const rawDb = new DatabaseSync(dbPath, { readOnly: options.readOnly ?? false });
 
-  if (dbPath !== ':memory:') {
+  if (dbPath !== ':memory:' && !options.readOnly) {
     try {
       rawDb.exec('PRAGMA journal_mode = WAL;');
       rawDb.exec('PRAGMA synchronous = NORMAL;');
@@ -99,7 +99,7 @@ export function openDb(dbPath: string = ':memory:'): Db {
 
   // 执行迁移
   try {
-    runMigrations(dbWrapper);
+    if (!options.readOnly) runMigrations(dbWrapper);
   } catch (err) {
     try {
       rawDb.close();
@@ -133,6 +133,13 @@ function runMigrations(db: Db): void {
     db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '1')");
     db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('contract_version', '1.1')");
     db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('created_at', ?)", [now.toString()]);
+  }
+
+  if (schemaVersion < 2) {
+    db.transaction(() => {
+      db.exec(loadMigrationFile('002_session_owners.sql'));
+      db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '2')");
+    });
   }
 
   // 保证关系表反向索引与高规模检索覆盖索引存在 (性能优化)

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -73,10 +73,30 @@ describe('Security hardening', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     try {
       db.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch {}
+  });
+
+  it('does not follow redirects during the web LLM connection test', async () => {
+    const fetchFn = vi.fn(async () => new Response('', {
+      status: 307, headers: { location: 'https://unapproved.invalid' },
+    }));
+    vi.stubGlobal('fetch', fetchFn);
+    const { res, out } = makeRes();
+    await handler(makeReq({
+      method: 'POST', url: `${API_PREFIX}/llm/test`,
+      headers: { 'content-type': 'application/json' },
+      body: { baseURL: 'https://approved.invalid/v1', apiKeyEnv: '', apiKey: 'synthetic-test-key' },
+    }), res);
+    expect(out.body.ok).toBe(false);
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(fetchFn.mock.calls[0]).toEqual([
+      'https://approved.invalid/v1/chat/completions',
+      expect.objectContaining({ redirect: 'manual' }),
+    ]);
   });
 
   describe('Web API origin / host / CSRF guards', () => {

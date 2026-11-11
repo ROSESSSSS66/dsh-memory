@@ -331,5 +331,72 @@ describe('History Backfill (backfill.ts)', () => {
       expect(stats.newEventsAdded).toBe(2);
       expect(stats.memoriesCreated).toBe(1);
     });
+
+    it('过滤 DSH skill-catalog / time-context / tool-jobs / snapshot 合成 user/message，仅保留真实用户与兼容旧事件', () => {
+      const sessionFile = path.join(tmpDir, 'synthetic_sources.v4.jsonl');
+      const lines = [
+        JSON.stringify({ version: 4, cwd: testCwd }),
+        JSON.stringify({
+          seq: 1,
+          time: 1000,
+          type: 'user/message',
+          data: {
+            source: { kind: 'skill-catalog', form: 'catalog' },
+            content: [{ type: 'text', text: '记住：这是技能列表快照' }],
+          },
+        }),
+        JSON.stringify({
+          seq: 2,
+          time: 1001,
+          type: 'user/message',
+          data: {
+            source: { kind: 'time-context', form: 'snapshot' },
+            content: [{ type: 'text', text: '记住：当前时间 2026-11-11' }],
+          },
+        }),
+        JSON.stringify({
+          seq: 3,
+          time: 1002,
+          type: 'user/message',
+          data: {
+            source: { kind: 'tool-jobs', form: 'snapshot' },
+            content: [{ type: 'text', text: '记住：后台作业状态快照' }],
+          },
+        }),
+        JSON.stringify({
+          seq: 4,
+          time: 1003,
+          type: 'user/message',
+          data: {
+            source: { kind: 'custom-sys', form: 'snapshot' },
+            content: [{ type: 'text', text: '记住：其他快照内容' }],
+          },
+        }),
+        JSON.stringify({
+          seq: 5,
+          time: 1004,
+          type: 'user/message',
+          data: {
+            source: { kind: 'user' },
+            content: [{ type: 'text', text: '记住：本地回填应使用 test-user 账号' }],
+          },
+        }),
+      ];
+
+      fs.writeFileSync(sessionFile, lines.join('\n') + '\n', 'utf8');
+
+      const stats = runBackfill(db, {
+        filePaths: [sessionFile],
+        dryRun: false,
+      });
+
+      expect(stats.rawEvents).toBe(5);
+      expect(stats.filteredEvents).toBe(4);
+      expect(stats.newEventsAdded).toBe(1);
+      expect(stats.memoriesCreated).toBe(1);
+      const rawRows = db.all<{ seq: number; text: string }>('SELECT seq, text FROM raw_events');
+      expect(rawRows).toHaveLength(1);
+      expect(rawRows[0].seq).toBe(5);
+    });
   });
 });

@@ -40,6 +40,7 @@ export interface OfflineLLMParams {
   maxOutputTokens: number;
   cwd: string;
   workspaceId: string;
+  dataWorkspaceIds?: string[];
   signal?: AbortSignal;
   jobDeadline?: number;
   fetchFn?: typeof fetch;
@@ -240,7 +241,8 @@ export async function callOfflineLLM(
   }
 
   // 检查工作区排除
-  if (isWorkspaceExcluded(params.cwd, cfg.excludeWorkspaces)) {
+  if ([params.cwd, params.workspaceId, ...(params.dataWorkspaceIds || [])]
+    .some(owner => isWorkspaceExcluded(owner, cfg.excludeWorkspaces))) {
     return { ok: false, error: 'workspace_excluded' };
   }
 
@@ -389,6 +391,7 @@ export async function callOfflineLLM(
         headers,
         body: requestBody,
         signal: timeoutController.signal,
+        redirect: 'manual',
       });
 
       if (!res.ok) {
@@ -400,6 +403,10 @@ export async function callOfflineLLM(
           ok: 0,
           note: `http_${res.status}`,
         });
+
+        if (res.status >= 300 && res.status < 400) {
+          return { ok: false, error: 'redirect_not_allowed', ledgerId };
+        }
 
         // 4xx 不重试（429 限流除外）
         if (res.status >= 400 && res.status < 500 && res.status !== 429) {

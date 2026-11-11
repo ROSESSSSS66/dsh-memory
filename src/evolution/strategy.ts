@@ -27,7 +27,8 @@ export function validateAndClampStrategy(
 ): StrategyConfig {
   const dynamicCap = Math.max(0, cfg.hardBudgetTokens - cfg.stableBudgetTokens);
   const minDyn = Math.min(800, dynamicCap);
-  const dynBudget = Math.max(minDyn, Math.min(strategy.dynamicBudgetTokens || 1600, dynamicCap));
+  const dynBudget = cfg.dynamicBudgetTokens === 0 || strategy.dynamicBudgetTokens === 0
+    ? 0 : Math.max(minDyn, Math.min(strategy.dynamicBudgetTokens ?? 1600, dynamicCap));
 
   const maxItems = Math.max(1, Math.min(Math.round(strategy.maxItems || 6), cfg.maxLabItems || 12));
   const minRelevance = Math.max(0.05, Math.min(strategy.minRelevance || 0.15, 0.4));

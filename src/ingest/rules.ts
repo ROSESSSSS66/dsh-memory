@@ -247,7 +247,12 @@ export function runRules(
         'INSERT OR IGNORE INTO jobs (kind, key, payload, status, created_at, next_eligible_at) VALUES (\'reflect\', ?, ?, \'queued\', ?, 0)',
         [
           jobKey,
-          JSON.stringify({ sessionId: event.session_id, turn: prevTurn, triggerSeq: event.seq }),
+          JSON.stringify({
+            sessionId: event.session_id,
+            turn: prevTurn,
+            triggerSeq: event.seq,
+            ...(event.workspace_id ? { workspaceId: event.workspace_id } : {}),
+          }),
           now,
         ]
       );
@@ -370,7 +375,12 @@ export function runRules(
         'INSERT OR IGNORE INTO jobs (kind, key, payload, status, created_at, next_eligible_at) VALUES (\'distill\', ?, ?, \'queued\', ?, 0)',
         [
           jobKey,
-          JSON.stringify({ sessionId: event.session_id, turn: event.turn, toolName: event.tool_name }),
+          JSON.stringify({
+            sessionId: event.session_id,
+            turn: event.turn,
+            toolName: event.tool_name,
+            ...(event.workspace_id ? { workspaceId: event.workspace_id } : {}),
+          }),
           now,
         ]
       );

@@ -9,12 +9,15 @@ import { recall } from '../retrieval/recall.js';
 import { getActiveStrategy } from '../evolution/strategy.js';
 import { evaluateTurnOutcome } from '../evolution/outcome.js';
 import type { PromptSectionManager } from './prompt-section.js';
+import { isIgnoredUserMessageSource } from './session-listener.js';
 
 export interface PreStepContext {
   db: Db;
   promptSections: PromptSectionManager;
   cfg?: PluginConfig;
   strategyVersion?: number;
+  getVisibleRefs?: (session: any) => Set<string> | null;
+  flushIngest?: () => Promise<unknown>;
 }
 
 /**
@@ -48,16 +51,36 @@ export async function handlePreStep(
   }
 
   try {
-    // 3. 解析作用域与 session 信息
+    // 3. 解析作用域与 session 信息 (DSH 真实 Session 路径位于 session.header.cwd)
     const session = payload?.session || payload?.agent?.session;
-    const cwd = session?.cwd || session?.workspaceId || payload?.agent?.cwd || process.cwd();
+    const sessionId = session?.id || payload?.sessionId || 'default_session';
+    let cwd =
+      session?.cwd ||
+      session?.header?.cwd ||
+      session?.workspaceId ||
+      payload?.agent?.cwd ||
+      payload?.agent?.session?.cwd ||
+      payload?.agent?.session?.header?.cwd ||
+      payload?.agent?.session?.workspaceId ||
+      '';
+    if (!cwd && sessionId !== 'default_session') {
+      try {
+        const owner = ctx.db.get<{ workspace_id: string }>(
+          "SELECT workspace_id FROM session_workspace_owners WHERE session_id = ? AND workspace_id != '' LIMIT 1",
+          [sessionId]
+        );
+        if (owner?.workspace_id) cwd = owner.workspace_id;
+      } catch {}
+    }
+    if (!cwd) {
+      cwd = process.cwd();
+    }
 
     if (isWorkspaceExcluded(cwd, cfg.excludeWorkspaces)) {
       return decision;
     }
 
     const wsId = workspaceId(cwd);
-    const sessionId = session?.id || payload?.sessionId || 'default_session';
     const turn = typeof payload?.turn === 'number' ? payload.turn : 0;
     const agentId = payload?.agent?.id || 'default_agent';
 
@@ -73,9 +96,9 @@ export async function handlePreStep(
 
     for (const msg of decision.messages) {
       const source = msg?.source;
-      // 跳过插件自身或运行时上下文回声
+      // 跳过插件自身及运行时/时间/技能目录快照回声
       if (source?.kind === 'plugin' && source?.plugin === 'dsh-memory') continue;
-      if (source?.kind === 'runtime-context') continue;
+      if (isIgnoredUserMessageSource(source)) continue;
 
       if (msg.role === 'user' && source?.kind === 'user') {
         if (Array.isArray(msg.content)) {
@@ -95,6 +118,7 @@ export async function handlePreStep(
       }
     }
 
+    await ctx.flushIngest?.();
     // 5.1 若当前为后续轮次且有用户输入，评估上一轮结果 (§5.9)
     if (turn > 0 && userText.trim()) {
       try {
@@ -116,23 +140,18 @@ export async function handlePreStep(
       alreadyInjected.add(ref);
     }
 
-    // B. 本 session 历史注入
-    const lastCompaction = ctx.db.get<{ max_t: number | null }>("SELECT MAX(time) as max_t FROM raw_events WHERE session_id = ? AND role = 'compaction'", [sessionId])?.max_t || 0;
-    const historyRows = ctx.db.all<{ memory_id: string; content_rev: number }>(
-      'SELECT memory_id, content_rev FROM injections WHERE session_id = ? AND created_at >= ?',
-      [sessionId, lastCompaction]
-    );
-    for (const row of historyRows) {
-      alreadyInjected.add(`${row.memory_id}@${row.content_rev}`);
-    }
+    // B. Only committed messages still visible in the host surface suppress injection.
+    const visibleRefs = ctx.getVisibleRefs?.(session);
+    if (visibleRefs === null) return decision;
+    for (const ref of visibleRefs || []) alreadyInjected.add(ref);
 
     // 7. 计算动态层可用预算 (统一采用 estimateTokens 估值口径，避免 UTF-8 字节数与 token 预算混淆)
     const stableTokens =
       typeof ctx.promptSections.getStableEstimatedTokens === 'function'
         ? ctx.promptSections.getStableEstimatedTokens(agentId)
         : ctx.promptSections.getStableTokens(agentId);
-    const hardBudget = cfg.hardBudgetTokens || 3200;
-    const dynamicBudget = Math.min(cfg.dynamicBudgetTokens || 1600, hardBudget - stableTokens);
+    const hardBudget = cfg.hardBudgetTokens ?? 3200;
+    const dynamicBudget = Math.min(cfg.dynamicBudgetTokens ?? 1600, hardBudget - stableTokens);
 
     if (dynamicBudget <= 0) {
       return decision;
@@ -163,8 +182,6 @@ export async function handlePreStep(
 
     const queryTokens = estimateTokens(userText);
     const candidatesCount = recallResult.candidatesCount ?? recallResult.items.length;
-    const injectedCount = recallResult.items.length;
-    const injectTokens = recallResult.items.reduce((acc, it) => acc + (it.tokens || 0), 0);
 
     // 8.1 记录轮次遥测指标 (供 Sentinel 监控与离线策略实验室使用)
     try {
@@ -185,8 +202,8 @@ export async function handlePreStep(
           turn,
           queryTokens,
           candidatesCount,
-          injectedCount,
-          injectTokens,
+          0,
+          0,
           recallResult.latencyMs,
           strategyVersion,
           now,
@@ -197,34 +214,6 @@ export async function handlePreStep(
     if (!recallResult.block || recallResult.items.length === 0) {
       return decision;
     }
-
-    // 9. 记录注入与更新使用计数
-    ctx.db.transaction(() => {
-      recallResult.items.forEach((item, idx) => {
-        const m = item.memory;
-        ctx.db.run(
-          `INSERT OR IGNORE INTO injections (
-            session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
-          ) VALUES (?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?)`,
-          [
-            sessionId,
-            turn,
-            m.id,
-            m.content_rev,
-            idx + 1,
-            item.tokens,
-            item.form,
-            strategyVersion,
-            now,
-          ]
-        );
-
-        ctx.db.run(
-          `UPDATE memories SET use_count = use_count + 1, last_used_at = ? WHERE id = ?`,
-          [now, m.id]
-        );
-      });
-    });
 
     // 10. 构造注入消息并追加到 decision.messages 尾部（遵循 §A.6.3 宿主消息不可变性契约）
     const frozenContent = Object.freeze([
@@ -242,6 +231,13 @@ export async function handlePreStep(
       kind: 'plugin' as const,
       plugin: 'dsh-memory',
       memoryRefs: frozenMemoryRefs,
+      memoryInjection: Object.freeze({
+        turn,
+        strategyVersion,
+        items: Object.freeze(recallResult.items.map(item =>
+          Object.freeze({ tokens: item.tokens, form: item.form })
+        )),
+      }),
     });
     const memoryMsg = Object.freeze({
       id: crypto.randomUUID(),

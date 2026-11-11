@@ -1,10 +1,12 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { performance } from 'node:perf_hooks';
 import { openDb } from '../../src/core/db.js';
 import type { Db } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
 import { renderStableLayer, PromptSectionManager } from '../../src/dsh/prompt-section.js';
 import { upsertCandidate } from '../../src/core/writer.js';
 import { budgetTokens } from '../../src/core/tokens.js';
+import { DEFAULTS } from '../../src/config.js';
 
 describe('Prompt Section (prompt-section.ts)', () => {
   let db: Db;
@@ -15,6 +17,54 @@ describe('Prompt Section (prompt-section.ts)', () => {
 
   beforeEach(() => {
     db = openDb(':memory:');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+  });
+
+  it('keeps 500 pinned records within the online latency budget and preserves highest utility', () => {
+    for (let i = 0; i < 500; i++) {
+      const result = upsertCandidate(db, {
+        type: 'semantic', content: `Pinned architecture rule ${i}: validate each release.`,
+        scope: 'workspace', workspaceId: ws1, source_kind: 'user', actor: 'user',
+        origin_kinds: ['user'], confidence: 0.9,
+        sources: [{ session_id: sess1, seq: i, kind: 'user' }],
+      });
+      if (!('id' in result)) throw new Error(JSON.stringify(result));
+      db.run('UPDATE memories SET pinned = 1, utility = ? WHERE id = ?', [i / 500, result.id]);
+    }
+    const start = performance.now();
+    const result = renderStableLayer(db, { workspaceId: ws1, sessionId: sess1 }, DEFAULTS);
+    const elapsed = performance.now() - start;
+    console.log(`[Stable layer benchmark] 500 pinned memories: ${elapsed.toFixed(2)}ms`);
+    expect(result.text).toContain('rule 499:');
+    expect(result.text).not.toContain('rule 0:');
+    expect(result.visibleRefs.size).toBeGreaterThan(0);
+    expect(budgetTokens(result.text)).toBeLessThanOrEqual(DEFAULTS.stableBudgetTokens);
+    expect(elapsed).toBeLessThan(DEFAULTS.onlineBudgetMs);
+  });
+
+  it('does not mark stable refs visible when registration fails and retries after recovery', () => {
+    const result = upsertCandidate(db, {
+      type: 'semantic', content: 'Pinned rule awaiting prompt registration.',
+      scope: 'workspace', workspaceId: ws1, source_kind: 'user', actor: 'user',
+      origin_kinds: ['user'], confidence: 0.9,
+      sources: [{ session_id: sess1, seq: 1, kind: 'user' }],
+    });
+    if (!('id' in result)) throw new Error(JSON.stringify(result));
+    db.run('UPDATE memories SET pinned = 1 WHERE id = ?', [result.id]);
+    const section = vi.fn().mockImplementationOnce(() => { throw new Error('host unavailable'); })
+      .mockReturnValue(() => {});
+    const manager = new PromptSectionManager(db);
+    const agent = { id: 'retry-agent', ctx: { systemPrompt: { section } } };
+    manager.updateSection(agent, { workspaceId: ws1 });
+    expect(manager.getVisibleRefs(agent.id).size).toBe(0);
+    expect(manager.getStableTokens(agent.id)).toBe(0);
+    manager.updateSection(agent, { workspaceId: ws1 });
+    expect(manager.getVisibleRefs(agent.id).has(`${result.id}@1`)).toBe(true);
+    manager.disposeAll();
   });
 
   it('should only render pinned=1 and active/frozen records in scope ordered by id ASC', () => {

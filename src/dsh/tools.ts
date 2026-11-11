@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import type { Db, MemoryRecord, MemoryType } from '../types.js';
 import { get, sources } from '../core/store.js';
-import { workspaceId } from '../core/scope.js';
+import { workspaceId, scopeFilterSQL } from '../core/scope.js';
 import { buildQueryPlan } from '../retrieval/query.js';
 import { runAllChannels, expandGraphNeighbors } from '../retrieval/channels.js';
 import { fuseCandidates } from '../retrieval/fuse.js';
@@ -195,21 +195,24 @@ export class MemoryTools {
       const cleanSummary = redactSecrets(m.summary || m.content).text;
       const line = `[${tag} ${m.id}] ${cleanSummary} (c=${m.confidence.toFixed(2)}, u=${m.utility.toFixed(2)})`;
       lines.push(line);
+    }
 
-      // 写一条 layer='tool' 的 injections 记录
+    let output = lines.join('\n');
+    while (lines.length > 0 && budgetTokens(output) > 800) {
+      lines.pop();
+      output = lines.join('\n');
+    }
+    if (!lines.length) return 'Error: memory summaries exceed token limit (800 tokens).';
+
+    // Only returned references may receive feedback or outcome attribution.
+    for (let i = 0; i < lines.length; i++) {
+      const m = filtered[i].memory;
       this.db.run(
         `INSERT OR IGNORE INTO injections (
           session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
         ) VALUES (?, ?, ?, ?, 'tool', ?, ?, 'summary', ?, ?)`,
         [sessionId, turn, m.id, m.content_rev, i + 1, m.summary_cost, stratVer, now]
       );
-    }
-
-    let output = lines.join('\n');
-    // 约束在 800 tokens 以内
-    while (lines.length > 1 && budgetTokens(output) > 800) {
-      lines.pop();
-      output = lines.join('\n');
     }
 
     return output;
@@ -229,7 +232,7 @@ export class MemoryTools {
     const wsId = workspaceId(agentCtx.workspaceId);
     let mem: MemoryRecord | undefined;
     try {
-      mem = get(this.db, rawId, { workspaceId: wsId });
+      mem = get(this.db, rawId, { workspaceId: wsId, sessionId: agentCtx.sessionId });
     } catch (err: any) {
       return `Error: ${err?.message || 'Memory lookup failed'}`;
     }
@@ -239,16 +242,6 @@ export class MemoryTools {
     }
     if (mem.status !== 'active' && mem.status !== 'frozen') {
       return `Error: memory '${rawId}' is not active.`;
-    }
-
-    if (agentCtx.sessionId) {
-      const stratVer = getActiveStrategy(this.db, this.cfg).version || this.strategyVersion;
-      this.db.run(
-        `INSERT OR IGNORE INTO injections (
-          session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
-        ) VALUES (?, ?, ?, ?, 'tool', 1, ?, 'content', ?, ?)`,
-        [agentCtx.sessionId, agentCtx.turn ?? 0, mem.id, mem.content_rev, mem.token_cost, stratVer, Date.now()]
-      );
     }
 
     // 提取正文并脱敏
@@ -263,6 +256,7 @@ export class MemoryTools {
     });
 
     // 1-hop 因果与拓扑关联 (supersedes / derived_from / contradicts / related)
+    const relationScope = scopeFilterSQL({ workspaceId: wsId, sessionId: agentCtx.sessionId });
     const relEdges = this.db.all<{
       from_id: string;
       to_id: string;
@@ -274,11 +268,12 @@ export class MemoryTools {
       `SELECT r.from_id, r.to_id, r.rel,
               m2.id as other_id, m2.summary as other_summary, m2.status as other_status
        FROM memory_relations r
-       JOIN memories m2 ON m2.id = CASE WHEN r.from_id = ? THEN r.to_id ELSE r.from_id END
+       JOIN (SELECT * FROM memories WHERE ${relationScope.sql}) m2
+         ON m2.id = CASE WHEN r.from_id = ? THEN r.to_id ELSE r.from_id END
        WHERE r.from_id = ? OR r.to_id = ?
        ORDER BY r.created_at DESC
        LIMIT 4`,
-      [mem.id, mem.id, mem.id]
+      [...relationScope.params, mem.id, mem.id, mem.id]
     );
     const relLines = relEdges.map((r) => {
       const dir = r.from_id === mem!.id ? `-> ${r.rel} ->` : `<- ${r.rel} <-`;
@@ -307,6 +302,15 @@ export class MemoryTools {
       }
     }
 
+    if (agentCtx.sessionId) {
+      const stratVer = getActiveStrategy(this.db, this.cfg).version || this.strategyVersion;
+      this.db.run(
+        `INSERT OR IGNORE INTO injections (
+          session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
+        ) VALUES (?, ?, ?, ?, 'tool', 1, ?, 'content', ?, ?)`,
+        [agentCtx.sessionId, agentCtx.turn ?? 0, mem.id, mem.content_rev, mem.token_cost, stratVer, Date.now()]
+      );
+    }
     return res;
   }
 
@@ -324,7 +328,18 @@ export class MemoryTools {
       return 'Error: valid id and integer contentRev are required';
     }
 
-    const mem = this.db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [rawId]);
+    let mem;
+    try {
+      mem = get(
+        this.db,
+        rawId,
+        agentCtx.workspaceId !== undefined
+          ? { workspaceId: workspaceId(agentCtx.workspaceId), sessionId: agentCtx.sessionId }
+          : undefined
+      );
+    } catch (err: any) {
+      return `Error: ${err?.message || 'Memory lookup failed'}`;
+    }
     if (!mem) {
       return `Error: memory '${rawId}' not found`;
     }
@@ -337,9 +352,9 @@ export class MemoryTools {
     const now = Date.now();
 
     // 检查本轮是否确实注入或展开过该引用
-    const inj = this.db.get<{ id: string }>(
+    const inj = this.db.get<{ memory_id: string }>(
       'SELECT memory_id FROM injections WHERE session_id = ? AND memory_id = ? AND content_rev = ?',
-      [sessionId, rawId, contentRev]
+      [sessionId, mem.id, contentRev]
     );
 
     if (!inj) {
@@ -365,7 +380,7 @@ export class MemoryTools {
           params.helpful ? 1 : 0,
           params.helpful ? 0 : 1,
           now,
-          rawId,
+          mem.id,
         ]
       );
 
@@ -373,7 +388,7 @@ export class MemoryTools {
         `UPDATE injections
          SET outcome = ?, used = 1
          WHERE session_id = ? AND memory_id = ? AND content_rev = ?`,
-        [r, sessionId, rawId, contentRev]
+        [r, sessionId, mem.id, contentRev]
       );
 
       if (!params.helpful) {
@@ -381,7 +396,7 @@ export class MemoryTools {
           enqueueRepairJobIfEligible(
             this.db,
             {
-              memoryId: rawId,
+              memoryId: mem.id,
               sessionId,
               query: params.note || 'Negative tool feedback',
               turn,
@@ -464,7 +479,7 @@ export class MemoryTools {
    */
   public confirm(
     params: { id: string },
-    agentCtx: { workspaceId: string }
+    agentCtx: { workspaceId: string; sessionId?: string }
   ): string {
     if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const rawId = (params.id || '').trim();
@@ -473,7 +488,7 @@ export class MemoryTools {
     const wsId = workspaceId(agentCtx.workspaceId);
     let mem: MemoryRecord | undefined;
     try {
-      mem = get(this.db, rawId, { workspaceId: wsId });
+      mem = get(this.db, rawId, { workspaceId: wsId, sessionId: agentCtx.sessionId });
     } catch (err: any) {
       return `Error: ${err?.message || 'Memory lookup failed'}`;
     }
@@ -490,7 +505,7 @@ export class MemoryTools {
    */
   public merge(
     params: { sourceId: string; targetId: string; reason?: string },
-    agentCtx: { workspaceId: string }
+    agentCtx: { workspaceId: string; sessionId?: string }
   ): string {
     if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const srcId = (params.sourceId || '').trim();
@@ -501,8 +516,8 @@ export class MemoryTools {
     let srcMem: MemoryRecord | undefined;
     let tgtMem: MemoryRecord | undefined;
     try {
-      srcMem = get(this.db, srcId, { workspaceId: wsId });
-      tgtMem = get(this.db, tgtId, { workspaceId: wsId });
+      srcMem = get(this.db, srcId, { workspaceId: wsId, sessionId: agentCtx.sessionId });
+      tgtMem = get(this.db, tgtId, { workspaceId: wsId, sessionId: agentCtx.sessionId });
     } catch (err: any) {
       return `Error: ${err?.message || 'Lookup failed'}`;
     }
@@ -540,7 +555,7 @@ export class MemoryTools {
    */
   public coreSet(
     params: { block: string; content: string },
-    agentCtx: { workspaceId: string }
+    agentCtx: { workspaceId: string; sessionId?: string }
   ): string {
     const wsId = workspaceId(agentCtx.workspaceId);
     if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
@@ -548,7 +563,10 @@ export class MemoryTools {
       return 'Error: both block and content are required';
     }
     try {
-      const res = setCoreMemory(this.db, params.block, params.content, { workspaceId: wsId, actor: 'assistant' });
+      const res = setCoreMemory(this.db, params.block, params.content, { workspaceId: wsId, sessionId: agentCtx.sessionId, actor: 'assistant' });
+      if (res.action === 'proposed') {
+        return `Core memory block '${params.block}' saved as candidate ${res.id}; pending user approval.`;
+      }
       return `Core memory block '${params.block}' ${res.action} successfully (id: ${res.id}).`;
     } catch (err: any) {
       return `Error: ${err?.message || 'Failed to set core memory'}`;
@@ -560,7 +578,7 @@ export class MemoryTools {
    */
   public coreAppend(
     params: { block: string; text: string },
-    agentCtx: { workspaceId: string }
+    agentCtx: { workspaceId: string; sessionId?: string }
   ): string {
     const wsId = workspaceId(agentCtx.workspaceId);
     if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
@@ -568,7 +586,10 @@ export class MemoryTools {
       return 'Error: both block and text are required';
     }
     try {
-      appendCoreMemory(this.db, params.block, params.text, { workspaceId: wsId, actor: 'assistant' });
+      const res = appendCoreMemory(this.db, params.block, params.text, { workspaceId: wsId, sessionId: agentCtx.sessionId, actor: 'assistant' });
+      if (res.action === 'proposed') {
+        return `Core memory block '${params.block}' append saved as candidate ${res.id}; pending user approval.`;
+      }
       return `Appended to core memory block '${params.block}' successfully.`;
     } catch (err: any) {
       return `Error: ${err?.message || 'Failed to append to core memory'}`;
