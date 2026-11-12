@@ -1398,7 +1398,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           sendJson(res, 200, {
             ok: true,
-            version: '0.8.1',
+            version: '0.8.2',
             exportedAt: Date.now(),
             total: items.length,
             memories: items.map(({ embedding: _emb, ...rest }) => rest),
