@@ -8,14 +8,22 @@
   <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
   <img src="https://img.shields.io/badge/Tests-536_Passed_(61_Suites)-success?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Recall%40Inject-100.0%25_(120%2F120)-blueviolet?style=flat-square" alt="Recall Rate" />
-  <img src="https://img.shields.io/badge/Online_Latency-p95_0.9ms-red?style=flat-square" alt="Latency" />
+  <img src="https://img.shields.io/badge/Online_Latency-p95_1.2ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />
 </p>
 
 <p align="center">
-  <b>专为 DeepSeek Desktop (DSH) 打造的亚毫秒级、零干预自进化、可解释长期记忆引擎</b><br>
-  纯本地毫秒级多路召回 · 动态上下文装箱控费 · 核心偏好自主演进 · 极简侧栏控制台
+  <b>让 DeepSeek Desktop (DSH) 记住你的项目、偏好与踩过的坑</b><br>
+  纯本地 · 毫秒级召回 · 自动沉淀与纠错 · 开箱即用
 </p>
+
+> **一句话介绍**：`dsh-memory` 是 DSH 的长期记忆插件。它在后台从你的会话里自动提炼偏好、项目约定和经验教训，在每轮提问前只把最相关的几条精准注入上下文；事实变了会自动取代旧结论，用错了会自我修复，全程无需手动整理。
+>
+> | 🔒 纯本地 | ⚡ 极低延迟 | 🎯 省 Token | 🧬 自进化 |
+> |---|---|---|---|
+> | 在线检索零网络请求，断网可用；密钥落库前脱敏 | 万级记忆 p95 约 1ms | 动态预算装箱，单轮平均约 170 tokens | 后台空闲时蒸馏、调和、修复，越用越准 |
+>
+> **三步上手**：`npm i <Release 的 .tgz 链接>` → 在 `cordis.patch.yml` 挂载插件 → 打开 DSH 即自动初始化记忆。详见 [快速上手](#-快速上手与挂载)。
 
 <p align="center">
   <a href="#-为什么选择-dsh-memory">核心优势</a> •
@@ -62,9 +70,9 @@
 - 🎯 **动态 Token 预算控制**：采用次模贪心背包算法动态装箱，记忆库从 1,000 条扩容至 10,000 条时单轮注入仅增加 0.28%，彻底杜绝上下文爆炸与窗口挤占。
 - 🧬 **零干预闭环自愈**：后台空闲自动执行经验蒸馏、冲突调和与失效记忆淘汰，支持检索自愈与策略寻优，越用越懂你的工程习惯。
 
-### 📚 v0.7.0 核心算法学术论文底座 (2025–2026 前沿研究落地)
+### 📚 核心算法学术论文底座 (2025–2026 前沿研究落地)
 
-| 论文 / 范式来源 | 核心机制 | 在 `dsh-memory` v0.7.0 中的工程落地 |
+| 论文 / 范式来源 | 核心机制 | 在 `dsh-memory` 中的工程落地 |
 |---|---|---|
 | **HippoRAG 2** (*From RAG to Memory: Non-Parametric Continual Learning*, ICML 2025, arXiv:2502.14802) | **多源汇聚 PPR 激活累加 & 多跳阻尼传播** | `expandGraphNeighbors` 与 `fuseCandidates` 支持 1~2 跳阻尼传播（$\gamma = 0.45$），当多个硬门槛种子节点汇聚激活同一关联邻居时，累加 RRF 能量并授予多源协同增益（`convergentSeeds`） |
 | **SYNAPSE** (*Empowering LLM Agents with Episodic-Semantic Memory via Spreading Activation*, Jan 2026, arXiv:2601.02744) | **ACT-R 扇出注意力稀释 (Fan Effect)** 与间隔重复 | 实现 `computeFanAttenuation(degree)`：高连接度 Hub 种子节点度数越高，单条边激活权重按 $1 / (1 + 0.25 \ln d)$ 自动衰减；结合 `computeActRBaseActivation` 频次强化半衰期 |
@@ -73,13 +81,24 @@
 | **Zep / Graphiti & Mem0** (arXiv:2501.13956, 2025) | **蒸馏-调和全闭环与规范槽位推演** | `extractor.ts` 与 `reconciler.ts` 深度打通：慢环蒸馏产物自动归一化工作区哈希并结合规范槽位与混合相似度决断 `ADD / UPDATE / DELETE / NOOP`，自动编织新旧技术栈演进因果边 |
 | **Letta / MemGPT + MemRL / EvolveMem** (2025–2026) | **常驻核心记忆自主同步与帕累托策略进化** | `syncAutonomousCoreMemory` 将经实战检验的高置信偏好/规范幂等同步至 `human` / `project` 核心块；`lab.ts` 基于真实收获样本（`eval_cases`）执行策略变异寻优与哨兵自动回滚 |
 
+### 🛡️ v0.8.x 安全加固与 DSH 实机运行修复
+
+| 方向 | 要点 |
+|---|---|
+| **数据归属 (Schema v2)** | 新增持久化 `session_workspace_owners`，所有离线入口（distill / curate / reflect / repair / consolidate）按实际归属校验；共享记忆按来源过滤，私有记录在 `LIMIT` 前即被排除；导入保留来源归属 |
+| **模型信任边界** | 模型自身置信度或确认次数不能批准候选；`core:*` 槽位不可被模型占用；无证据 `discard` 不得归档用户确认过的记忆；系统注入消息不得冒充用户证据；重复确认/负反馈不能刷指标 |
+| **离线外发防护** | 整条 Cookie / Set-Cookie 头脱敏；LLM 请求与连通测试禁止自动跟随重定向；配置接口校验 Base URL 与密钥环境变量名白名单 |
+| **备份与恢复** | 备份、导出、导入前快照统一使用 `VACUUM INTO` + 只读校验 + 原子发布，快照失败即中止导入 |
+| **性能与稳态** | 消除引用校验与 Cookie 脱敏的正则回溯、每轮 O(n²) 聚类；失败任务不再复活空耗配额，相同批次不重发 |
+| **DSH 宿主兼容** | tsup 内联 `zod` / `fzstd`，修复 ESM 导入失败；注入消息使用 producer-owned source kind；修复 `ctx.agent` 缺失、`session.header.cwd` 丢失与合成消息污染 |
+
 ---
 
 ## 📊 主流记忆方案横向对比
 
 `dsh-memory` 并非单一的向量检索插件，而是将业界五大前沿 Agent 记忆范式深度融合于纯本地双环引擎之中：
 
-| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.7.0)** |
+| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.8.1)** |
 |---|---|---|---|---|
 | **安装后冷启动** | ❌ 空白库，需手动逐条喂入 | ❌ 需手动编写多份 Markdown | ❌ 空白库，需业务侧自行灌库 | **✅ `npm install` 后 `postinstall` 与首次启动全自动扫描工程并初始化记忆** |
 | **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **`0.6 ~ 1.4ms` (p95，纯本地七路 SYNAPSE + A-Mem + 向量混合召回)** |
@@ -162,7 +181,7 @@ flowchart TD
 
 ```text
 dsh-memory/
-├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.7.0)
+├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.8.1)
 ├─ tsconfig.json           # 严格 ESM TypeScript 编译配置
 ├─ tsup.config.ts          # 构建打包配置 (服务端插件 + 独立评测 CLI)
 ├─ vitest.config.ts        # 自动化单元测试与集成测试配置
@@ -185,6 +204,7 @@ dsh-memory/
 │  │  ├─ bootstrap.ts      # 安装后与首次启动全自动工作区记忆冷启动初始化引擎
 │  │  ├─ markdown.ts       # Markdown 双向同步、Cline Memory Bank 与 .trash 回收站
 │  │  ├─ vector.ts         # [v0.7.0] 128 维确定性语义特征向量 (含路径前缀/中文 3-gram) 与 4096 容量 LRU 缓存
+│  │  ├─ trust.ts          # [v0.8.x] 用户证据判定：模型自身置信度/确认次数不构成独立证据
 │  │  └─ health.ts         # [v0.7.0] 记忆库体检评分、RIME 自动应用、候选晋升与 Core Memory 自主同步
 │  ├─ ingest/              # 增量事件摄入与历史回填
 │  │  ├─ rules.ts          # 零延迟本地正则规则抽取器 (高频偏好与指令即时捕获)
@@ -201,6 +221,7 @@ dsh-memory/
 │  │  ├─ plugin.ts         # 插件生命周期、水位线连续蒸馏编排与全自动慢环调度
 │  │  ├─ session-listener.ts # 会话状态流转与消息事件监听
 │  │  ├─ prompt-section.ts # 稳定层 System Prompt 常驻注入
+│  │  ├─ memory-visibility.ts # [v0.8.x] 已注入记忆的可见性投影、去重与压缩/fork 后重折叠
 │  │  ├─ pre-step.ts       # agent/pre-step 动态记忆注入与在线遥测落盘
 │  │  ├─ tools.ts          # [v0.7.0] 七路全融合 memory_search、1-Hop 因果展开与统一聚合工具
 │  │  ├─ commands.ts       # `/memory` 聊天交互指令集 (20+ 子命令)
@@ -214,6 +235,9 @@ dsh-memory/
 │  │  ├─ ledger.ts         # 每日 40次/200k Token 原子预留风控账本
 │  │  ├─ llm.ts            # 兼容 OpenAI / Responses / Messages 多协议 LLM 客户端
 │  │  ├─ prompts.ts        # 结构化受控 Prompt 模板 (distill / reflect / repair)
+│  │  ├─ parse.ts          # 模型输出的结构化解析与校验
+│  │  ├─ strategy.ts       # 检索策略版本化与参数约束
+│  │  ├─ review-snapshot.ts # [v0.8.x] 模型审阅快照与 discard 保护边界
 │  │  ├─ extractor.ts      # [v0.7.0] distill-v2 水位线连续蒸馏与 Mem0 调和闭环
 │  │  ├─ reflector.ts      # reflect-v2 任务失败归因与防错经验提炼
 │  │  ├─ consolidator.ts   # consolidate-v2 碎片记忆聚类合并
@@ -230,14 +254,22 @@ dsh-memory/
 │     ├─ runner.ts         # 评测套件执行器与规模不变性压测
 │     ├─ metrics.ts        # Recall@Inj、ExclViol、EmptyPrec 核心指标计算
 │     └─ eval-cli.ts       # 独立命令行评测门禁入口
-└─ test/                   # 51 个测试套件，322 个自动化单元测试与端到端验收用例
+└─ test/                   # 61 个测试套件，536 个自动化单元测试与端到端验收用例
 ```
 
 ---
 
 ## 🚀 快速上手与挂载
 
-### 1. 克隆与构建
+### 1. 安装与构建
+
+**方式 A：下载 Release 构建包（无需构建）**
+
+```bash
+npm i https://github.com/ROSESSSSS66/dsh-memory/releases/download/v0.8.1/dsh-memory-0.8.1.tgz
+```
+
+**方式 B：克隆源码并构建**
 
 > **环境要求**：Node.js `>= 24.0.0`（利用内置 `node:sqlite` 原生模块，无需安装 Python 或 Visual Studio C++ 构建工具）。
 
@@ -351,7 +383,7 @@ npm run build
 项目内置完整的离线评测生成器（4 大评测套件共 120 条跨领域标准用例 + 20 条关键红线用例）与多级规模压测器：
 
 ```bash
-# 1. 运行 TypeScript 严格类型检查与 51 个测试套件 (322 项测试)
+# 1. 运行 TypeScript 严格类型检查与 61 个测试套件 (536 项测试)
 npm run check
 
 # 2. 构建服务端插件、前端 Claude Studio 自治控制台与评测 CLI
@@ -363,13 +395,13 @@ npm run eval
 
 ### 评测门禁达成实测对照表
 
-| 验收核心指标 | 官方规约门槛 | `v0.7.0` 实测表现 | 门禁结论 |
+| 验收核心指标 | 官方规约门槛 | `v0.8.1` 实测表现 | 门禁结论 |
 |---|---:|---:|:---:|
 | **Recall @ Inject (有效注入召回率)** | $\ge 70\%$ | **100.0% (120 / 120)** | ✅ **PASS** |
 | **Exclude Violations (跨区/废弃违规注入)** | $= 0$ (绝对零容忍) | **0** | ✅ **PASS** |
 | **Empty Precision (无关提问精准空查率)** | $\ge 80\%$ | **100.0%** | ✅ **PASS** |
 | **Critical 关键红线用例通过率** | $100\%$ (20/20) | **20 / 20 (100%)** | ✅ **PASS** |
-| **在线检索响应延迟 (p95)** | $\le 50\text{ ms}$ | **0.8 ~ 1.1 ms** (1万条规模: `p50=20.8ms, p95=29.8ms`) | ✅ **PASS** |
+| **在线检索响应延迟 (p95)** | $\le 50\text{ ms}$ | **~1.2 ms** (1万条规模: `p50=20.8ms, p95=29.8ms`) | ✅ **PASS** |
 | **单轮动态 Token 消耗均值** | $\le 1600\text{ tokens}$ | **~170 tokens** | ✅ **PASS** |
 | **1k vs 10k 规模 Token 膨胀率** | $< 10\%$ 波动 | **0.28%** (规模不变性达成) | ✅ **PASS** |
 
@@ -379,7 +411,8 @@ npm run eval
 
 1. **在线路径零外部阻断**：在线检索与渲染路径 100% 运行于本地内存与 SQLite WAL 之上。即便外部网络完全断开或第三方大模型服务宕机，DSH 主会话依然拥有完整的亚毫秒级记忆召回能力。
 2. **数据库锁竞争与异常优雅降级**：若底层数据库因极端情况被外部进程锁定或损坏，插件启动与执行期均具备异常捕获与安全旁路降级机制，绝不阻塞或崩溃 DSH 宿主进程。
-3. **单向因果链与完整时间线可解释性**：所有事实修订（`supersedes`）、提炼派生（`derived_from`）与冲突标记（`contradicts`）均保留历史版本快照与会话证据切片，任何一条注入提示词的记忆皆可一追到底。
+3. **配额与重试可控**：失败任务按 `next_eligible_at` 退避重试并自动唤醒，次日预算自动恢复，显式 `0` 预算在稳定层、动态层与评测中均被尊重。
+4. **单向因果链与完整时间线可解释性**：所有事实修订（`supersedes`）、提炼派生（`derived_from`）与冲突标记（`contradicts`）均保留历史版本快照与会话证据切片，任何一条注入提示词的记忆皆可一追到底。
 
 ---
 

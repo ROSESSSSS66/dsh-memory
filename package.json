@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory",
   "version": "0.8.1",
-  "description": "Self-evolving long-term memory system for DeepSeek Desktop (DSH) with zero-prompt recall, associative knowledge graphs, and workspace memory sync.",
+  "description": "Local-first long-term memory plugin for DeepSeek Desktop (DSH): auto-distills preferences and lessons from sessions, recalls the most relevant in ~1ms, and self-corrects over time.",
   "keywords": [
     "dsh",
     "deepseek",
