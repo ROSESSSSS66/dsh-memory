@@ -28,6 +28,7 @@ import {
   importFromMarkdown,
   trashMemory,
   restoreFromTrash,
+  resolveTrashDir,
   exportMemoryBank,
   importMemoryBank,
 } from '../core/markdown.js';
@@ -114,27 +115,29 @@ export class MemoryCommands {
     // 统计近 7 天注入数据
     const now = Date.now();
     const sevenDaysAgo = now - 7 * 86400000;
-    const injRows = this.db.all<{ tokens: number; outcome: number | null }>(
-      'SELECT tokens, outcome FROM injections WHERE created_at >= ?',
+    // injections 每条注入记忆一行：按轮次聚合动态层后再求每轮均值
+    const injAgg = this.db.get<{ cnt: number; total_tokens: number | null; corrections: number | null }>(
+      `SELECT COUNT(*) AS cnt, SUM(t) AS total_tokens, SUM(neg) AS corrections
+       FROM (
+         SELECT SUM(tokens) AS t,
+                MAX(CASE WHEN outcome IS NOT NULL AND outcome <= -0.5 THEN 1 ELSE 0 END) AS neg
+         FROM injections
+         WHERE created_at >= ? AND layer = 'dynamic'
+         GROUP BY session_id, turn
+       )`,
       [sevenDaysAgo]
     );
 
-    const injCount = injRows.length;
-    let totalTokens = 0;
-    let corrections = 0;
-    for (const r of injRows) {
-      totalTokens += r.tokens;
-      if (r.outcome !== null && r.outcome <= -0.5) {
-        corrections++;
-      }
-    }
+    const injCount = Number(injAgg?.cnt || 0);
+    const totalTokens = Number(injAgg?.total_tokens || 0);
+    const corrections = Number(injAgg?.corrections || 0);
     const avgTokens = injCount > 0 ? Math.round(totalTokens / injCount) : 0;
     const correctionRate = injCount > 0 ? ((corrections / injCount) * 100).toFixed(1) : '0.0';
 
     return [
       `记忆总数 ${st.total.toLocaleString()}（active ${active} / candidate ${candidate} / superseded ${superseded} / archived ${archived}${frozen > 0 ? ` / frozen ${frozen}` : ''}）`,
       `类型分布 ${typeParts || '无'}`,
-      `近 7 天：注入 ${injCount} 次，平均 ${avgTokens} tokens/turn，纠正率 ${correctionRate}%`,
+      `近 7 天：注入 ${injCount} 轮，平均 ${avgTokens} tokens/turn，纠正率 ${correctionRate}%`,
     ].join('\n');
   }
 
@@ -275,8 +278,8 @@ export class MemoryCommands {
 
     // 安全回收站：先存根备份到 .trash 目录 (汲取自 LZMW/dsh-memory)
     try {
-      const trashDir = path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory', '.trash');
-      trashMemory(this.db, mem.id, trashDir);
+      const trashDir = resolveTrashDir(this.db, this.cfg.dataDir);
+      if (trashDir) trashMemory(this.db, mem.id, trashDir);
     } catch {}
 
     writerForget(this.db, mem.id, 'user', Date.now());
@@ -324,7 +327,7 @@ export class MemoryCommands {
       return `Error: ${err?.message || 'Lookup failed'}`;
     }
 
-    const trashDir = path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory', '.trash');
+    const trashDir = resolveTrashDir(this.db, this.cfg.dataDir);
     if (mem) {
       const res = restoreMemory(this.db, mem.id, 'user');
       return res.message;
@@ -432,11 +435,10 @@ export class MemoryCommands {
     if (!mem) return `Memory '${idOrShortId}' not found.`;
 
     const targetStatus = freeze ? 'frozen' : 'active';
-    if (freeze) {
-      writerFreeze(this.db, mem.id, 'user', Date.now());
-    } else {
-      writerUnfreeze(this.db, mem.id, 'user', Date.now());
-    }
+    const ok = freeze
+      ? writerFreeze(this.db, mem.id, 'user', Date.now())
+      : writerUnfreeze(this.db, mem.id, 'user', Date.now());
+    if (!ok) return `Memory ${mem.id} is ${mem.status}; cannot ${freeze ? 'freeze' : 'unfreeze'}.`;
     return `Memory ${mem.id} status changed to ${targetStatus}.`;
   }
 

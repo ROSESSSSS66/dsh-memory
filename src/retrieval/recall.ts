@@ -185,8 +185,10 @@ export function recall(
   }
 
   // 5. 预算装箱
+  // ctx.budget 是调用方给出的上限（硬预算扣除稳定层后的余量），不覆盖策略自身的动态预算，
+  // 否则实验室晋升的 dynamicBudgetTokens 在线上永远不生效
   const budget = cfg.dynamicBudgetTokens === 0 ? 0
-    : ctx.budget ?? strategy.dynamicBudgetTokens ?? cfg.dynamicBudgetTokens ?? 1600;
+    : Math.min(ctx.budget ?? Infinity, strategy.dynamicBudgetTokens ?? cfg.dynamicBudgetTokens ?? 1600);
   const scopeCtx = { workspaceId: ctx.workspaceId, sessionId: ctx.sessionId };
   const selected = govern(scored, {
     budget,

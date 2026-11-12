@@ -1,4 +1,5 @@
-import { z } from 'zod';
+// 命名空间导入：`import { z }` 会连带打入 zod 全部 locale（约 575KB），无法被 tree-shake
+import * as z from 'zod';
 import type { MemoryRef } from '../types.js';
 
 export const MEMORY_VISIBILITY_KEY = 'dsh-memory.visibility';
@@ -42,7 +43,8 @@ export function foldMemoryVisibility(state: MemoryVisibilityState, event: any): 
 
   const source = event.data?.source;
   let invalidReferenceEvents = state.invalidReferenceEvents;
-  if (event.type === 'user/message' && source?.kind === 'plugin' && source.plugin === 'dsh-memory') {
+  const isDshMemory = source?.kind === 'dsh-memory' || (source?.kind === 'plugin' && source?.plugin === 'dsh-memory');
+  if (event.type === 'user/message' && isDshMemory) {
     const refs = MemoryRefsSchema.safeParse(source.memoryRefs);
     if (!refs.success || typeof event.data.id !== 'string' || !event.data.id) {
       invalidReferenceEvents++;
@@ -82,9 +84,11 @@ export async function registerMemoryVisibility(ctx: any): Promise<MemoryVisibili
     return {
       getVisibleRefs(session) {
         if (!session) return null;
-        const state = typeof ctx.sessionProjections.stateOf === 'function'
-          ? ctx.sessionProjections.stateOf(session, MEMORY_VISIBILITY_KEY)
-          : ctx.sessionProjections.snapshot(session)?.values?.[MEMORY_VISIBILITY_KEY];
+        const state = typeof registration?.stateOf === 'function'
+          ? registration.stateOf(session)
+          : typeof ctx.sessionProjections.stateOf === 'function'
+            ? ctx.sessionProjections.stateOf(session, MEMORY_VISIBILITY_KEY)
+            : ctx.sessionProjections.snapshot(session)?.values?.[MEMORY_VISIBILITY_KEY];
         const parsed = StateSchema.safeParse(state);
         return parsed.success ? visibleMemoryRefs(parsed.data) : null;
       },

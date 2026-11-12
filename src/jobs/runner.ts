@@ -138,12 +138,20 @@ export async function runNextJob(
         [finishedTime, job.id]
       );
     } else if (result.action === 'skipped') {
-      const nextEligible = result.nextEligibleAt ?? getNextDayStartMs(finishedTime);
       const cleanErr = redactSecrets(result.reason).text;
-      db.run(
-        `UPDATE jobs SET status = 'skipped', next_eligible_at = ?, error = ?, finished_at = ? WHERE id = ?`,
-        [nextEligible, cleanErr, finishedTime, job.id]
-      );
+      if (result.nonRetryable) {
+        // 终态跳过：保留原因备查并收尾，否则会每天被重新取出执行且没有次数上限
+        db.run(
+          `UPDATE jobs SET status = 'done', error = ?, finished_at = ? WHERE id = ?`,
+          [cleanErr, finishedTime, job.id]
+        );
+      } else {
+        const nextEligible = result.nextEligibleAt ?? getNextDayStartMs(finishedTime);
+        db.run(
+          `UPDATE jobs SET status = 'skipped', next_eligible_at = ?, error = ?, finished_at = ? WHERE id = ?`,
+          [nextEligible, cleanErr, finishedTime, job.id]
+        );
+      }
     } else if (result.action === 'failed') {
       const cleanErr = redactSecrets(result.error).text;
       // 如果不可重试或已达到最大尝试次数 (最多 3 次)

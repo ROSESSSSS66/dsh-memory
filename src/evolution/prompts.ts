@@ -283,7 +283,8 @@ export function renderTranscript(
     let kind = 'user_msg';
 
     if (ev.role === 'user' || ev.origin_kind === 'user') {
-      kind = 'user_msg';
+      // hook / 插件注入的 user 角色消息以 origin_kind='system' 入库，不得计为用户证据
+      kind = ev.origin_kind === 'user' ? 'user_msg' : 'system_msg';
       truncatedText = redacted.slice(0, 500);
       line = `[U#${currentSeq}] ${truncatedText}`;
     } else if (ev.role === 'assistant' || ev.origin_kind === 'assistant') {

@@ -19,14 +19,15 @@ export function redactSecrets(input: string): RedactResult {
   const detectedKinds: string[] = [];
 
   // Cookie values can contain several credentials; redact the whole header, including JSON arrays.
-  const cookieRegex = /\b((?:set-)?cookie)(['"]?\s*[:=]\s*)(\[(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\]\r\n])*\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gi;
+  // 数组分支的裸字符类必须排除引号：否则引号既可作字符串起点又可作裸字符，未闭合数组会指数级回溯
+  const cookieRegex = /\b((?:set-)?cookie)(['"]?\s*[:=]\s*)(\[(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\]\r\n"'])*\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gi;
   text = text.replace(cookieRegex, (_match, name, separator) => {
     if (!detectedKinds.includes('COOKIE')) detectedKinds.push('COOKIE');
     return `${name}${separator}[REDACTED:COOKIE]`;
   });
 
   // 1. PEM 私钥
-  const pemRegex = /-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY-----/g;
+  const pemRegex = /-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY(?: BLOCK)?-----/g;
   if (pemRegex.test(text)) {
     detectedKinds.push('PEM_KEY');
     pemRegex.lastIndex = 0;
@@ -46,8 +47,18 @@ export function redactSecrets(input: string): RedactResult {
   if (urlRegex.test(text)) {
     urlRegex.lastIndex = 0;
     text = text.replace(urlRegex, (fullUrl, scheme, authorityAndPath) => {
-      const atIdx = authorityAndPath.lastIndexOf('@');
-      if (atIdx === -1) return fullUrl; // 无凭证
+      // 凭证只存在于 authority 段；路径中的 '@'（如 /package/@types/node、vue@3）不是凭证
+      const authority = authorityAndPath.split(/[/?#]/, 1)[0];
+      let atIdx = authority.lastIndexOf('@');
+      if (atIdx === -1) {
+        // 密码含未编码 '/' 时 '@' 会落到路径段：仅当 authority 形如 user:<非端口> 时仍按凭证处理
+        const colonIdx = authority.indexOf(':');
+        if (colonIdx === -1 || authority.startsWith('[') || /^\d*$/.test(authority.slice(colonIdx + 1))) {
+          return fullUrl; // 无凭证
+        }
+        atIdx = authorityAndPath.lastIndexOf('@');
+        if (atIdx === -1) return fullUrl;
+      }
 
       const userinfo = authorityAndPath.slice(0, atIdx);
       const hostAndPath = authorityAndPath.slice(atIdx + 1);
@@ -66,11 +77,12 @@ export function redactSecrets(input: string): RedactResult {
 
   // 4. Authorization 头 / 凭证 (Bearer / Basic)
   const authHeaderRegex = /\b(Bearer|Basic)\s+([a-zA-Z0-9_.\-~+/=]{16,})\b/gi;
-  if (authHeaderRegex.test(text)) {
-    detectedKinds.push('AUTH_TOKEN');
-    authHeaderRegex.lastIndex = 0;
-    text = text.replace(authHeaderRegex, '$1 [REDACTED:TOKEN]');
-  }
+  text = text.replace(authHeaderRegex, (match, scheme, token) => {
+    // 纯字母长单词不是令牌（如 "basic internationalization"）
+    if (!/[0-9+/=_.~-]/.test(token)) return match;
+    if (!detectedKinds.includes('AUTH_TOKEN')) detectedKinds.push('AUTH_TOKEN');
+    return `${scheme} [REDACTED:TOKEN]`;
+  });
 
   // 5. 常见厂商独立 API Key / Access Token (如 sk-..., ghp_..., github_pat_..., AKIA..., xox...)
   const standaloneKeyRegex = /\b(sk-(?:ant-api\d{2}-|proj-|live-|test-)?[a-zA-Z0-9_\-]{20,}|gh[pousr]_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{50,}|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[baprs]-[0-9a-zA-Z]{10,48})\b/g;
@@ -89,7 +101,8 @@ export function redactSecrets(input: string): RedactResult {
   }
 
   // 6. 显式敏感字段赋值 (例如 api_key = "...", password: "...")
-  const keyValRegex = /\b([a-z0-9_]*?(?:api[_-]?key|secret|password|passwd|access[_-]?token|auth[_-]?token|private[_-]?key))(['"]?\s*[:=]\s*)(['"]?)([^\s'"`,;}{]{8,})\3/gi;
+  // 关键字后允许有界后缀，覆盖 AWS_SECRET_ACCESS_KEY / SECRET_KEY / CLIENT_SECRET_VALUE 等写法
+  const keyValRegex = /\b([a-z0-9_]*?(?:api[_-]?key|secret|password|passwd|access[_-]?token|auth[_-]?token|private[_-]?key)(?:[_-]?(?:access[_-]?)?(?:key|token|value))?)(['"]?\s*[:=]\s*)(['"]?)([^\s'"`,;}{]{8,})\3/gi;
   if (keyValRegex.test(text)) {
     detectedKinds.push('SECRET_KEY');
     keyValRegex.lastIndex = 0;

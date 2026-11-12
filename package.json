@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Self-evolving long-term memory system for DeepSeek Desktop (DSH) with zero-prompt recall, associative knowledge graphs, and workspace memory sync.",
   "keywords": [
     "dsh",
@@ -25,6 +25,9 @@
     "url": "https://github.com/ROSESSSSS66/dsh-memory.git"
   },
   "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
@@ -88,6 +91,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
+    "esbuild": "^0.27.7",
     "react": "^19.3.1",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",

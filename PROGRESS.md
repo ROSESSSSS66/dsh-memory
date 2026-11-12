@@ -45,6 +45,8 @@
 | 审查修复 2026-11-11 | 修复离线隐私、Cookie 脱敏、重定向越权、模型写入范围与并发保护、自批准、WAL 备份、重试唤醒、压缩可见性与零预算共 10 项问题；补充来源归属迁移和插件测试隔离 | `src/core/`, `src/dsh/`, `src/evolution/`, `src/ingest/queue.ts`, `src/jobs/scheduler.ts`, `src/retrieval/recall.ts`, `src/eval/runner.ts`, `test/` | `npm run check`: 56 suites / 404 tests；`npm run build` 通过；`npm run eval`: 120/120，关键用例 20/20，排除违规 0；万条检索 p95=11.60ms；`git diff --check` 通过 | 2026-11-11 |
 | 审查优化复核 2026-11-11 | 修复工具作用域绕过、核心记忆免审批、合并证据转移、提案部分提交、摄入故障丢事件与忙重试、后台失败分类和工具统计偏差；优化稳定层装箱与注册失败恢复 | `src/core/{store,core-memory,writer,markdown}.ts`, `src/dsh/{tools,commands,plugin,prompt-section}.ts`, `src/evolution/{reflector,repair}.ts`, `src/jobs/types.ts`, `src/ingest/queue.ts`, `test/` | 新增 87 项回归；`npm run check`: 59 suites / 491 tests；`npm run build` 通过；`npm run eval`: 120/120；500 条置顶渲染 22.22ms，万条检索 p95=7.08ms | 2026-11-11 |
 | v0.8.0 冒烟修复与发布 | 修复 Cordis 未注入 `ctx.agent` 报错、`session.header.cwd` 工作区丢失、超长/NULL-turn 轮次 `reflect` 超预算失败，以及 `skill-catalog`/`time-context`/`tool-jobs` 合成消息污染；升级 `0.8.0` 并合并发布 | `src/dsh/{plugin,session-listener,pre-step,web}.ts`, `src/evolution/{reflector,extractor}.ts`, `src/ingest/{backfill,rules}.ts`, `package.json`, `test/{dsh/live-smoke-regressions,evolution/reflector,ingest/backfill}.test.ts` | 新增 14 项冒烟回归（共 60 suites / 505 tests）；`npm run check` / `build` / `eval` 全绿通过 | 2026-11-11 |
+| DSH 宿主兼容与不可用修复 | 修复 tsup 打包未内联 zod/fzstd 导致 DSH ESM 导入 ERR_MODULE_NOT_FOUND、修复 format v4 消息要求 producer-owned source kind (`kind: 'dsh-memory'`) 阻断 pre-step 注入、消除 `sessionProjections.stateOf` 弃用警告并补齐回归用例 | `tsup.config.ts`, `src/dsh/{pre-step,memory-visibility,session-listener}.ts`, `src/ingest/backfill.ts`, `test/**` | 60 suites / 507 tests 全部通过；`npm run build` / `eval` (120/120) 全绿；实机 DSH NEXT 重载验证初始化成功 | 2026-11-12 |
+| 审查优化第三轮 2026-11-12 | 四模块并行审查后修复：模型信任边界（`core:*` 槽位占用、无证据 discard、系统注入消息冒充用户证据、重复确认/负反馈刷指标）、同步阻塞（引用校验与 Cookie 脱敏正则回溯、每轮 O(n²) 聚类）、离线配额空耗（失败任务复活、相同批次重发）、配置覆盖层快照与隐式外发授权、宿主兜底密钥错配、导入导出一致性、检索预算与渲染、回填工具事件映射；打包体积减半并接入每日热备 | `src/core/{writer,privacy,health,markdown,bootstrap}.ts`, `src/config.ts`, `src/evolution/**`, `src/jobs/**`, `src/retrieval/**`, `src/ingest/{rules,backfill}.ts`, `src/dsh/{web,tools,commands,plugin,pre-step,memory-visibility}.ts`, `src/client/**`, `scripts/postinstall.mjs`, `package.json`, `.github/workflows/ci.yml`, `test/review-round3.test.ts` | 新增 29 项回归；`npm run check`: 61 suites / 536 tests；`npm run build` 通过（`dist/index.js` 1.2MB → 634KB）；`npm run eval`: 120/120；万条检索 p95=8.37ms | 2026-11-12 |
 
 ## 2026-11-11 审查修复验证
 
@@ -93,3 +95,27 @@
 - `git diff --check`：通过；Git 仅提示既有的 Windows 换行符转换。
 
 验证边界：本轮使用内存库/临时数据库、模拟宿主和合成事件；未连接真实模型供应商，未执行 DSH Desktop 实机重载。仅完成本地修改与构建，未提交、推送或部署。
+
+## 2026-11-12 审查优化第三轮
+
+在 507 项测试基线上按模块审查（核心存储、宿主集成与 Web、演化与任务、检索与摄入），以下为本轮修复，均有 `test/review-round3.test.ts` 或既有用例覆盖。
+
+| 类别 | 问题与修复 |
+|---|---|
+| 信任边界 | 模型输出不得使用 `core:*` 槽位；自动审批方不得替换置顶槽位或写入核心块；模型的 discard 指令不再归档用户批准或带用户证据的生效记忆；hook/插件注入的 user 角色消息记为 `system_msg`，不计用户证据；模型确认不再累加效用与成功次数；同一引用只接受一次 `memory_feedback`；自动扫描到的 memory-bank 只写入候选 |
+| 阻塞与性能 | `<workspace>` 引用校验改为线性扫描；Cookie 脱敏正则消除指数回溯；聚类改用实体倒排索引并移出 `turn-stopping`；typed 通道复用 lexical 的 FTS 结果 |
+| 离线配额 | 失败任务 1 小时冷却后才可同键复活；终态跳过的任务直接收尾；curate 与空结果的 consolidate 对未变化的输入不再重发 |
+| 配置与隐私 | 配置覆盖层只保存控制台可改的键，宿主配置后续修改继续生效；旧别名不再回填已清空的密钥；外发授权只接受显式字段，无法解析的请求体返回 400；宿主兜底按供应商成对取端点与密钥；`.db` 导出不带配置覆盖层；脱敏补齐后缀键名与 PGP 私钥块，并消除路径 `@` 与普通长单词的误报 |
+| 数据一致性 | `unfreeze` 不再误伤现行槽位记录；`.db` 导入遇同槽位记录改为留快照后取代；JSON 导入接受 `/export` 原始输出、按时间顺序回放并跳过已遗忘记录；恢复记忆清除 `invalidated_at`；自愈仅自动合并同槽位冗余，矛盾消解以用户较晚的批准为准；候选不再因现行记录被使用而被清理 |
+| 检索与摄入 | 最终预算复核使用真实短码；策略的动态预算在线上生效；记忆正文渲染为单行，摘要形态保留 `(history)`；日期解析支持显式年份并拒绝非法日期；R1/R2 排除非指令句与疑问句；回填的工具结果按在线监听器同一规则取调用 ID；解压上限不再被纯 JS 兜底绕过 |
+| 工程 | zod 改命名空间导入（包体积减半）；补 `esbuild` 依赖与 `engines`；CI 增加评测门禁；回收站目录跟随数据库文件；每日一次热备接入 maintain 任务 |
+
+未处理（记录备查）：
+
+- 配置面板每次保存仍固定发送 `offlineConsent: true`，需要增加显式授权开关后才能去掉。
+- R2 对不含疑问特征的短句（如 "I never said that"、"以后再说吧"）仍会记为生效偏好。
+- memory-bank 导出未写作用域，导出后再导入会改变偏好的作用域。
+- 无法解析的 distill 批次每小时仍会重试一次；维护任务积压未合并；`evolve` 任务仍同步执行。
+- `session-listener` 的会话级 Map 未清理；`setCoreMemory` 对含敏感信息的输入报错不清晰；`writer` 的四个阈值读取 `DEFAULTS` 而非生效配置。
+
+验证边界：使用内存库/临时数据库、模拟宿主与合成事件；未连接真实模型供应商，未做 DSH Desktop 实机重载。`.git` 缺少 `HEAD` 与 `config`，本轮改动未提交。

@@ -153,7 +153,7 @@ describe('Pre-Step Waterfall Injection (pre-step.ts)', () => {
     expect(decision.messages.length).toBe(2);
     const injected = decision.messages[1];
     expect(injected.role).toBe('user');
-    expect(injected.source.kind).toBe('plugin');
+    expect(injected.source.kind).toBe('dsh-memory');
     expect(injected.source.plugin).toBe('dsh-memory');
 
     // 检查 memoryRefs 完整性

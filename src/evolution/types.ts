@@ -65,7 +65,7 @@ export interface JudgeOutput {
 export interface CurateUpdateItem {
   target_id: string;
   absorb_ids?: string[];
-  type: MemoryType;
+  type?: MemoryType;
   text: string;
   slot_key?: string | null;
   confidence: number;

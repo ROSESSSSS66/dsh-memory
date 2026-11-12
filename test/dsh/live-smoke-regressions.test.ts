@@ -295,7 +295,7 @@ describe('DSH live smoke regressions (strict Cordis inject & real session shape)
     expect(decision.kind).toBe('enter');
     expect(decision.messages.length).toBe(3);
     const injectedMsg = decision.messages[2];
-    expect(injectedMsg.source).toMatchObject({ kind: 'plugin', plugin: 'dsh-memory' });
+    expect(injectedMsg.source).toMatchObject({ kind: 'dsh-memory', plugin: 'dsh-memory' });
     expect(injectedMsg.content[0].text).toContain('8080');
     expect(injectedMsg.source.memoryRefs.some((r: any) => r.id === seedMemId)).toBe(true);
 

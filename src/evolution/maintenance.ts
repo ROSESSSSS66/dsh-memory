@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Db, MemoryRecord } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import { ftsText, contentHash } from '../core/text.js';
@@ -20,7 +20,7 @@ import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
 import { memoryPrivacyFilterSQL, memoryWorkspaceIds } from '../core/privacy.js';
 import { hasUserEvidence } from '../core/trust.js';
-import { getUnchangedReviewedMemory, sameMemoryOwner } from './review-snapshot.js';
+import { getUnchangedReviewedMemory, isProtectedFromModelDiscard, sameMemoryOwner } from './review-snapshot.js';
 
 export function getBackupTimestamp(date: Date = new Date()): string {
   const y = date.getFullYear();
@@ -201,11 +201,22 @@ export function cleanOldTelemetry(
   };
 }
 
-function writeDatabaseSnapshot(db: Db, targetPath: string, overwrite = true): void {
+function writeDatabaseSnapshot(db: Db, targetPath: string, overwrite = true, stripConfig = false): void {
   const tempPath = path.join(path.dirname(targetPath), `.tmp-snapshot-${randomUUID()}.db`);
   try {
     // VACUUM INTO includes committed WAL pages. A plain main-file copy does not.
     db.exec(`VACUUM INTO '${tempPath.replace(/'/g, "''")}'`);
+    if (stripConfig) {
+      // 导出文件会被分享：控制台保存的配置覆盖层里有明文 API 密钥，不随文件带出
+      const scrubDb = openDb(tempPath);
+      try {
+        scrubDb.exec('PRAGMA secure_delete = ON;');
+        scrubDb.run("DELETE FROM meta WHERE key = 'config_override'");
+        scrubDb.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+      } finally {
+        scrubDb.close();
+      }
+    }
     const checkDb = openDb(tempPath, { readOnly: true });
     try {
       const integrity = checkDb.get<{ integrity_check: string }>('PRAGMA integrity_check');
@@ -231,7 +242,9 @@ function writeDatabaseSnapshot(db: Db, targetPath: string, overwrite = true): vo
       }
     }
   } finally {
-    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    for (const leftover of [tempPath, `${tempPath}-wal`, `${tempPath}-shm`]) {
+      if (fs.existsSync(leftover)) fs.unlinkSync(leftover);
+    }
   }
 }
 
@@ -297,7 +310,7 @@ export function exportDatabaseFile(
   }
 
   try {
-    writeDatabaseSnapshot(db, resolvedTarget, false);
+    writeDatabaseSnapshot(db, resolvedTarget, false, true);
     return { success: true, path: resolvedTarget };
   } catch (err: any) {
     return { success: false, path: resolvedTarget, error: err.message };
@@ -385,6 +398,27 @@ export function importDatabaseFile(
         );
       }
       for (const m of memories) {
+        // INSERT OR REPLACE 也会在槽位唯一索引上触发替换：本地另一条占用同槽位的记录会被直接删除且不留快照。
+        // 改为显式处理：本地占用者被冻结时导入项降为 superseded，否则本地占用者留快照后转 superseded。
+        let importStatus = m.status;
+        if (m.slot_key && (m.status === 'active' || m.status === 'frozen')) {
+          const holder = currentDb.get<MemoryRecord>(
+            `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ?
+             AND COALESCE(session_id, '') = ? AND slot_key = ?
+             AND status IN ('active', 'frozen') AND id != ?`,
+            [m.scope, m.workspace_id || '', m.session_id || '', m.slot_key, m.id]
+          );
+          if (holder?.status === 'frozen') {
+            importStatus = 'superseded';
+          } else if (holder) {
+            const importedAt = Date.now();
+            saveVersionSnapshot(currentDb, holder, 'import_slot_supersede', 'system', importedAt);
+            currentDb.run(
+              `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+              [importedAt, importedAt, holder.id]
+            );
+          }
+        }
         currentDb.run(
           `INSERT OR REPLACE INTO memories (
             id, type, status, content, summary, slot_key, scope, workspace_id, session_id,
@@ -396,7 +430,7 @@ export function importDatabaseFile(
           [
             m.id,
             m.type,
-            m.status,
+            importStatus,
             m.content,
             m.summary,
             m.slot_key ?? null,
@@ -532,7 +566,13 @@ export function pruneInvalidMemories(
       let reason: string | null = null;
 
       // 1. 实战多次被证伪且零正反馈的负效用记忆
-      if (mem.fail_count >= 2 && mem.success_count === 0 && mem.utility <= 0.38) {
+      // 用户批准的记忆不因负反馈计数被自动归档（计数可由模型的 memory_feedback 产生），改走修复提案
+      if (
+        mem.fail_count >= 2 &&
+        mem.success_count === 0 &&
+        mem.utility <= 0.38 &&
+        mem.approved_by !== 'user'
+      ) {
         reason = 'repeated_negative_outcome';
       }
 
@@ -551,7 +591,18 @@ export function pruneInvalidMemories(
       if (!reason && mem.status === 'candidate' && mem.slot_key) {
         const key = `${mem.scope}:${mem.workspace_id || ''}:${mem.slot_key}`;
         const activeHolder = activeSlotMap.get(key);
-        if (activeHolder && activeHolder.id !== mem.id && activeHolder.updated_at >= mem.created_at) {
+        // updated_at 会被效用归因、自动置顶等操作刷新，不代表正文更新；以生效时间判断新旧
+        const holderEffectiveAt = activeHolder ? activeHolder.approved_at ?? activeHolder.created_at : 0;
+        if (
+          activeHolder &&
+          activeHolder.id !== mem.id &&
+          holderEffectiveAt >= mem.created_at &&
+          // 待审批修复提案的候选须保留，否则提案将永远无法批准
+          !db.get(
+            `SELECT 1 FROM repair_proposals WHERE status = 'candidate' AND candidate_ids LIKE ?`,
+            [`%"${mem.id}"%`]
+          )
+        ) {
           reason = 'shadowed_by_active_slot';
         }
       }
@@ -660,6 +711,20 @@ export async function curateMemoriesWithLLM(
     memoriesList: lines.join('\n'),
   });
 
+  // 同一批记忆未发生任何变化时提示词逐字相同：维护任务每 10 分钟一个桶，重复送审只会耗尽当日配额
+  const fingerprintKey = `curate:last:${wsId || 'global'}`;
+  const fingerprint = createHash('sha256').update(`${PROMPT_CURATE.version}\n${userPrompt}`).digest('hex');
+  if (db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [fingerprintKey])?.value === fingerprint) {
+    return {
+      ok: true,
+      deterministicPruned: localPrune.prunedCount,
+      llmDiscarded: 0,
+      llmUpdated: 0,
+      discardedIds,
+      updatedIds,
+    };
+  }
+
   const llmRes = await callOfflineLLM(
     db,
     {
@@ -689,6 +754,12 @@ export async function curateMemoriesWithLLM(
     };
   }
 
+  // 模型已对这批输入作答（即便输出无法解析），同一输入不再重发
+  db.run(
+    `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [fingerprintKey, fingerprint]
+  );
+
   const parseRes = parseOutput(llmRes.content, {
     taskKind: 'curate',
     evidenceLedger: new Map(),
@@ -715,7 +786,7 @@ export async function curateMemoriesWithLLM(
     // 3.1 执行 LLM 判定的无效记忆舍弃
     for (const id of discard_ids) {
       const target = getUnchangedReviewedMemory(db, reviewedMap, id);
-      if (!target) continue;
+      if (!target || isProtectedFromModelDiscard(db, target)) continue;
       saveVersionSnapshot(db, target, 'llm_curate_discard', 'llm', now);
       const nextStatus = target.status === 'candidate' ? 'rejected' : 'archived';
       db.run(

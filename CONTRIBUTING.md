@@ -46,7 +46,7 @@ git checkout -b feat/your-feature-name
 # 1. 静态类型检查
 npm run typecheck
 
-# 2. 全量单元测试与验收测试 (46 套测试组件，274 个测试用例)
+# 2. 全量单元测试与验收测试
 npm test
 
 # 3. 完整构建打包验证

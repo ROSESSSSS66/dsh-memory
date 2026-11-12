@@ -1,4 +1,13 @@
 import type { Db, MemoryRecord } from '../types.js';
+import { hasUserEvidence } from '../core/trust.js';
+
+/**
+ * 模型的 discard 指令不附带任何证据，因此不得归档用户确认过或有用户证据支撑的生效记忆
+ * （与 reconciler 的 isTrustedReconcileInput 同一条边界）；candidate 与无用户证据的记忆仍可淘汰。
+ */
+export function isProtectedFromModelDiscard(db: Db, memory: MemoryRecord): boolean {
+  return memory.status === 'active' && (memory.approved_by === 'user' || hasUserEvidence(db, memory));
+}
 
 export function sameMemoryOwner(a: MemoryRecord, b: MemoryRecord): boolean {
   return a.scope === b.scope &&

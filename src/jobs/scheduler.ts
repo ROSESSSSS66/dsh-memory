@@ -10,8 +10,13 @@ export interface EnqueueJobParams {
   now?: number;
 }
 
+/** 终态失败的任务在此冷却期内不因同键再次入队而复活 */
+export const FAILED_REQUEUE_COOLDOWN_MS = 3600_000;
+
 /**
  * 幂等将离线任务入队 (kind + key 唯一约束)
+ * 失败任务的键在输入未变时保持不变（如 distill 水位线键），若每次入队都立即复活，
+ * 同一份无法解析的输入会在每轮对话后重发并耗尽当日配额，因此需经过冷却期。
  */
 export function enqueueJob(db: Db, params: EnqueueJobParams): boolean {
   const now = params.now ?? Date.now();
@@ -27,8 +32,9 @@ export function enqueueJob(db: Db, params: EnqueueJobParams): boolean {
        created_at = excluded.created_at,
        next_eligible_at = 0,
        error = NULL
-     WHERE jobs.status IN ('done', 'failed')`,
-    [params.kind, params.key, payloadStr, now]
+     WHERE jobs.status = 'done'
+        OR (jobs.status = 'failed' AND COALESCE(jobs.finished_at, 0) <= excluded.created_at - ?)`,
+    [params.kind, params.key, payloadStr, now, FAILED_REQUEUE_COOLDOWN_MS]
   );
 
   return Number(res.changes) > 0;

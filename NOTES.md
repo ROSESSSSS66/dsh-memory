@@ -20,7 +20,13 @@
 
 ### M0-T2 注入路径与协议假设
 - 源码证据确认：`agent/pre-step` 监听器中通过展开 `decision` 并追加 `createUserMessage` 构造的新消息，返回 `{ ...decision, messages: [...decision.messages, message] }`。
-- `source.kind` 约定为 `{ kind: 'plugin', plugin: 'dsh-memory', memoryRefs: [...] }`。
+- **DSH Format v4 来源协议**：
+  - 实测确认 DSH v4 在 `app.asar/lib/types/message-sources.js` 中严禁 `source.kind === 'plugin'`（直接抛出 `SessionFormatError: format v4 message requires a producer-owned source kind`）。
+  - 因此消息源必须采用 Producer-Owned 命名：`{ kind: 'dsh-memory', plugin: 'dsh-memory', memoryRefs: [...] }`。
+  - 系统的投影、会话监听与回溯回声过滤已同步兼容 `kind: 'dsh-memory'` 与旧版 `kind: 'plugin'`。
+- **打包与依赖内联 (tsup noExternal)**：
+  - DSH 加载外部/软链插件时，ESM 解析遵循目标真实路径 `realpath`。
+  - `tsup.config.ts` 必须配置 `noExternal: ['zod', 'fzstd']`，将非 `@deepseek-ai/*` 运行时依赖完全内联入 `dist/index.js`，避免 ESM 动态导入因找不到 `zod` 产生 `ERR_MODULE_NOT_FOUND`。
 - 只有已提交的事件才作为有效注入并更新可见性投影与 injections 记账。
 
 ### M0-T3 架构与生命周期记录

@@ -244,7 +244,9 @@ export function readSessionFile(filePath: string): { header: any; rawLines: stri
         if (typeof (zlib as any).zstdDecompressSync === 'function') {
           try {
             chunk = (zlib as any).zstdDecompressSync(frameBuf, { maxOutputLength: 64 * 1024 * 1024 });
-          } catch {
+          } catch (err: any) {
+            // 超出解压上限时不得改用无上限的 fzstd 重解：几 KB 的帧即可膨胀到耗尽内存
+            if (err?.code === 'ERR_BUFFER_TOO_LARGE') throw err;
             chunk = null;
           }
         }
@@ -392,7 +394,11 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
   }
 
   for (const file of targetFiles) {
-    const parsed = readSessionFile(file);
+    // 单个文件读取或解码失败只跳过该文件，不中断整次回填
+    let parsed: ReturnType<typeof readSessionFile> = null;
+    try {
+      parsed = readSessionFile(file);
+    } catch {}
     if (!parsed) {
       stats.skippedFiles++;
       continue;
@@ -445,7 +451,8 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
       // 回声过滤
       if (ev.type === 'user/message') {
         const source = ev.data?.source;
-        if (source?.kind === 'plugin' && source?.plugin === 'dsh-memory') {
+        const isDshMemory = source?.kind === 'dsh-memory' || (source?.kind === 'plugin' && source?.plugin === 'dsh-memory');
+        if (isDshMemory) {
           stats.filteredEvents++;
           continue;
         }
@@ -502,12 +509,19 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
       } else if (ev.type === 'tool/result') {
         role = 'tool';
         origin_kind = 'tool';
-        tool_name = ev.data?.name || null;
-        const callId = ev.data?.id || ev.data?.callId || ev.data?.toolCallId;
-        if (callId && tool_name) toolCallNames.set(String(callId), tool_name);
-        const resCallId = ev.data?.id || ev.data?.callId || ev.data?.toolCallId;
-        tool_name = ev.data?.name || (resCallId ? toolCallNames.get(String(resCallId)) || null : null);
-        is_error = ev.data?.isError || ev.data?.is_error || ev.data?.status === 'error' ? 1 : 0;
+        // 与在线监听器 (session-listener) 同一套取值：真实日志的调用 ID 位于 data.message 下，
+        // 取不到就没有 tool_name，R4/R5 的失败签名与修复配对对历史会话全部失效
+        const resCallId =
+          ev.data?.toolCallId ||
+          ev.data?.message?.toolCallId ||
+          ev.data?.source?.callId ||
+          ev.data?.callId ||
+          ev.data?.id;
+        tool_name = (resCallId ? toolCallNames.get(String(resCallId)) : undefined) || ev.data?.name || null;
+        is_error =
+          ev.data?.isError || ev.data?.is_error || ev.data?.message?.isError || ev.data?.status === 'error'
+            ? 1
+            : 0;
         const content = ev.data?.message?.content || ev.data?.content;
         if (Array.isArray(content)) {
           rawText = content

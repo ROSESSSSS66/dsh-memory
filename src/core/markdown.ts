@@ -7,6 +7,18 @@ import { workspaceId as resolveWorkspaceId } from './scope.js';
 import { get } from './store.js';
 
 /**
+ * 回收站目录跟随数据库文件所在目录（其次是配置的 dataDir）。
+ * 内存库或未知路径返回 undefined：不得退回用户主目录，否则自定义 dbPath 与测试都会写进真实的 ~/.dsh。
+ */
+export function resolveTrashDir(db: Db, dataDir?: string): string | undefined {
+  const filePath = (db as any).filePath;
+  if (typeof filePath === 'string' && filePath && filePath !== ':memory:') {
+    return path.join(path.dirname(path.resolve(filePath)), '.trash');
+  }
+  return dataDir ? path.join(dataDir, '.trash') : undefined;
+}
+
+/**
  * 序列化单条记忆为 Markdown (带 YAML Frontmatter)
  */
 export function serializeMemoryToMarkdown(record: MemoryRecord, entities: string[] = []): string {
@@ -494,8 +506,10 @@ export function exportMemoryBank(
 export function importMemoryBank(
   db: Db,
   inputDir: string,
-  options?: { workspaceId?: string }
+  // trusted=false：文件并非用户显式指定（如启动时自动扫描到的仓库内文件），只写入待审批候选
+  options?: { workspaceId?: string; trusted?: boolean }
 ): MemoryBankImportResult {
+  const trusted = options?.trusted !== false;
   if (!fs.existsSync(inputDir)) {
     throw new Error(`Memory bank directory not found: ${inputDir}`);
   }
@@ -540,7 +554,9 @@ export function importMemoryBank(
           if (!trimmedLine) continue;
           const slotMatch = /^-\s*\*\*槽位\*\*:\s*`([^`]+)`/.exec(trimmedLine);
           if (slotMatch) {
-            parsedSlotKey = slotMatch[1].trim();
+            // core:* 常驻核心块不接受文件导入，避免仓库内文件替换用户的核心块
+            const slot = slotMatch[1].trim();
+            if (!slot.startsWith('core:')) parsedSlotKey = slot;
             continue;
           }
           if (/^-\s*\*\*(?:ID|重要度|置信度|更新时间)\*\*:/.test(trimmedLine)) {
@@ -583,15 +599,15 @@ export function importMemoryBank(
           content: body,
           summary: cleanSummary.slice(0, 80),
           slot_key: parsedSlotKey,
-          scope: parsedType === 'preference' ? 'user' : 'workspace',
+          scope: trusted && parsedType === 'preference' ? 'user' : 'workspace',
           workspaceId: wsId,
-          source_kind: 'user',
-          confidence: 0.9,
+          source_kind: trusted ? 'user' : 'system',
+          confidence: trusted ? 0.9 : 0.5,
           importance: 8,
-          status: 'active',
-          origin_kinds: ['user'],
+          status: trusted ? 'active' : 'candidate',
+          origin_kinds: [trusted ? 'user' : 'system'],
           sources: [{ session_id: 'memory_bank_import', seq: 0, kind: 'manual', excerpt: cleanSummary }],
-          actor: 'user',
+          actor: trusted ? 'user' : 'maintenance',
         },
         Date.now()
       );

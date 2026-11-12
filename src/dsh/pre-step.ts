@@ -97,7 +97,7 @@ export async function handlePreStep(
     for (const msg of decision.messages) {
       const source = msg?.source;
       // 跳过插件自身及运行时/时间/技能目录快照回声
-      if (source?.kind === 'plugin' && source?.plugin === 'dsh-memory') continue;
+      if (source?.kind === 'dsh-memory' || (source?.kind === 'plugin' && source?.plugin === 'dsh-memory')) continue;
       if (isIgnoredUserMessageSource(source)) continue;
 
       if (msg.role === 'user' && source?.kind === 'user') {
@@ -118,7 +118,10 @@ export async function handlePreStep(
       }
     }
 
-    await ctx.flushIngest?.();
+    // 摄入落库失败（如库被占用）不应连带跳过本步召回
+    try {
+      await ctx.flushIngest?.();
+    } catch {}
     // 5.1 若当前为后续轮次且有用户输入，评估上一轮结果 (§5.9)
     if (turn > 0 && userText.trim()) {
       try {
@@ -228,7 +231,7 @@ export async function handlePreStep(
       )
     );
     const frozenSource = Object.freeze({
-      kind: 'plugin' as const,
+      kind: 'dsh-memory' as const,
       plugin: 'dsh-memory',
       memoryRefs: frozenMemoryRefs,
       memoryInjection: Object.freeze({

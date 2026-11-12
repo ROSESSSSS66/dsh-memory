@@ -135,6 +135,7 @@ export function LLMConfigModal({
   const [dailyTokens, setDailyTokens] = useState(200000);
 
   const [dirty, setDirty] = useState(false);
+  const [baseUrlFocused, setBaseUrlFocused] = useState(false);
   const [statusText, setStatusText] = useState('修改将自动保存并即时热生效');
   const [statusTone, setStatusTone] = useState<'muted' | 'ok' | 'err'>('muted');
 
@@ -242,9 +243,9 @@ export function LLMConfigModal({
             : '已自动保存并激活全自动后台进化'
         );
         setStatusTone('ok');
-      } catch {
-        setDirty(true);
-        setStatusText('保存失败，请检查网络连接');
+      } catch (err: any) {
+        // 不重新置 dirty：被服务端拒绝的保存会每 550ms 无限重发，等下一次编辑再重试
+        setStatusText(`保存失败：${err?.message || '请检查网络连接'}`);
         setStatusTone('err');
       }
     },
@@ -252,13 +253,14 @@ export function LLMConfigModal({
   );
 
   // Debounced auto-save when any field changes
+  // 光标仍在接口地址输入框内时不保存：半截地址会被持久化、加入外发白名单并收到连通测试携带的密钥
   useEffect(() => {
-    if (!open || !dirty) return;
+    if (!open || !dirty || baseUrlFocused) return;
     const t = setTimeout(() => {
       flushSave(true);
     }, 550);
     return () => clearTimeout(t);
-  }, [open, dirty, useDshLlm, baseURL, model, protocol, apiKey, apiKeyEnv, dailyCalls, dailyTokens, flushSave]);
+  }, [open, dirty, baseUrlFocused, useDshLlm, baseURL, model, protocol, apiKey, apiKeyEnv, dailyCalls, dailyTokens, flushSave]);
 
   const handleClose = useCallback(async () => {
     if (latestRef.current.dirty) {
@@ -371,6 +373,8 @@ export function LLMConfigModal({
                 <input
                   className="dshm-field-input dshm-field-input--mono"
                   value={baseURL}
+                  onFocus={() => setBaseUrlFocused(true)}
+                  onBlur={() => setBaseUrlFocused(false)}
                   onChange={(e) => {
                     setUseDshLlm(false);
                     setBaseURL(e.target.value);

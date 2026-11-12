@@ -22,10 +22,23 @@ export interface ChannelContext {
   cfg?: PluginConfig;
 }
 
+/** lexical 并集快路径的原始结果，供同一次召回内的 typed 通道复用，避免重复执行同一条 FTS MATCH */
+export interface LexicalFastPath {
+  rows?: Array<{ id: string; ok: number; type: string }>;
+}
+
+const TYPED_CHANNEL_TYPES = new Set(['procedural', 'failure', 'episodic']);
+const LEXICAL_FAST_LIMIT = 250;
+
 /**
  * 1. Lexical 通道 (全文检索 BM25)
  */
-export function recallLexical(db: Db, plan: QueryPlan, ctx: ChannelContext): Candidate[] {
+export function recallLexical(
+  db: Db,
+  plan: QueryPlan,
+  ctx: ChannelContext,
+  shared?: LexicalFastPath
+): Candidate[] {
   if (!plan.tokens || plan.tokens.length === 0) {
     return [];
   }
@@ -83,15 +96,15 @@ export function recallLexical(db: Db, plan: QueryPlan, ctx: ChannelContext): Can
     const matchExpr = matchTokens.join(' OR ');
 
     // 2. 并集快路径：利用 FTS5 原生 C 层 Top-K 最小堆 (INDEX 32:M1) 先取前 250 条，避免 10k+ 命中时的全表回表与临时排序树
-    const fastRows = db.all<{ id: string; ok: number }>(
+    const fastRows = db.all<{ id: string; ok: number; type: string }>(
       `WITH top_fts AS MATERIALIZED (
          SELECT rowid, rank
          FROM memory_fts
          WHERE memory_fts MATCH ?
          ORDER BY rank
-         LIMIT 250
+         LIMIT ${LEXICAL_FAST_LIMIT}
        )
-       SELECT m.id,
+       SELECT m.id, m.type,
               CASE WHEN (${scope.sql})
                     AND m.status IN ('active', 'frozen')
                     AND m.type != 'meta'
@@ -100,11 +113,12 @@ export function recallLexical(db: Db, plan: QueryPlan, ctx: ChannelContext): Can
        JOIN memories m ON m.rowid_ = f.rowid`,
       [matchExpr, ...scope.params]
     );
+    if (shared) shared.rows = fastRows;
 
     let validIds = fastRows.filter((r) => r.ok === 1).map((r) => r.id);
 
     // 完备性回退：仅当全局 Top-250 触顶且有效同域结果不足 50 条时，回退全量关联查询保证 100% 精确召回
-    if (fastRows.length >= 250 && validIds.length < 50) {
+    if (fastRows.length >= LEXICAL_FAST_LIMIT && validIds.length < 50) {
       const fullRows = db.all<{ id: string }>(
         `SELECT m.id
          FROM memory_fts f
@@ -177,12 +191,27 @@ export function recallEntity(db: Db, plan: QueryPlan, ctx: ChannelContext): Cand
 /**
  * 3. Typed 通道 (procedural / causal 意图下的特定类型检索)
  */
-export function recallTyped(db: Db, plan: QueryPlan, ctx: ChannelContext): Candidate[] {
+export function recallTyped(
+  db: Db,
+  plan: QueryPlan,
+  ctx: ChannelContext,
+  shared?: LexicalFastPath
+): Candidate[] {
   if (!plan.intents.procedural && !plan.intents.causal) {
     return [];
   }
   if (!plan.tokens || plan.tokens.length === 0) {
     return [];
+  }
+
+  // lexical 通道刚用同一批 token 跑过 Top-K：未触顶时其结果已包含全部命中，直接按类型筛选即可
+  if (shared?.rows) {
+    const typedIds = shared.rows
+      .filter((r) => r.ok === 1 && TYPED_CHANNEL_TYPES.has(r.type))
+      .map((r) => r.id);
+    if (shared.rows.length < LEXICAL_FAST_LIMIT || typedIds.length >= 20) {
+      return typedIds.slice(0, 20).map((id, idx) => ({ id, channel: 'typed', rank: idx + 1 }));
+    }
   }
 
   const scope = scopeFilterSQL({ workspaceId: ctx.workspaceId, sessionId: ctx.sessionId });
@@ -446,7 +475,8 @@ export function runAllChannels(
   };
 
   // lexical 总是运行
-  results.lexical = recallLexical(db, plan, ctx);
+  const lexicalFastPath: LexicalFastPath = {};
+  results.lexical = recallLexical(db, plan, ctx, lexicalFastPath);
   if (Date.now() - t0 > onlineBudget) return results;
 
   // entity
@@ -454,7 +484,7 @@ export function runAllChannels(
   if (Date.now() - t0 > onlineBudget) return results;
 
   // typed
-  results.typed = recallTyped(db, plan, ctx);
+  results.typed = recallTyped(db, plan, ctx, lexicalFastPath);
   if (Date.now() - t0 > onlineBudget) return results;
 
   // temporal

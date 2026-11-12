@@ -13,7 +13,7 @@ import {
 import { removeCachedRuntimeEmbedding } from '../core/vector.js';
 import { estimateTokens } from '../core/tokens.js';
 import { isWorkspaceExcluded, memoryPrivacyFilterSQL, memoryWorkspaceIds } from '../core/privacy.js';
-import { getUnchangedReviewedMemory, sameMemoryOwner } from './review-snapshot.js';
+import { getUnchangedReviewedMemory, isProtectedFromModelDiscard, sameMemoryOwner } from './review-snapshot.js';
 import { hasUserEvidence } from '../core/trust.js';
 
 export interface DistillBatchOptions {
@@ -289,7 +289,8 @@ export async function distillSession(
             target &&
             target.status !== 'frozen' &&
             target.pinned === 0 &&
-            (target.status === 'active' || target.status === 'candidate')
+            (target.status === 'active' || target.status === 'candidate') &&
+            !isProtectedFromModelDiscard(db, target)
           ) {
             saveVersionSnapshot(db, target, 'llm_distill_discard', 'llm', now);
             const nextStatus = target.status === 'candidate' ? 'rejected' : 'archived';
@@ -334,7 +335,10 @@ export async function distillSession(
             oldMem.status !== 'frozen' &&
             (oldMem.status === 'active' || oldMem.status === 'candidate')
           ) {
-            const canActivate = hasUserEvidence(db, newMemory) && !item.origin_kinds.includes('web');
+            // 混有工具/网页/系统注入来源的条目不得绕过 upsertCandidate 的候选规则直接生效
+            const canActivate =
+              hasUserEvidence(db, newMemory) &&
+              !item.origin_kinds.some(kind => kind === 'web' || kind === 'tool' || kind === 'system');
             if (oldMem.status === 'active' && !canActivate) continue;
             const slotConflict = canActivate && newMemory.slot_key ? db.get<MemoryRecord>(
               `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ?

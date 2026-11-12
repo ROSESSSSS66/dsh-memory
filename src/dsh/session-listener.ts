@@ -83,7 +83,8 @@ export class SessionListener {
     if (event.type === 'user/message') {
       const source = event.data?.source;
       // Committed plugin messages update telemetry, but never become extraction evidence.
-      if (source?.kind === 'plugin' && source?.plugin === 'dsh-memory') {
+      const isDshMemory = source?.kind === 'dsh-memory' || (source?.kind === 'plugin' && source?.plugin === 'dsh-memory');
+      if (isDshMemory) {
         const refs = MemoryRefsSchema.safeParse(source.memoryRefs);
         const metadata = source.memoryInjection;
         if (!refs.success) {

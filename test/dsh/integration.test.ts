@@ -101,7 +101,7 @@ describe('M2-T3 End-to-End Acceptance Integration', () => {
     expect(decision1.messages.length).toBe(2);
     const injectedMsg = decision1.messages[1];
     expect(injectedMsg.role).toBe('user');
-    expect(injectedMsg.source.kind).toBe('plugin');
+    expect(injectedMsg.source.kind).toBe('dsh-memory');
     expect(injectedMsg.source.plugin).toBe('dsh-memory');
     expect(injectedMsg.content[0].text).toContain('<memory_context');
     expect(injectedMsg.content[0].text).toContain('PostgreSQL 16');

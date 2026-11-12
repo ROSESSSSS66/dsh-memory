@@ -798,7 +798,9 @@ export function autoHealMemoryHealth(
     if (!srcRow || !tgtRow) continue;
     if (srcRow.status === 'frozen') continue;
 
-    if (pair.reason === 'same_slot_key' || pair.similarity >= 0.65) {
+    // 仅自动合并同槽位冗余：词面高重合不代表同一事实（如仅「测试环境 / 生产环境」不同的两条规则），
+    // 而合并只保留目标正文，其余重合对留在体检报告中由用户处理
+    if (pair.reason === 'same_slot_key') {
       const mRes = mergeMemories(
         db,
         pair.sourceId,
@@ -835,8 +837,16 @@ export function autoHealMemoryHealth(
       mTo.confidence * 0.5 +
       (mTo.pinned ? 0.5 : 0) +
       (mTo.status === 'frozen' ? 1.0 : 0);
-    const winner =
-      scoreA > scoreB || (scoreA === scoreB && mFrom.updated_at >= mTo.updated_at) ? mFrom : mTo;
+    // 用户后批准的一方直接胜出：评分只看效用与置信度，会把用户刚批准的新结论判给旧记忆
+    const userApprovedLater = (a: MemoryRecord, b: MemoryRecord) =>
+      a.approved_by === 'user' && (a.approved_at ?? 0) > (b.approved_at ?? 0);
+    const winner = userApprovedLater(mFrom, mTo)
+      ? mFrom
+      : userApprovedLater(mTo, mFrom)
+        ? mTo
+        : scoreA > scoreB || (scoreA === scoreB && mFrom.updated_at >= mTo.updated_at)
+          ? mFrom
+          : mTo;
     const loser = winner.id === mFrom.id ? mTo : mFrom;
 
     if (loser.status === 'frozen' || loser.pinned === 1) continue;
