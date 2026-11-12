@@ -9,6 +9,9 @@ import { callOfflineLLM } from './llm.js';
 import { upsertCandidate } from '../core/writer.js';
 
 import { workspaceId as normalizeWsId } from '../core/scope.js';
+import { createHash } from 'node:crypto';
+
+const MAX_CLUSTER_RECORDS = 500;
 
 export interface SourceSnapshot {
   id: string;
@@ -38,11 +41,15 @@ export function findConsolidationClusters(
   cfg: PluginConfig
 ): MemoryCluster[] {
   const wsId = normalizeWsId(workspaceId);
+  // 只聚类最近的 MAX_CLUSTER_RECORDS 条，保证单次计算有界
   const records = db.all<MemoryRecord>(
-    `SELECT * FROM memories
-     WHERE scope = 'workspace' AND workspace_id = ?
-       AND status = 'active' AND type IN ('episodic', 'failure')
-     ORDER BY created_at ASC`,
+    `SELECT * FROM (
+       SELECT * FROM memories
+       WHERE scope = 'workspace' AND workspace_id = ?
+         AND status = 'active' AND type IN ('episodic', 'failure')
+       ORDER BY created_at DESC
+       LIMIT ${MAX_CLUSTER_RECORDS}
+     ) ORDER BY created_at ASC`,
     [wsId]
   );
 
@@ -61,28 +68,38 @@ export function findConsolidationClusters(
 
   // 2. 建图并寻找连通分量 (BFS)
   const adj = new Map<string, string[]>();
+  const recordById = new Map<string, MemoryRecord>();
   for (const m of records) {
     adj.set(m.id, []);
+    recordById.set(m.id, m);
   }
 
+  // 实体倒排索引：只比较共享至少 1 个实体的记录对，避免对全部记录做两两比较
+  const entityIndex = new Map<string, number[]>();
   for (let i = 0; i < records.length; i++) {
-    for (let j = i + 1; j < records.length; j++) {
-      const m1 = records[i];
-      const m2 = records[j];
+    for (const entity of new Set(recordEntities.get(records[i].id)!)) {
+      const bucket = entityIndex.get(entity);
+      if (bucket) bucket.push(i);
+      else entityIndex.set(entity, [i]);
+    }
+  }
 
-      // 必须共享至少 1 个实体
-      const ent1 = recordEntities.get(m1.id)!;
-      const ent2 = recordEntities.get(m2.id)!;
-      const sharesEntity = ent1.some(e => ent2.includes(e));
-      if (!sharesEntity) continue;
+  const compared = new Set<number>();
+  for (const bucket of entityIndex.values()) {
+    for (let a = 0; a < bucket.length; a++) {
+      for (let b = a + 1; b < bucket.length; b++) {
+        const pairKey = bucket[a] * records.length + bucket[b];
+        if (compared.has(pairKey)) continue;
+        compared.add(pairKey);
 
-      // Jaccard 相似度必须 >= 0.35
-      const t1 = recordTokens.get(m1.id)!;
-      const t2 = recordTokens.get(m2.id)!;
-      const sim = jaccard(t1, t2);
-      if (sim >= 0.35) {
-        adj.get(m1.id)!.push(m2.id);
-        adj.get(m2.id)!.push(m1.id);
+        const m1 = records[bucket[a]];
+        const m2 = records[bucket[b]];
+        // Jaccard 相似度必须 >= 0.35
+        const sim = jaccard(recordTokens.get(m1.id)!, recordTokens.get(m2.id)!);
+        if (sim >= 0.35) {
+          adj.get(m1.id)!.push(m2.id);
+          adj.get(m2.id)!.push(m1.id);
+        }
       }
     }
   }
@@ -99,7 +116,7 @@ export function findConsolidationClusters(
 
     while (queue.length > 0) {
       const currId = queue.shift()!;
-      const currMem = records.find(r => r.id === currId)!;
+      const currMem = recordById.get(currId)!;
       component.push(currMem);
 
       for (const neighborId of adj.get(currId) || []) {
@@ -273,7 +290,9 @@ text: ${m.content}`
             ? 'web'
             : src.kind === 'assistant_msg' || src.kind === 'assistant'
               ? 'assistant'
-              : 'user';
+              : src.kind === 'system_msg' || src.kind === 'system'
+                ? 'system'
+                : 'user';
       evidenceLines.push(`[E#${currentSeq}] (${src.session_id}#${src.seq}) ${excerpt}`);
       evidenceLedger.set(currentSeq, {
         seq: currentSeq,
@@ -304,6 +323,13 @@ text: ${m.content}`
     renderedItems: itemBlocks.join('\n\n'),
     evidenceTranscript: evidenceLines.join('\n'),
   });
+
+  // 模型对同一聚类给出过「无可提炼」的结论且输入未变时不再重发，否则每个时间桶都会重复消耗配额
+  const noopKey = `consolidate:noop:${createHash('sha256').update(cluster.clusterKey).digest('hex').slice(0, 32)}`;
+  const fingerprint = createHash('sha256').update(`${PROMPT_CONSOLIDATE.version}\n${userPrompt}`).digest('hex');
+  if (db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [noopKey])?.value === fingerprint) {
+    return { success: true, clusterKey: cluster.clusterKey };
+  }
 
   // 3. 调用离线 LLM
   const llmRes = await callOfflineLLM(
@@ -347,6 +373,10 @@ text: ${m.content}`
   }
 
   if (parseRes.items.length === 0) {
+    db.run(
+      `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [noopKey, fingerprint]
+    );
     return {
       success: true,
       clusterKey: cluster.clusterKey,

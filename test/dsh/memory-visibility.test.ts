@@ -193,4 +193,32 @@ describe('Injection lifecycle and zero budgets', () => {
     }, undefined, cfg);
     expect(result.pass).toBe(true);
   });
+
+  it('accepts format v4 producer-owned source kind (kind: dsh-memory)', () => {
+    const v4Committed = {
+      type: 'user/message', seq: 15, surfaceOp: { op: 'append' },
+      data: { id: 'msg-15', source: { kind: 'dsh-memory', plugin: 'dsh-memory', memoryRefs: [{ id: fullId, contentRev: 1 }] } },
+    };
+    const state = foldMemoryVisibility(emptyMemoryVisibility(), v4Committed);
+    expect(visibleMemoryRefs(state)).toEqual(new Set([`${fullId}@1`]));
+  });
+
+  it('prefers handle.stateOf over deprecated sessionProjections.stateOf', async () => {
+    const dummySession = { id: 'sess-test' };
+    const mockHandle = {
+      stateOf: vi.fn().mockReturnValue({ visibleInjections: [{ messageId: 'm1', seq: 1, refs: [{ id: fullId, contentRev: 1 }] }], invalidReferenceEvents: 0 }),
+      dispose: vi.fn(),
+    };
+    const mockCtx = {
+      sessionProjections: {
+        register: vi.fn().mockResolvedValue(mockHandle),
+        stateOf: vi.fn(),
+      },
+    };
+    const reader = await registerMemoryVisibility(mockCtx);
+    const refs = reader.getVisibleRefs(dummySession);
+    expect(mockHandle.stateOf).toHaveBeenCalledWith(dummySession);
+    expect(mockCtx.sessionProjections.stateOf).not.toHaveBeenCalled();
+    expect(refs).toEqual(new Set([`${fullId}@1`]));
+  });
 });

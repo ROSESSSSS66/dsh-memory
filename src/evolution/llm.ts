@@ -249,13 +249,20 @@ export async function callOfflineLLM(
   // 检查目标 endpoint 是否明确授权
   let baseURL = (cfg.offlineLLM.baseURL || '').trim();
   const usingHostFallback = !baseURL && !!cfg.offlineLLM.useDshLlm;
+  // 宿主兜底按「同一供应商的 URL + 密钥」成对解析：分别取各自第一个非空值会把
+  // 一家的密钥发给另一家的端点（如 ANTHROPIC_BASE_URL 配上 OPENAI_API_KEY）
+  let hostFallbackKey = '';
+  let configuredProtocol = cfg.offlineLLM.protocol;
   if (usingHostFallback) {
-    baseURL = (
-      process.env.DSH_LLM_BASE_URL ||
-      process.env.OPENAI_BASE_URL ||
-      process.env.ANTHROPIC_BASE_URL ||
-      ''
-    ).trim();
+    for (const prefix of ['DSH_LLM', 'OPENAI', 'ANTHROPIC']) {
+      const url = (process.env[`${prefix}_BASE_URL`] || '').trim();
+      if (url) {
+        baseURL = url;
+        hostFallbackKey = process.env[`${prefix}_API_KEY`] || '';
+        if (prefix === 'ANTHROPIC') configuredProtocol = 'messages';
+        break;
+      }
+    }
   }
   if (!baseURL) {
     return { ok: false, error: 'missing_base_url' };
@@ -302,21 +309,15 @@ export async function callOfflineLLM(
       : params.maxOutputTokens;
 
   // 读取 API 密钥（优先直接配置的 apiKey，其次从环境变量读取）
-  let apiKey = cfg.offlineLLM.apiKey || '';
+  // 宿主兜底时只用与端点成对的宿主密钥：此前为自定义端点保存的密钥不属于这个端点
+  let apiKey = usingHostFallback ? hostFallbackKey : cfg.offlineLLM.apiKey || '';
   const keyEnv = (cfg.offlineLLM.apiKeyEnv || '').trim();
-  if (!apiKey && keyEnv && isSafeApiKeyEnvName(keyEnv) && process.env[keyEnv]) {
+  if (!apiKey && !usingHostFallback && keyEnv && isSafeApiKeyEnvName(keyEnv) && process.env[keyEnv]) {
     apiKey = process.env[keyEnv]!;
-  }
-  if (!apiKey && usingHostFallback) {
-    apiKey =
-      process.env.DSH_LLM_API_KEY ||
-      process.env.OPENAI_API_KEY ||
-      process.env.ANTHROPIC_API_KEY ||
-      '';
   }
 
   // 构造标准端点 URL 与协议负载
-  let { endpointUrl, protocol } = resolveEndpointAndProtocol(baseURL, cfg.offlineLLM.protocol);
+  let { endpointUrl, protocol } = resolveEndpointAndProtocol(baseURL, configuredProtocol);
   let { requestBody, headers: protocolHeaders } = buildProtocolPayload(
     protocol,
     model,

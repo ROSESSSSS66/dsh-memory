@@ -1,12 +1,12 @@
 # 🧠 DSH Self-Evolving Memory System (`dsh-memory`)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.8.0_Hardened_DSH_Runtime_%26_Schema_v2-indigo?style=flat-square" alt="v0.8.0" />
+  <img src="https://img.shields.io/badge/Version-v0.8.1_Hardened_DSH_Runtime_%26_Schema_v2-indigo?style=flat-square" alt="v0.8.1" />
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
   <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
-  <img src="https://img.shields.io/badge/Tests-505_Passed_(60_Suites)-success?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-536_Passed_(61_Suites)-success?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Recall%40Inject-100.0%25_(120%2F120)-blueviolet?style=flat-square" alt="Recall Rate" />
   <img src="https://img.shields.io/badge/Online_Latency-p95_0.9ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />

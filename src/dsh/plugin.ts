@@ -34,6 +34,8 @@ import {
   cleanOldTelemetry,
   pruneInvalidMemories,
   curateMemoriesWithLLM,
+  backupDatabase,
+  getBackupTimestamp,
 } from '../evolution/maintenance.js';
 import { registerWebRoutes } from './web.js';
 import { backfillMissingEmbeddings } from '../core/vector.js';
@@ -65,14 +67,11 @@ function resolveCtxAgentCwd(ctx: any, sessionId?: string): string {
   try {
     const list = typeof ctx?.agents?.list === 'function' ? ctx.agents.list() : undefined;
     if (Array.isArray(list) && list.length > 0) {
+      // 只认会话匹配的 agent：退回「列表中第一个有 cwd 的 agent」会把请求落到无关工作区的记忆上
       if (sessionId) {
         const matched = list.find((a: any) => a?.session?.id === sessionId);
         const matchedCwd = extractAgentCwd(matched);
         if (matchedCwd) return matchedCwd;
-      }
-      for (const a of list) {
-        const c = extractAgentCwd(a);
-        if (c) return c;
       }
     }
   } catch {}
@@ -349,6 +348,24 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
       weaveZettelkastenLinks(currentDb, { maxNewLinks: 25 });
       cleanOldTelemetry(currentDb);
       checkSentinelAndRollback(currentDb);
+
+      // 每日一次热备 (§10)：backupDatabase 此前没有任何调用方，自动备份从未执行
+      try {
+        const today = getBackupTimestamp().slice(0, 8);
+        const lastBackupDay = currentDb.get<{ value: string }>(
+          "SELECT value FROM meta WHERE key = 'backup.last_day'"
+        )?.value;
+        if (dbPath !== ':memory:' && lastBackupDay !== today) {
+          backupDatabase(currentDb, dbPath, path.join(path.dirname(path.resolve(dbPath)), 'backups'));
+          currentDb.run(
+            `INSERT INTO meta (key, value) VALUES ('backup.last_day', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+            [today]
+          );
+        }
+      } catch (err: any) {
+        console.warn('[dsh-memory] Daily backup failed:', err?.message || err);
+      }
 
       // 若线上自动收割样本 (eval_cases.suite = 'harvested') 新增达到阈值，全自动排队策略进化任务
       try {
@@ -791,13 +808,11 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                   }
                 }
               }
-              const clusters = findConsolidationClusters(currentDb, wsId, liveCfg);
-              if (clusters.length > 0) {
-                const bucket1h = Math.floor(now / 3600_000);
-                localScheduler.enqueue('consolidate', `auto_consolidate:${wsId}:${bucket1h}`, {
-                  workspaceId: wsId,
-                });
-              }
+              // 聚类计算留给空闲期的 consolidate 任务自行完成，不在每轮对话结束时同步阻塞宿主事件循环
+              const bucket1h = Math.floor(now / 3600_000);
+              localScheduler.enqueue('consolidate', `auto_consolidate:${wsId}:${bucket1h}`, {
+                workspaceId: wsId,
+              });
 
               // 节流执行本地无效记忆清理与 A-Mem 双链织网 (至少间隔 60s)，每 10 分钟时间桶自动排队一次后台自愈与 LLM 记忆审阅淘汰
               if (now - lastTurnWeaveAt >= 60_000) {

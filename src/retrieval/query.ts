@@ -42,19 +42,23 @@ export function parseTimeRange(text: string, now: number): { from: number; to: n
     const year = parseInt(ymdMatch[1], 10);
     const month = parseInt(ymdMatch[2], 10) - 1;
     const day = parseInt(ymdMatch[3], 10);
+    // 不存在的日期（如 2026-13-45）会被 Date 溢出成另一天，直接视为无时间范围
+    if (month < 0 || month > 11 || day < 1 || day > 31) return undefined;
     const start = new Date(year, month, day, 0, 0, 0, 0).getTime();
     const end = new Date(year, month, day, 23, 59, 59, 999).getTime();
     return { from: start, to: end };
   }
 
-  // 2. M月D日
-  const mdMatch = text.match(/(\d{1,2})月(\d{1,2})[日号]/);
+  // 2. [YYYY年]M月D日
+  const mdMatch = text.match(/(?:(\d{4})年)?(\d{1,2})月(\d{1,2})[日号]/);
   if (mdMatch) {
-    let year = nowDate.getFullYear();
-    const month = parseInt(mdMatch[1], 10) - 1;
-    const day = parseInt(mdMatch[2], 10);
+    const explicitYear = mdMatch[1] ? parseInt(mdMatch[1], 10) : undefined;
+    let year = explicitYear ?? nowDate.getFullYear();
+    const month = parseInt(mdMatch[2], 10) - 1;
+    const day = parseInt(mdMatch[3], 10);
+    if (month < 0 || month > 11 || day < 1 || day > 31) return undefined;
     let start = new Date(year, month, day, 0, 0, 0, 0).getTime();
-    if (start > now) {
+    if (explicitYear === undefined && start > now) {
       year -= 1;
       start = new Date(year, month, day, 0, 0, 0, 0).getTime();
     }

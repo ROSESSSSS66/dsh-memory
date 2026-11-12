@@ -14,7 +14,8 @@ export interface JobRecord {
 
 export type JobHandlerResult =
   | { action: 'done' }
-  | { action: 'skipped'; reason: string; nextEligibleAt?: number }
+  // nonRetryable：条件已是终态（目标不存在、无可验证证据），不再于次日重新执行
+  | { action: 'skipped'; reason: string; nextEligibleAt?: number; nonRetryable?: boolean }
   | { action: 'retry'; error: string }
   | { action: 'failed'; error: string; nonRetryable?: boolean };
 

@@ -88,9 +88,13 @@ export function validateConfig(raw: Partial<PluginConfig> & Record<string, any> 
     rawPrivacy.offlineConsent = true;
   }
 
+  // 别名只在首次归一化时生效：若随结果保留，后续对已归一化配置的再次校验
+  // 会把用户已清空的 apiKey / baseURL 用旧别名值重新填回
+  const { llmBaseUrl: _llmBaseUrl, llmApiKey: _llmApiKey, llmModel: _llmModel, ...rawRest } = raw;
+
   const cfg: PluginConfig = {
     ...DEFAULTS,
-    ...raw,
+    ...rawRest,
     offlineLLM: { ...DEFAULTS.offlineLLM, ...rawOffline },
     embedding: { ...DEFAULTS.embedding, ...(raw.embedding || {}) },
     privacy: { ...DEFAULTS.privacy, ...rawPrivacy },
@@ -210,11 +214,32 @@ function ensureConfiguredEndpointAllowed(cfg: PluginConfig): PluginConfig {
   return cfg;
 }
 
+/**
+ * 控制台可以修改的配置项。覆盖层只保存这些键：若保存整份合并后的配置，
+ * 之后宿主配置里新增的 excludeWorkspaces、预算等修改都会被旧快照盖掉。
+ */
+const OVERRIDE_KEYS = ['offlineLLM', 'privacy', 'dailyLLMCalls', 'dailyLLMTokens', 'distillMaxInputTokens'] as const;
+
+function pickOverride(source: Record<string, any> | null | undefined): Record<string, any> {
+  const picked: Record<string, any> = {};
+  if (!source || typeof source !== 'object') return picked;
+  for (const key of OVERRIDE_KEYS) {
+    if (source[key] !== undefined) picked[key] = source[key];
+  }
+  return picked;
+}
+
+function readStoredOverride(db: any): Record<string, any> | null {
+  const row = db.get('SELECT value FROM meta WHERE key = ?', ['config_override']);
+  if (!row?.value) return null;
+  // 旧版本写入的是整份配置快照，读取时同样只取覆盖键
+  return pickOverride(JSON.parse(row.value));
+}
+
 export function loadConfigFromDb(db: any, baseCfg: PluginConfig = DEFAULTS): PluginConfig {
   try {
-    const row = db.get('SELECT value FROM meta WHERE key = ?', ['config_override']);
-    if (row?.value) {
-      const parsed = JSON.parse(row.value);
+    const parsed = readStoredOverride(db);
+    if (parsed) {
       return ensureConfiguredEndpointAllowed(
         validateConfig({
           ...baseCfg,
@@ -234,19 +259,22 @@ export function saveConfigToDb(
   patch: Partial<PluginConfig>,
   baseCfg: PluginConfig = DEFAULTS
 ): PluginConfig {
-  const current = loadConfigFromDb(db, baseCfg);
-  const merged: any = {
-    ...current,
-    ...patch,
-    offlineLLM: { ...current.offlineLLM, ...(patch.offlineLLM || {}) },
-    privacy: { ...current.privacy, ...(patch.privacy || {}) },
-    embedding: { ...current.embedding, ...(patch.embedding || {}) },
-  };
-  const updated = ensureConfiguredEndpointAllowed(validateConfig(merged));
+  let stored: Record<string, any> = {};
+  try {
+    stored = readStoredOverride(db) || {};
+  } catch {}
+  const incoming = pickOverride(patch);
+  const override: Record<string, any> = { ...stored, ...incoming };
+  if (stored.offlineLLM || incoming.offlineLLM) {
+    override.offlineLLM = { ...(stored.offlineLLM || {}), ...(incoming.offlineLLM || {}) };
+  }
+  if (stored.privacy || incoming.privacy) {
+    override.privacy = { ...(stored.privacy || {}), ...(incoming.privacy || {}) };
+  }
   db.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
     'config_override',
-    JSON.stringify(updated),
+    JSON.stringify(override),
   ]);
-  return updated;
+  return loadConfigFromDb(db, baseCfg);
 }
 

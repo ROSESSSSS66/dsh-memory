@@ -151,10 +151,10 @@ export function MemoryApp() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error || 'Save failed');
-    if (json.ok && json.config) {
+    // 先读响应体：服务端的 400 带有具体原因（地址不合法、环境变量名不允许等）
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+    if (json.config) {
       setLlmConfig(json.config);
       fetchAll();
     }

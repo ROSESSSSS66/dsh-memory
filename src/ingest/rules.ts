@@ -114,7 +114,8 @@ export function runRules(
   // ==========================================
   if (event.origin_kind === 'user' && event.role === 'user' && event.text) {
     const trimmed = event.text.trim();
-    const r1Match = trimmed.match(/^(?:请)?(?:记住|记下|remember)[:：,，\s]*([\s\S]{4,400})$/i);
+    // 关键词后必须是分隔或正文：排除 "Remembering ..."、"记住了，谢谢" 这类并非指令的句子
+    const r1Match = trimmed.match(/^(?:请)?(?:记住|记下|remember)(?![a-z了来过吗])[:：,，\s]*([\s\S]{4,400})$/i);
     if (r1Match) {
       const rawContent = r1Match[1].trim();
       if (rawContent.length >= 4 && rawContent.length <= 400) {
@@ -172,7 +173,11 @@ export function runRules(
         !slotRes.slotKey &&
         ONE_OFF_TASK_PROMPT_REGEX.test(trimmed) &&
         !DURABLE_HABIT_MARKER_REGEX.test(trimmed);
-      const isQuotedOrExample = /(?:^>|```|例如|比如|有人说|示例|规则说明|“|”|")/i.test(trimmed);
+      // 疑问句（"这个测试为什么总是失败？"）只是碰巧含有偏好词，与引用/示例一样只记为待审批候选
+      const isQuotedOrExample =
+        /(?:^>|```|例如|比如|有人说|示例|规则说明|“|”|")/i.test(trimmed) ||
+        /[?？]\s*$/.test(trimmed) ||
+        /(?:为什么|怎么|吗[?？。!！\s]*$)|\b(?:why|how|what)\b/i.test(trimmed);
       const privCheck = redactSecrets(trimmed);
       if (!isOneOffTask && !privCheck.hasSensitive && !trimmed.includes('[REDACTED:')) {
         let scope: Scope = slotRes.scope || 'user';

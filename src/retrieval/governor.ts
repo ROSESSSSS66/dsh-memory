@@ -231,7 +231,13 @@ export function govern(
 
   // 6. 最终验证与削减：确保完整实际渲染块严格 <= budget
   while (selected.length > 0) {
-    const actualTokens = testBudget(selected.map((s) => ({ memory: s.memory, form: s.form })));
+    // 携带 db 渲染：短码发生前缀碰撞时会变长，必须按最终实际输出复核
+    const actualTokens = budgetTokens(
+      render(
+        selected.map((s) => ({ memory: s.memory, form: s.form })),
+        { strategyVersion, layer, db: opts.db, scopeCtx: opts.scopeCtx }
+      )
+    );
     if (actualTokens <= opts.budget) {
       break;
     }

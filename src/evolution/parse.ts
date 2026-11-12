@@ -26,6 +26,43 @@ const VALID_MEMORY_TYPES = new Set<MemoryType>([
 const VALID_SCOPES = new Set<Scope>(['global', 'workspace', 'session']);
 const VALID_SLOT_KEY_REGEX = /^[a-z0-9.:_-]+$/;
 const VALID_MEMORY_ID_REGEX = /^m_[a-z0-9_]{4,32}$/i;
+// core:* 为 Letta 常驻核心块保留命名空间，只能经用户/系统路径写入，模型输出不得占用
+const RESERVED_SLOT_PREFIX = 'core:';
+const WORKSPACE_PLACEHOLDER = '<workspace>';
+const MAX_WORKSPACE_GAP = 260;
+
+/**
+ * 判定 quote 是否为 text 的连续子串，其中每个 <workspace> 占位符对应 1..260 个非换行字符。
+ * 逐段线性扫描而非拼接正则：quote 由模型给出，多个占位符串联的 `[^\r\n]{1,260}` 会产生灾难性回溯，
+ * 且该校验同步执行，任务超时与 AbortSignal 均无法打断。
+ */
+function matchesWithWorkspaceGaps(text: string, quote: string): boolean {
+  const parts = quote.split(WORKSPACE_PLACEHOLDER);
+  // reach[i] = 1 表示已匹配的前缀可以结束于 text 偏移 i
+  let reach = new Uint8Array(text.length + 1);
+  for (let s = 0; s + parts[0].length <= text.length; s++) {
+    if (text.startsWith(parts[0], s)) reach[s + parts[0].length] = 1;
+  }
+
+  for (let p = 1; p < parts.length; p++) {
+    const part = parts[p];
+    const next = new Uint8Array(text.length + 1);
+    let lastReach = -1;
+    let lastNewline = -1;
+    for (let s = 1; s + part.length <= text.length; s++) {
+      if (reach[s - 1]) lastReach = s - 1;
+      const prev = text.charCodeAt(s - 1);
+      if (prev === 10 || prev === 13) lastNewline = s - 1;
+      // 最近的可达偏移同时是间隔最短、最不可能跨行的候选
+      if (lastReach > lastNewline && s - lastReach <= MAX_WORKSPACE_GAP && text.startsWith(part, s)) {
+        next[s + part.length] = 1;
+      }
+    }
+    reach = next;
+  }
+
+  return reach.includes(1);
+}
 
 export interface ParseOptions {
   taskKind: LLMTaskKind;
@@ -239,6 +276,9 @@ function validateSingleItem(item: any, index: number, options: ParseOptions): st
     if (item.slot_key.length > 48 || !VALID_SLOT_KEY_REGEX.test(item.slot_key)) {
       return `invalid_slot_key: ${item.slot_key}`;
     }
+    if (item.slot_key.startsWith(RESERVED_SLOT_PREFIX)) {
+      return `reserved_slot_key: ${item.slot_key}`;
+    }
   }
 
   // 4. confidence
@@ -285,14 +325,9 @@ function validateSingleItem(item: any, index: number, options: ParseOptions): st
 
     // 严格检查 quote 是否为该编号实际发送的脱敏文本的连续子串（区分大小写）
     if (!entry.redacted_text.includes(trimmedQuote)) {
-      let matchedWithWorkspacePlaceholder = false;
-      if (trimmedQuote.includes('<workspace>')) {
-        const escapedParts = trimmedQuote
-          .split('<workspace>')
-          .map((part: string) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-        const wsPattern = new RegExp(escapedParts.join('[^\\r\\n]{1,260}'));
-        matchedWithWorkspacePlaceholder = wsPattern.test(entry.redacted_text);
-      }
+      const matchedWithWorkspacePlaceholder =
+        trimmedQuote.includes(WORKSPACE_PLACEHOLDER) &&
+        matchesWithWorkspaceGaps(entry.redacted_text, trimmedQuote);
       if (!matchedWithWorkspacePlaceholder) {
         return `evidence[${j}]_quote_not_substring_of_seq_${ev.seq}`;
       }
@@ -475,15 +510,19 @@ function parseCurateOutput(parsed: any): ParseResult {
     if (text.length < 8 || text.length > 800) continue;
     if (redactSecrets(text).hasSensitive) continue;
 
-    const type: MemoryType =
+    // type / slot_key 缺省或非法时保持 undefined，由应用方沿用目标记忆原值（不得静默改型或清空槽位）
+    const type: MemoryType | undefined =
       typeof u.type === 'string' && VALID_MEMORY_TYPES.has(u.type as MemoryType)
         ? (u.type as MemoryType)
-        : 'semantic';
+        : undefined;
 
     const slotKey =
-      typeof u.slot_key === 'string' && u.slot_key.length <= 48 && VALID_SLOT_KEY_REGEX.test(u.slot_key)
+      typeof u.slot_key === 'string' &&
+      u.slot_key.length <= 48 &&
+      VALID_SLOT_KEY_REGEX.test(u.slot_key) &&
+      !u.slot_key.startsWith(RESERVED_SLOT_PREFIX)
         ? u.slot_key
-        : null;
+        : undefined;
 
     const confidence =
       typeof u.confidence === 'number' && Number.isFinite(u.confidence)

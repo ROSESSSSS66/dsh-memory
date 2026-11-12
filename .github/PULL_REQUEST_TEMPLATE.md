@@ -14,7 +14,7 @@
 
 ## 自测与门禁清单 (Self-Verification Checklist)
 - [ ] 本地执行 `npm run typecheck` 通过，无类型报错
-- [ ] 本地执行 `npm test` 通过，全量测试用例（46 套测试组件，274 个测试用例）全部绿色
+- [ ] 本地执行 `npm test` 通过，全量测试用例全部绿色
 - [ ] 本地执行 `npm run build` 成功生成产物
 - [ ] 代码规范无未处理的临时代码、调试日志或明文敏感密钥
 

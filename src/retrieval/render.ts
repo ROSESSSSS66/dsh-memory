@@ -154,13 +154,18 @@ export function renderLine(item: RenderItem, shortCode: string): string {
   const m = item.memory;
   const tag = TAG_MAP[m.type] || 'FACT';
 
+  // 每条记忆只占一行：正文中的换行会让后半段被读成另一条独立的 [TAG id] 记忆行
+  const singleLine = (text: string) => text.replace(/[^\S \t]+/g, ' ');
+
   if (item.form === 'summary') {
-    const rawSummary = redactSecrets(m.summary || m.content).text;
+    const rawSummary = singleLine(redactSecrets(m.summary || m.content).text);
     const escSummary = escapeXmlData(rawSummary);
-    return `[${tag} ${shortCode}] ${escSummary}  ⟨summary · memory_expand("${shortCode}")⟩`;
+    // 摘要形态同样要标出已被取代的历史记录，否则旧事实会被当作现行事实
+    const history = m.status === 'superseded' ? ' (history)' : '';
+    return `[${tag} ${shortCode}] ${escSummary}${history}  ⟨summary · memory_expand("${shortCode}")⟩`;
   }
 
-  const rawContent = redactSecrets(m.content).text;
+  const rawContent = singleLine(redactSecrets(m.content).text);
   const escContent = escapeXmlData(rawContent);
   const stats = formatItemStats(m);
   if (stats) {

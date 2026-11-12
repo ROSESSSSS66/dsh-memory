@@ -22,7 +22,7 @@ import {
 } from '../core/writer.js';
 import { redactSecrets, isOfflineEndpointAllowed, isSafeApiKeyEnvName } from '../core/privacy.js';
 import { workspaceId } from '../core/scope.js';
-import { serializeMemoryToMarkdown, trashMemory } from '../core/markdown.js';
+import { serializeMemoryToMarkdown, trashMemory, resolveTrashDir } from '../core/markdown.js';
 import { estimateTokens } from '../core/tokens.js';
 import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
@@ -259,7 +259,8 @@ function readBodyJson(req: IncomingMessage): Promise<any> {
         const parsed = raw ? JSON.parse(raw) : {};
         resolve(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {});
       } catch {
-        resolve({});
+        // 不得把无法解析的请求体当作 {} 继续处理：写接口会把它当成一次合法的空修改
+        reject(new HttpError(400, 'Request body is not valid JSON'));
       }
     });
     req.on('error', () => resolve({}));
@@ -354,11 +355,16 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           // Recent 7 days injection stats（SQL 聚合，避免把整周注入日志拉到 JS 层逐行累加）
           const sevenDaysAgo = Date.now() - 7 * 86400000;
+          // injections 每条注入记忆一行：先按轮次聚合动态层，否则得到的是「每条记忆」而非「每轮」的均值
           const injAgg = db.get<{ cnt: number; total_tokens: number | null; corrections: number | null }>(
-            `SELECT COUNT(*) AS cnt,
-                    SUM(tokens) AS total_tokens,
-                    SUM(CASE WHEN outcome IS NOT NULL AND outcome <= -0.5 THEN 1 ELSE 0 END) AS corrections
-             FROM injections WHERE created_at >= ?`,
+            `SELECT COUNT(*) AS cnt, SUM(t) AS total_tokens, SUM(neg) AS corrections
+             FROM (
+               SELECT SUM(tokens) AS t,
+                      MAX(CASE WHEN outcome IS NOT NULL AND outcome <= -0.5 THEN 1 ELSE 0 END) AS neg
+               FROM injections
+               WHERE created_at >= ? AND layer = 'dynamic'
+               GROUP BY session_id, turn
+             )`,
             [sevenDaysAgo]
           );
           const injCount = Number(injAgg?.cnt || 0);
@@ -908,7 +914,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           if (action === 'freeze' || action === 'unfreeze') {
             const ok = action === 'freeze' ? freeze(db, id, 'user') : unfreeze(db, id, 'user');
             if (!ok) {
-              sendJson(res, 404, { ok: false, error: `Memory ${id} not found` });
+              sendJson(res, 404, { ok: false, error: `Memory ${id} not found or cannot be ${action === 'freeze' ? 'frozen' : 'unfrozen'} in its current status` });
               return;
             }
             sendJson(res, 200, { ok: true, id, status: action === 'freeze' ? 'frozen' : 'active' });
@@ -916,12 +922,9 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
 
           if (action === 'forget') {
-            const trashDir = path.join(
-              cfg.dataDir || path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory'),
-              '.trash'
-            );
+            const trashDir = resolveTrashDir(db, cfg.dataDir);
             try {
-              trashMemory(db, id, trashDir);
+              if (trashDir) trashMemory(db, id, trashDir);
             } catch {}
             const ok = forget(db, id, 'user');
             if (!ok) {
@@ -1097,10 +1100,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             }
             let successCount = 0;
             const now = Date.now();
-            const trashDir = path.join(
-              cfg.dataDir || path.join(os.homedir(), '.dsh', 'storages', 'dsh-memory'),
-              '.trash'
-            );
+            const trashDir = resolveTrashDir(db, cfg.dataDir);
             for (const targetId of ids) {
               try {
                 let ok = false;
@@ -1110,7 +1110,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
                 else if (subAction === 'unfreeze') ok = unfreeze(db, targetId, 'user', now);
                 else if (subAction === 'forget') {
                   try {
-                    trashMemory(db, targetId, trashDir);
+                    if (trashDir) trashMemory(db, targetId, trashDir);
                   } catch {}
                   ok = forget(db, targetId, 'user', now);
                 }
@@ -1398,7 +1398,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           sendJson(res, 200, {
             ok: true,
-            version: '0.8.0',
+            version: '0.8.1',
             exportedAt: Date.now(),
             total: items.length,
             memories: items.map(({ embedding: _emb, ...rest }) => rest),
@@ -1409,7 +1409,12 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         // 4.6. Import memories (POST)
         if (subPath === '/import' && req.method === 'POST') {
           const body = await readBodyJson(req);
-          const items = Array.isArray(body.items) ? body.items : [];
+          // 同时接受 /export 的原始输出（memories 字段），导出文件可直接回放
+          const rawItems = Array.isArray(body.items) ? body.items : Array.isArray(body.memories) ? body.memories : [];
+          // 按更新时间从旧到新回放：/export 是新者在前，直接回放会让旧值最后写入并取代同槽位的现行值
+          const items = [...rawItems].sort(
+            (a: any, b: any) => (Number(a?.updated_at) || 0) - (Number(b?.updated_at) || 0)
+          );
           if (items.length === 0) {
             sendJson(res, 400, { ok: false, error: '导入数据不能为空，未发现有效记忆条目' });
             return;
@@ -1426,6 +1431,11 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           db.transaction(() => {
             for (const item of items) {
               if (!item || typeof item !== 'object') {
+                skipped++;
+                continue;
+              }
+              // 已遗忘、被取代或被拒绝的记录不得经导入重新生效
+              if (item.status === 'superseded' || item.status === 'archived' || item.status === 'rejected') {
                 skipped++;
                 continue;
               }
@@ -1570,26 +1580,35 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
               }
             }
 
-            // Ensure baseURL is added to allowedOfflineEndpoints and auto-enable consent when model is configured
-            const hasConfiguredModel =
-              Boolean(patch.offlineLLM?.useDshLlm ?? cfg.offlineLLM.useDshLlm) ||
-              Boolean((patch.offlineLLM?.baseURL ?? cfg.offlineLLM.baseURL)?.trim());
-            if (
-              hasConfiguredModel &&
-              body.privacy?.offlineConsent === undefined &&
-              !cfg.privacy.offlineConsent
-            ) {
-              if (!patch.privacy) {
-                patch.privacy = { ...cfg.privacy };
-              }
-              patch.privacy.offlineConsent = true;
-            }
-
+            // 外发授权只接受请求中显式给出的 privacy.offlineConsent：默认 useDshLlm=true，
+            // 若据此隐式开启，任何不相关的保存（如仅调整每日配额）都会打开外发授权
             const effectiveConsent =
               patch.privacy?.offlineConsent !== undefined
                 ? patch.privacy.offlineConsent
                 : cfg.privacy.offlineConsent;
+            const prevBaseURL = (cfg.offlineLLM.baseURL || '').trim();
             const targetBaseURL = patch.offlineLLM?.baseURL ?? cfg.offlineLLM.baseURL;
+            const endpointChanged =
+              Boolean(prevBaseURL) && (!targetBaseURL || !isSameOriginUrl(prevBaseURL, targetBaseURL));
+            const explicitAllowList = Array.isArray(body.privacy?.allowedOfflineEndpoints);
+
+            if (patch.offlineLLM && !targetBaseURL && patch.offlineLLM.useDshLlm) {
+              // 切回宿主内置通道：自定义端点的密钥不得随宿主环境变量指向的端点一并发出
+              patch.offlineLLM.apiKey = '';
+            }
+            if (endpointChanged && !explicitAllowList) {
+              // 端点已更换：旧端点不再保留在白名单中（否则每个输入中途的地址都会永久留存）
+              if (!patch.privacy) {
+                patch.privacy = { ...cfg.privacy };
+              }
+              const stale = new Set<string>([prevBaseURL]);
+              try {
+                stale.add(new URL(prevBaseURL).origin);
+              } catch {}
+              patch.privacy.allowedOfflineEndpoints = (
+                patch.privacy.allowedOfflineEndpoints || cfg.privacy.allowedOfflineEndpoints || []
+              ).filter((e: string) => !stale.has(e));
+            }
             if (targetBaseURL && effectiveConsent) {
               if (!patch.privacy) {
                 patch.privacy = { ...cfg.privacy };

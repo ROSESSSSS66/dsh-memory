@@ -209,7 +209,7 @@ export function autoBootstrapMemory(
   try {
     const bankDir = path.join(wsPath, '.dsh', 'memory-bank');
     if (fs.existsSync(bankDir)) {
-      const bankRes = importMemoryBank(db, bankDir, { workspaceId: wsId });
+      const bankRes = importMemoryBank(db, bankDir, { workspaceId: wsId, trusted: false });
       markdownMemoriesImported += bankRes.imported;
     }
   } catch {}

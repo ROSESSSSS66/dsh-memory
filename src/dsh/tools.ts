@@ -35,6 +35,8 @@ export class MemoryTools {
   private strategyVersion: number;
   // session:turn -> note call count
   private noteCallCounts = new Map<string, number>();
+  // session:memoryId@contentRev -> 已提交过 memory_feedback
+  private feedbackGiven = new Set<string>();
 
   constructor(ctx: ToolContext) {
     this.db = ctx.db;
@@ -360,6 +362,14 @@ export class MemoryTools {
     if (!inj) {
       return 'Error: memory was not referenced in this session';
     }
+
+    // 同一引用只接受一次反馈：否则重复调用即可把效用刷到本地清理阈值，间接归档用户记忆
+    const feedbackKey = `${sessionId}:${mem.id}@${contentRev}`;
+    if (this.feedbackGiven.has(feedbackKey)) {
+      return 'Error: feedback already recorded for this memory in this session';
+    }
+    if (this.feedbackGiven.size >= 5000) this.feedbackGiven.clear();
+    this.feedbackGiven.add(feedbackKey);
 
     // 立即更新 utility (w=1, r=±1)
     const r = params.helpful ? 1 : -1;

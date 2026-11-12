@@ -62,7 +62,9 @@ describe('Ecosystem Features Merged into DSH Memory', () => {
       expect(updated.status).toBe('candidate');
       expect(updated.confidence).toBeGreaterThan(0.4);
       expect(updated.confidence).toBeLessThanOrEqual(0.7);
-      expect(updated.utility).toBeGreaterThan(0.5);
+      // 模型确认不是独立证据：不累加效用与成功次数
+      expect(updated.utility).toBe(0.5);
+      expect(updated.success_count).toBe(0);
 
       // 带有用户证据的候选可以被模型确认激活
       const userRes = upsertCandidate(

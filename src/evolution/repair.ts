@@ -141,7 +141,9 @@ export function executeRepair(
             ? 'web'
             : s.kind === 'assistant_msg' || s.kind === 'assistant'
               ? 'assistant'
-              : 'user';
+              : s.kind === 'system_msg' || s.kind === 'system'
+                ? 'system'
+                : 'user';
       evidenceLedger.set(seq, {
         seq,
         original_seq: s.seq,

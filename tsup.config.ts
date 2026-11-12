@@ -10,6 +10,7 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   target: 'node24',
+  noExternal: ['zod', 'fzstd'],
   external: [
     /^@deepseek-ai\/.*/,
     /^node:.*/

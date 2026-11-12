@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import type {
   Db,
   CandidateInput,
@@ -9,8 +8,6 @@ import type {
 } from '../types.js';
 import { DEFAULTS } from '../config.js';
 import {
-  normalize,
-  segment,
   ftsText,
   tokenSet,
   jaccard,
@@ -64,6 +61,16 @@ function resolveScopeAndOwners(c: CandidateInput): {
   return { scope, workspace_id, session_id };
 }
 
+/**
+ * 取正文首句作为摘要。英文句点仅在其后为空白或结尾时才算句末，
+ * 否则 "Node.js"、"src/core/db.ts"、"v1.2.3" 会被截成 "Node." 这类无意义摘要。
+ */
+function firstSentence(content: string): string {
+  const match = content.match(/^[\s\S]*?(?:[。！？!?\n]|\.(?=\s|$))/);
+  const sentence = match ? match[0].trim() : '';
+  return sentence.length >= 8 ? sentence : content.slice(0, 80);
+}
+
 function deriveOriginKinds(c: CandidateInput): OriginKind[] {
   const originSet = new Set<OriginKind>();
   if (Array.isArray(c.origin_kinds)) {
@@ -75,7 +82,7 @@ function deriveOriginKinds(c: CandidateInput): OriginKind[] {
       else if (s.kind === 'tool' || s.kind === 'tool_result') originSet.add('tool');
       else if (s.kind === 'assistant' || s.kind === 'assistant_msg') originSet.add('assistant');
       else if (s.kind === 'web') originSet.add('web');
-      else if (s.kind === 'system') originSet.add('system');
+      else if (s.kind === 'system' || s.kind === 'system_msg') originSet.add('system');
     }
   }
   if (c.source_kind === 'web') originSet.add('web');
@@ -106,8 +113,7 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
     let rawSummary = (c.summary || '').trim();
     if (!rawSummary) {
       // 生成首句
-      const match = rawContent.match(/^[^。！？\n.!?]+[。！？\n.!?]?/);
-      rawSummary = match ? match[0].trim() : rawContent.slice(0, 80);
+      rawSummary = firstSentence(rawContent);
     }
     if (redactSecrets(rawSummary).hasSensitive) {
       return { action: 'rejected', reason: 'sensitive_content_detected' };
@@ -123,10 +129,6 @@ export function upsertCandidate(db: Db, c: CandidateInput, now: number = Date.no
     if (c.sources.some((s) => s.excerpt && redactSecrets(s.excerpt).hasSensitive)) {
       return { action: 'rejected', reason: 'sensitive_content_detected' };
     }
-    if (false) {
-      return { action: 'rejected', reason: 'sources_required' };
-    }
-
     const { scope, workspace_id, session_id } = resolveScopeAndOwners(c);
     const originKinds = deriveOriginKinds(c);
 
@@ -649,8 +651,13 @@ export function approveCandidate(
     if (memory.status !== 'candidate') {
       return { action: 'rejected', reason: `invalid_status_${memory.status}` };
     }
-    if (approvedBy !== 'user' && approvedBy !== 'system' && !hasUserEvidence(db, memory)) {
+    const isTrustedApprover = approvedBy === 'user' || approvedBy === 'system';
+    if (!isTrustedApprover && !hasUserEvidence(db, memory)) {
       return { action: 'rejected', reason: 'user_evidence_required' };
+    }
+    // 核心块会被自动置顶并常驻系统提示词，自动审批方不得凭一段用户引用写入或替换
+    if (!isTrustedApprover && memory.slot_key?.startsWith('core:')) {
+      return { action: 'rejected', reason: 'core_block_requires_user_approval' };
     }
 
     // 检查是否有未决的 repair_proposals (原记忆或候选记忆均不能单独批准)
@@ -674,6 +681,9 @@ export function approveCandidate(
       if (existingSlot) {
         if (existingSlot.status === 'frozen') {
           return { action: 'rejected', reason: 'slot_is_frozen' };
+        }
+        if (!isTrustedApprover && existingSlot.pinned) {
+          return { action: 'rejected', reason: 'slot_is_pinned' };
         }
         // Supersede 旧记录
         saveVersionSnapshot(db, existingSlot, 'supersede', approvedBy, now);
@@ -724,8 +734,7 @@ export function editContent(
 
     let rawSummary = (newSummary || '').trim();
     if (!rawSummary) {
-      const match = rawContent.match(/^[^。！？\n.!?]+[。！？\n.!?]?/);
-      rawSummary = match ? match[0].trim() : rawContent.slice(0, 80);
+      rawSummary = firstSentence(rawContent);
     }
 
     if (redactSecrets(rawSummary).hasSensitive) throw new Error('sensitive_content_detected');
@@ -927,33 +936,9 @@ export function unfreeze(db: Db, id: string, actor: string = 'user', now: number
   return db.transaction(() => {
     const memory = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
     if (!memory) return false;
-
-    if (memory.slot_key && memory.status !== 'active' && memory.status !== 'frozen') {
-      const slotConflict = db.get<MemoryRecord>(
-        `SELECT * FROM memories
-         WHERE scope = ?
-           AND IFNULL(workspace_id, '') = IFNULL(?, '')
-           AND IFNULL(session_id, '') = IFNULL(?, '')
-           AND slot_key = ?
-           AND status IN ('active', 'frozen')
-           AND id != ?`,
-        [memory.scope, memory.workspace_id, memory.session_id, memory.slot_key, id]
-      );
-      if (slotConflict) {
-        if (slotConflict.status === 'frozen') return false;
-        saveVersionSnapshot(db, slotConflict, 'supersede_by_unfreeze', actor, now);
-        db.run(`UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`, [
-          now,
-          now,
-          slotConflict.id,
-        ]);
-        removeCachedRuntimeEmbedding(slotConflict.id);
-      }
-    }
-
-    saveVersionSnapshot(db, memory, 'status', actor, now);
-    if (memory.status !== 'frozen' && memory.status !== 'active') return false;
-    if (memory.status === 'active') return true;
+    // 仅 frozen 记录可解冻。对 superseded/archived 记录调用时必须在任何写入之前返回，
+    // 否则会先把同槽位的现行记录置为 superseded 再返回 false，留下没有生效记录的槽位。
+    if (memory.status !== 'frozen') return memory.status === 'active';
     saveVersionSnapshot(db, memory, 'status', actor, now);
     db.run(`UPDATE memories SET status = 'active', version = version + 1, updated_at = ? WHERE id = ?`, [now, id]);
     return true;
@@ -1032,7 +1017,13 @@ export function confirmMemory(
     if (memory.status === 'candidate' && !canActivate) {
       newConfidence = Math.min(newConfidence, 0.7);
     }
-    const newUtility = Math.min(1.0, memory.utility + 0.15);
+    // 模型的确认不是独立证据：不累加效用与成功次数，置信度封顶 0.85，
+    // 否则反复 memory_confirm 即可把记忆刷到自动同步进 Core Memory 的阈值
+    if (!trustedActor) {
+      newConfidence = Math.min(newConfidence, Math.max(memory.confidence, 0.85));
+    }
+    const newUtility = trustedActor ? Math.min(1.0, memory.utility + 0.15) : memory.utility;
+    const successDelta = trustedActor ? 1 : 0;
     let newStatus = promote ? 'active' : memory.status;
     let approvedAt = promote ? now : memory.approved_at;
     let approvedBy = promote ? actor : memory.approved_by;
@@ -1066,11 +1057,11 @@ export function confirmMemory(
            status = ?,
            approved_at = ?,
            approved_by = ?,
-           success_count = success_count + 1,
+           success_count = success_count + ?,
            version = version + 1,
            updated_at = ?
        WHERE id = ?`,
-      [newConfidence, newUtility, newStatus, approvedAt, approvedBy, now, id]
+      [newConfidence, newUtility, newStatus, approvedAt, approvedBy, successDelta, now, id]
     );
 
     const updated = db.get<MemoryRecord>(`SELECT * FROM memories WHERE id = ?`, [id]);
@@ -1225,7 +1216,7 @@ export function restoreMemory(
     }
 
     saveVersionSnapshot(db, memory, 'restore', actor, now);
-    db.run(`UPDATE memories SET status = 'active', valid_to = NULL, version = version + 1, updated_at = ? WHERE id = ?`, [now, id]);
+    db.run(`UPDATE memories SET status = 'active', valid_to = NULL, invalidated_at = NULL, version = version + 1, updated_at = ? WHERE id = ?`, [now, id]);
     return { success: true, message: `Memory '${id}' restored to active status` };
   });
 }
