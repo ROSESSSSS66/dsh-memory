@@ -1,7 +1,7 @@
 # 🧠 DSH Self-Evolving Memory System (`dsh-memory`)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.8.1_Hardened_DSH_Runtime_%26_Schema_v2-indigo?style=flat-square" alt="v0.8.1" />
+  <img src="https://img.shields.io/badge/Version-v0.8.2_Hardened_DSH_Runtime_%26_Schema_v2-indigo?style=flat-square" alt="v0.8.2" />
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
@@ -98,7 +98,7 @@
 
 `dsh-memory` 并非单一的向量检索插件，而是将业界五大前沿 Agent 记忆范式深度融合于纯本地双环引擎之中：
 
-| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.8.1)** |
+| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.8.2)** |
 |---|---|---|---|---|
 | **安装后冷启动** | ❌ 空白库，需手动逐条喂入 | ❌ 需手动编写多份 Markdown | ❌ 空白库，需业务侧自行灌库 | **✅ `npm install` 后 `postinstall` 与首次启动全自动扫描工程并初始化记忆** |
 | **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **`0.6 ~ 1.4ms` (p95，纯本地七路 SYNAPSE + A-Mem + 向量混合召回)** |
@@ -181,7 +181,7 @@ flowchart TD
 
 ```text
 dsh-memory/
-├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.8.1)
+├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.8.2)
 ├─ tsconfig.json           # 严格 ESM TypeScript 编译配置
 ├─ tsup.config.ts          # 构建打包配置 (服务端插件 + 独立评测 CLI)
 ├─ vitest.config.ts        # 自动化单元测试与集成测试配置
@@ -266,7 +266,7 @@ dsh-memory/
 **方式 A：下载 Release 构建包（无需构建）**
 
 ```bash
-npm i https://github.com/ROSESSSSS66/dsh-memory/releases/download/v0.8.1/dsh-memory-0.8.1.tgz
+npm i https://github.com/ROSESSSSS66/dsh-memory/releases/download/v0.8.2/dsh-memory-0.8.2.tgz
 ```
 
 **方式 B：克隆源码并构建**
@@ -395,7 +395,7 @@ npm run eval
 
 ### 评测门禁达成实测对照表
 
-| 验收核心指标 | 官方规约门槛 | `v0.8.1` 实测表现 | 门禁结论 |
+| 验收核心指标 | 官方规约门槛 | `v0.8.2` 实测表现 | 门禁结论 |
 |---|---:|---:|:---:|
 | **Recall @ Inject (有效注入召回率)** | $\ge 70\%$ | **100.0% (120 / 120)** | ✅ **PASS** |
 | **Exclude Violations (跨区/废弃违规注入)** | $= 0$ (绝对零容忍) | **0** | ✅ **PASS** |

@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Local-first long-term memory plugin for DeepSeek Desktop (DSH): auto-distills preferences and lessons from sessions, recalls the most relevant in ~1ms, and self-corrects over time.",
   "keywords": [
     "dsh",
