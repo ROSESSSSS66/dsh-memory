@@ -1,6 +1,6 @@
 # 附录 A · DSH API 速查（实测版）
 
-> 核实时间：2026-10-03。核实方式：直接读取本机 DSH Desktop 安装目录下各 `@deepseek-ai/*` 包的 `package.json`、`README.zh.md` 与编译后的 `lib/*.js`。
+> 核实时间：2026-10-03（并于 2026-11-19 针对 `dsh-desktop-next@2.0.24-next` / `@deepseek-ai/dsh@0.2.2-rc.5` / `@deepseek-ai/cordis@4.1.0` 完成二次核实与适配）。核实方式：直接读取本机 DSH Desktop 安装目录下各 `@deepseek-ai/*` 包的 `package.json`、`src/*.ts`、`README.zh.md` 与编译后的 `lib/*.js`。
 > **凡是本附录标注 ✅ 的，都是从安装包源码里读出来的事实，可以直接照抄。**
 > 标注 ⚠️ 的必须由 M0 探测任务实测，**不要凭猜测写代码**。
 
@@ -11,13 +11,20 @@
 | 项 | 值 |
 |---|---|
 | 安装根目录 | `E:\DSH\DSH NEXT\`（**不是** `E:\DSH\DSH Desktop\`，旧路径已失效） |
-| 应用代码 | `E:\DSH\DSH NEXT\resources\app\` |
-| 包目录 | `E:\DSH\DSH NEXT\resources\app\node_modules\@deepseek-ai\`（共 291 个包） |
-| 应用版本 | `dsh-desktop-next@2.0.17-next` |
-| DSH 核心版本 | `@deepseek-ai/dsh@0.2.0-rc.2` |
-| Cordis 版本 | `@deepseek-ai/cordis@4.0.4` |
-| 要求的 Node | `engines: "^22.19.0 \|\| >=24.0.0"` |
-| 本机 Node | v24.18.0（所以 `node:sqlite` 和 `zlib.zstdDecompressSync` 都存在） |
+| 应用代码 | `E:\DSH\DSH NEXT\resources\app\`（`2.0.24-next` 起打包于 `app.asar`） |
+| 包目录 | `node_modules\@deepseek-ai\`（`0.2.2-rc.5` 共 346 个 `@deepseek-ai/*` 包） |
+| 应用版本 | `dsh-desktop-next@2.0.24-next`（原 `2.0.17-next`） |
+| DSH 核心版本 | `@deepseek-ai/dsh@0.2.2-rc.5`（原 `0.2.0-rc.2`） |
+| Cordis 版本 | `@deepseek-ai/cordis@4.1.0`（原 `4.0.4`） |
+| 要求的 Node | `engines: ">=24.0.0"`（Electron `44.7.0`） |
+| 本机 Node | v24.18.0+ / v24.21.0（所以 `node:sqlite` 和 `zlib.zstdDecompressSync` 都存在） |
+
+### A.0.1 `2.0.24-next` / `@deepseek-ai/dsh@0.2.2-rc.5` 关键适配变更（✅ 已核实）
+
+1. **插件元数据导出（`dsh-app-boot/src/package-meta.ts` & `plugin-compatibility.ts`）**：`readPluginMeta()` 通过 Node ESM 解析器直接读取 `${specifier}/package.json`、`./locale/en.json`、`./locale/*.json` 与 `package.json` 中的 `icon`（≤ 256 KiB），必须在 `package.json` 的 `exports` 显式导出 `"./package.json"`、`"./cordis.patch.yml"`、`"./locale/*"`；兼容性预检读取 `engines.dsh` 或 `@deepseek-ai/dsh*` peerDependencies。
+2. **提示词组装时序（`dsh-agent-loop/src/agent.ts`）**：`ReactLoopAgent.preStep()` 先调用 `systemPrompt.assemble()`（触发 `system-prompt/assemble` 瀑布，section 形状为 `{ name, text, interpolate }`），随后才执行 `agent/pre-step`。因此稳定层记忆必须在启动扫描已有 agent、`agent/created` 与 `system-prompt/assemble` 阶段同步就绪。
+3. **可选服务延迟注入（Cordis `4.1.0`）**：`commands` 与 `webServer` 在 headless / CLI / ACP 表面可能未挂载，不得列入插件顶层必填 `inject`（改用按需 `ctx.inject(['commands'], ...)` / `ctx.inject(['webServer'], ...)`）。
+4. **桌面端自定义协议与连接鉴权（`dsh-desktop-next` & `dsh-client-connection`）**：Electron 渲染层使用 `dsh-app://app` 原语并通过 `forwardWebRequest` 转发；Web 端点需放行 `dsh-app://` 与同源受控 Host，并优先配合 `ctx.connection?.requestRejection(req)` 与 `peer` 校验。
 | DSH 主目录 | `C:\Users\Windows11\.dsh\` |
 | 会话日志根 | `C:\Users\Windows11\.dsh\sessions\` |
 | 其他存储 | `C:\Users\Windows11\.dsh\storages\`（现有 `session_projcache/`、`workspace.json`） |

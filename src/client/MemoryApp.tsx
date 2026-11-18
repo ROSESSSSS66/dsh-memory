@@ -229,7 +229,7 @@ export function MemoryApp() {
 
   return (
     <div className="dshm-root">
-      <style>{MEMORY_STYLES}</style>
+      <style data-plugin="dsh-memory" data-plugin-css="dsh-memory/styles.css">{MEMORY_STYLES}</style>
 
       <div className="dshm-studio">
         {/* 1. Studio Editorial Header (ONLY ONE BUTTON: 模型配置) */}

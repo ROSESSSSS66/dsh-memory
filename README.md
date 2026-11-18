@@ -1,12 +1,12 @@
 # 🧠 DSH Self-Evolving Memory System (`dsh-memory`)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.8.2_Hardened_DSH_Runtime_%26_Schema_v2-indigo?style=flat-square" alt="v0.8.2" />
+  <img src="https://img.shields.io/badge/Version-v0.9.0_DSH_2.0_Runtime_%26_Marketplace_Ready-indigo?style=flat-square" alt="v0.9.0" />
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
   <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
-  <img src="https://img.shields.io/badge/Tests-536_Passed_(61_Suites)-success?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-539_Passed_(61_Suites)-success?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Recall%40Inject-100.0%25_(120%2F120)-blueviolet?style=flat-square" alt="Recall Rate" />
   <img src="https://img.shields.io/badge/Online_Latency-p95_1.2ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />
@@ -23,7 +23,7 @@
 > |---|---|---|---|
 > | 在线检索零网络请求，断网可用；密钥落库前脱敏 | 万级记忆 p95 约 1ms | 动态预算装箱，单轮平均约 170 tokens | 后台空闲时蒸馏、调和、修复，越用越准 |
 >
-> **三步上手**：`npm i <Release 的 .tgz 链接>` → 在 `cordis.patch.yml` 挂载插件 → 打开 DSH 即自动初始化记忆。详见 [快速上手](#-快速上手与挂载)。
+> **三步上手**：在 DSH 插件市场一键安装（或运行 `dsh plugin --profile web add "https://github.com/ROSESSSSS66/dsh-memory/releases/latest/download/dsh-memory.tgz"`）→ 自动挂载并开启运行期初始化 → 打开 DSH 左侧边栏 **长期记忆** 面板即可使用。详见 [快速上手](#-快速上手与挂载)。
 
 <p align="center">
   <a href="#-为什么选择-dsh-memory">核心优势</a> •
@@ -81,6 +81,13 @@
 | **Zep / Graphiti & Mem0** (arXiv:2501.13956, 2025) | **蒸馏-调和全闭环与规范槽位推演** | `extractor.ts` 与 `reconciler.ts` 深度打通：慢环蒸馏产物自动归一化工作区哈希并结合规范槽位与混合相似度决断 `ADD / UPDATE / DELETE / NOOP`，自动编织新旧技术栈演进因果边 |
 | **Letta / MemGPT + MemRL / EvolveMem** (2025–2026) | **常驻核心记忆自主同步与帕累托策略进化** | `syncAutonomousCoreMemory` 将经实战检验的高置信偏好/规范幂等同步至 `human` / `project` 核心块；`lab.ts` 基于真实收获样本（`eval_cases`）执行策略变异寻优与哨兵自动回滚 |
 
+### 🆕 v0.9.0 新版 DSH 兼容与插件市场适配
+- **DSH `2.0.24-next` / `@deepseek-ai/dsh@0.2.2-rc.5` / `Cordis@4.1.0` 全量适配**：
+  - 对齐 `dsh-agent-loop >= 0.2.2-rc.5` 先 `systemPrompt.assemble()` 后 `agent/pre-step` 的时序，新增启动巡检、`agent/created` 与 `system-prompt/assemble` 瀑布预同步，首轮首步稳定命中稳定层记忆；
+  - 将 `webServer` 改为可选延迟注入（`ctx.inject(['webServer'])`），确保 headless / CLI / ACP 环境也能正常激活插件；
+  - Web API 放行 Electron 桌面原语 `dsh-app://app`、受控同源 Host 与宿主 `ctx.connection?.requestRejection()` / `peer` 鉴权，并支持多源 `DEEPSEEK_API_KEY` 与 `cordis.patch.yml` 宿主 LLM 兜底识别；
+- **插件市场零红线兼容**：导出 `./package.json`、`./cordis.patch.yml`、`./locale/*`（`en` / `zh`）、高清图标（`assets/icon.svg` / `assets/icon.png`）与 `screenshots.json`；显式声明跨预发布版本兼容范围，并移除安装期 `postinstall` 脚本（改由首次加载自动冷启动初始化，也可随时运行 `npm run init` 或 `/memory init`）。
+
 ### 🛡️ v0.8.x 安全加固与 DSH 实机运行修复
 
 | 方向 | 要点 |
@@ -98,9 +105,9 @@
 
 `dsh-memory` 并非单一的向量检索插件，而是将业界五大前沿 Agent 记忆范式深度融合于纯本地双环引擎之中：
 
-| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.8.2)** |
+| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.9.0)** |
 |---|---|---|---|---|
-| **安装后冷启动** | ❌ 空白库，需手动逐条喂入 | ❌ 需手动编写多份 Markdown | ❌ 空白库，需业务侧自行灌库 | **✅ `npm install` 后 `postinstall` 与首次启动全自动扫描工程并初始化记忆** |
+| **安装后冷启动** | ❌ 空白库，需手动逐条喂入 | ❌ 需手动编写多份 Markdown | ❌ 空白库，需业务侧自行灌库 | **✅ 安装零安装期脚本（免 `allowBuilds`），首次启动全自动扫描工程并初始化记忆** |
 | **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **`0.6 ~ 1.4ms` (p95，纯本地七路 SYNAPSE + A-Mem + 向量混合召回)** |
 | **Token 成本控制** | 固定 Top-K，易超预算 | 随文档增长线性膨胀，极易爆窗 | 依赖服务端截断策略 | **动态背包算法装箱，1k→10k 仅波动 `0.28%`** |
 | **常驻工作台记忆** | ❌ 不支持 | ✅ 手动维护 Markdown | ⚠️ 需额外定制 | **✅ 内置 Letta 风格三大核心块 (`human`/`persona`/`project`)** |
@@ -181,7 +188,7 @@ flowchart TD
 
 ```text
 dsh-memory/
-├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.8.2)
+├─ package.json            # 插件包元数据、导出入口与脚本配置 (v0.9.0)
 ├─ tsconfig.json           # 严格 ESM TypeScript 编译配置
 ├─ tsup.config.ts          # 构建打包配置 (服务端插件 + 独立评测 CLI)
 ├─ vitest.config.ts        # 自动化单元测试与集成测试配置
@@ -254,7 +261,7 @@ dsh-memory/
 │     ├─ runner.ts         # 评测套件执行器与规模不变性压测
 │     ├─ metrics.ts        # Recall@Inj、ExclViol、EmptyPrec 核心指标计算
 │     └─ eval-cli.ts       # 独立命令行评测门禁入口
-└─ test/                   # 61 个测试套件，536 个自动化单元测试与端到端验收用例
+└─ test/                   # 61 个测试套件，539 个自动化单元测试与端到端验收用例
 ```
 
 ---
@@ -263,10 +270,12 @@ dsh-memory/
 
 ### 1. 安装与构建
 
-**方式 A：下载 Release 构建包（无需构建）**
+**方式 A：通过 DSH 插件市场 / Release 构建包一键安装（无需本地构建）**
 
 ```bash
-npm i https://github.com/ROSESSSSS66/dsh-memory/releases/download/v0.8.2/dsh-memory-0.8.2.tgz
+dsh plugin --profile web add "https://github.com/ROSESSSSS66/dsh-memory/releases/latest/download/dsh-memory.tgz"
+# 或指定版本包 / npm 直接安装：
+# npm i https://github.com/ROSESSSSS66/dsh-memory/releases/download/v0.9.0/dsh-memory-0.9.0.tgz
 ```
 
 **方式 B：克隆源码并构建**
@@ -383,7 +392,7 @@ npm run build
 项目内置完整的离线评测生成器（4 大评测套件共 120 条跨领域标准用例 + 20 条关键红线用例）与多级规模压测器：
 
 ```bash
-# 1. 运行 TypeScript 严格类型检查与 61 个测试套件 (536 项测试)
+# 1. 运行 TypeScript 严格类型检查与 61 个测试套件 (539 项测试)
 npm run check
 
 # 2. 构建服务端插件、前端 Claude Studio 自治控制台与评测 CLI
@@ -395,7 +404,7 @@ npm run eval
 
 ### 评测门禁达成实测对照表
 
-| 验收核心指标 | 官方规约门槛 | `v0.8.2` 实测表现 | 门禁结论 |
+| 验收核心指标 | 官方规约门槛 | `v0.9.0` 实测表现 | 门禁结论 |
 |---|---:|---:|:---:|
 | **Recall @ Inject (有效注入召回率)** | $\ge 70\%$ | **100.0% (120 / 120)** | ✅ **PASS** |
 | **Exclude Violations (跨区/废弃违规注入)** | $= 0$ (绝对零容忍) | **0** | ✅ **PASS** |

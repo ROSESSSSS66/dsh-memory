@@ -30,12 +30,45 @@ export function apply(ctx: any) {
   const SIDEBAR_PANEL_ID = 'dsh-memory';
   const SIDEBAR_PANEL_ORDER = 15;
 
+  const getLocale = () => (typeof ctx?.get === 'function' ? ctx.get('locale') : undefined) ?? ctx?.locale;
+  const registerLocaleDict = (loc: any) => {
+    if (!loc || typeof loc.register !== 'function') return;
+    const register = () =>
+      loc.register(SIDEBAR_PANEL_ID, {
+        zh: { panel: '长期记忆' },
+        en: { panel: 'Memory' },
+      });
+    if (typeof ctx?.effect === 'function') {
+      ctx.effect(register, 'dsh-memory: dictionaries');
+    } else {
+      register();
+    }
+  };
+
+  const initialLocale = getLocale();
+  if (initialLocale) {
+    registerLocaleDict(initialLocale);
+  } else if (typeof ctx?.inject === 'function') {
+    ctx.inject(['locale'], (scoped: any) => registerLocaleDict(scoped?.locale));
+  }
+
+  const getPanelLabel = () => {
+    const loc = getLocale();
+    if (loc && typeof loc.bind === 'function') {
+      try {
+        const value = loc.bind(SIDEBAR_PANEL_ID)('panel');
+        if (typeof value === 'string' && value.trim()) return value;
+      } catch {}
+    }
+    return '长期记忆';
+  };
+
   ctx.slots?.inject?.('main', () => {
     return ctx.slots.register(
       {
         name: 'main',
         key: SIDEBAR_PANEL_ID,
-        locale: 'dsh-memory',
+        locale: SIDEBAR_PANEL_ID,
       },
       () => React.createElement(MemoryApp)
     );
@@ -47,8 +80,8 @@ export function apply(ctx: any) {
         name: 'sidebar.panellist',
         id: SIDEBAR_PANEL_ID,
         order: SIDEBAR_PANEL_ORDER,
-        label: () => '长期记忆',
-        locale: 'dsh-memory',
+        label: getPanelLabel,
+        locale: SIDEBAR_PANEL_ID,
       },
       (ownerProps: any) =>
         React.createElement(BrainIcon, {

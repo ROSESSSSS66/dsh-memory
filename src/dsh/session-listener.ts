@@ -18,6 +18,9 @@ export const IGNORED_EVENT_TYPES = new Set([
   'approval/policy',
   'model/selection',
   'session/title',
+  'command/run',
+  'command/done',
+  'assistant/attempt',
 ]);
 
 export const IGNORED_USER_SOURCE_KINDS = new Set([
@@ -25,6 +28,7 @@ export const IGNORED_USER_SOURCE_KINDS = new Set([
   'time-context',
   'skill-catalog',
   'tool-jobs',
+  'tool-registry',
 ]);
 
 export function isIgnoredUserMessageSource(source: any): boolean {

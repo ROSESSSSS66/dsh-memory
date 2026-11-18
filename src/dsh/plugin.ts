@@ -44,7 +44,7 @@ import { autoBootstrapMemory } from '../core/bootstrap.js';
 import type { Db } from '../types.js';
 
 export const name = 'dsh-memory';
-export const inject = ['agents', 'sessionProjections', 'systemPrompt', 'tools', 'commands', 'webServer'];
+export const inject = ['agents', 'sessionProjections', 'systemPrompt', 'tools', 'commands'];
 
 function extractSessionCwd(session: any): string {
   if (!session || typeof session !== 'object') return '';
@@ -530,6 +530,115 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
       return { cwd, sessId, explicitSessionId: rawSessionId || undefined, turn };
     };
 
+    // 4.1 预同步当前已存活 agent、后续 agent/created 及 system-prompt/assemble 时的稳定层 section
+    // DSH >= 0.2.2-rc.5 中 dsh-agent-loop 在 agent/pre-step 之前先调用 systemPrompt.assemble()
+    const syncAgentPromptSection = (agent: any) => {
+      if (!agent || !promptSections) return undefined;
+      const liveCfg = getLiveCfg();
+      const { cwd, sessId } = resolveRuntimeScope({ agent });
+      if (isWorkspaceExcluded(cwd, liveCfg.excludeWorkspaces)) {
+        if (typeof agent.id === 'string' && agent.id) {
+          promptSections.disposeAgent(agent.id);
+        }
+        return undefined;
+      }
+      return promptSections.updateSection(agent, {
+        workspaceId: workspaceId(cwd),
+        sessionId: sessId,
+      });
+    };
+
+    try {
+      const liveAgents = typeof ctx.agents?.list === 'function' ? ctx.agents.list() : [];
+      if (Array.isArray(liveAgents)) {
+        for (const agent of liveAgents) {
+          try {
+            syncAgentPromptSection(agent);
+          } catch {}
+        }
+      }
+    } catch {}
+
+    if (typeof ctx.on === 'function') {
+      addDisp(
+        ctx.on('agent/created', (evt: any) => {
+          try {
+            const agent = evt?.agent ?? (evt?.id ? evt : undefined);
+            syncAgentPromptSection(agent);
+          } catch (err: any) {
+            console.warn('[dsh-memory] agent/created section sync failed:', err?.message || err);
+          }
+        })
+      );
+
+      addDisp(
+        ctx.on(
+          'system-prompt/assemble',
+          async (assembly: any, assembleCtx: any, next: () => Promise<any>) => {
+            try {
+              const scopeObj =
+                assembleCtx?.scope && typeof assembleCtx.scope === 'object'
+                  ? assembleCtx.scope
+                  : undefined;
+              const agent =
+                assembleCtx?.agent ??
+                (scopeObj?.ctx?.systemPrompt || scopeObj?.session || typeof scopeObj?.id === 'string'
+                  ? scopeObj
+                  : undefined) ??
+                (typeof assembleCtx?.agentId === 'string' && typeof ctx.agents?.get === 'function'
+                  ? ctx.agents.get(assembleCtx.agentId)
+                  : undefined);
+
+              if (agent && promptSections) {
+                const synced = syncAgentPromptSection(agent);
+                if (Array.isArray(assembly?.sections)) {
+                  const stableText = synced?.text || '';
+                  const existingIdx = assembly.sections.findIndex(
+                    (s: any) => s && s.name === 'memory-stable'
+                  );
+                  if (stableText) {
+                    const entry = {
+                      name: 'memory-stable',
+                      text: stableText,
+                      interpolate: false,
+                    };
+                    if (existingIdx >= 0) {
+                      assembly.sections[existingIdx] = {
+                        ...assembly.sections[existingIdx],
+                        ...entry,
+                      };
+                    } else {
+                      const trailingIdx = assembly.sections.findIndex(
+                        (s: any) =>
+                          s &&
+                          (s.name === 'mcp:servers' ||
+                            s.name === 'harness:source' ||
+                            s.name === 'web-surface' ||
+                            s.name === 'deployment:persona-suffix')
+                      );
+                      if (trailingIdx >= 0) {
+                        assembly.sections.splice(trailingIdx, 0, entry);
+                      } else {
+                        assembly.sections.push(entry);
+                      }
+                    }
+                  } else if (existingIdx >= 0) {
+                    assembly.sections.splice(existingIdx, 1);
+                  }
+                }
+              }
+            } catch {}
+
+            if (typeof next === 'function') {
+              return await next();
+            }
+            return assembly;
+          },
+          { prepend: true }
+        )
+      );
+    }
+
     if (ctx.tools?.register) {
       // tool 1: memory_search
       addDisp(
@@ -741,12 +850,14 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
       );
     }
 
-    // 6. 初始化并注册用户命令 /memory
+    // 6. 初始化并注册用户命令 /memory（无 commands 服务的 CLI/headless 环境按可选延迟注入）
     const commands = new MemoryCommands(currentDb, cfg);
-
-    if (ctx.commands?.register) {
-      addDisp(
-        ctx.commands.register({
+    const mountCommands = (cmdCtx: any): (() => void) => {
+      if (!cmdCtx?.commands?.register) return () => {};
+      let cmdDisposed = false;
+      let regDisp: any;
+      try {
+        regDisp = cmdCtx.commands.register({
           name: 'memory',
           description: '长期记忆系统管理与状态检查',
           input: {
@@ -759,6 +870,31 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
               sessionId: sessId,
             });
           },
+        });
+      } catch (err: any) {
+        console.warn('[dsh-memory] Failed to register /memory command:', err?.message || err);
+      }
+      return () => {
+        if (cmdDisposed) return;
+        cmdDisposed = true;
+        try {
+          if (typeof regDisp === 'function') regDisp();
+        } catch {}
+      };
+    };
+
+    if (typeof ctx.commands?.register === 'function') {
+      addDisp(mountCommands(ctx));
+    } else if (typeof ctx.inject === 'function') {
+      addDisp(
+        ctx.inject(['commands'], (cmdCtx: any) => {
+          const disp = mountCommands(cmdCtx);
+          addDisp(disp);
+          try {
+            if (typeof cmdCtx?.effect === 'function') {
+              cmdCtx.effect(() => disp);
+            }
+          } catch {}
         })
       );
     }
@@ -832,8 +968,24 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
           })
         : () => {};
 
-    // 6.3 注册 Web 端点（供 DSH 前端侧栏面板访问）
-    unlistenWeb = registerWebRoutes(ctx, currentDb, cfg);
+    // 6.3 注册 Web 端点（供 DSH 前端侧栏面板访问；headless/CLI 环境按可选延迟注入）
+    if (typeof ctx.inject === 'function') {
+      unlistenWeb = ctx.inject(['webServer'], (webCtx: any) => {
+        const disp = registerWebRoutes(webCtx, currentDb, cfg);
+        addDisp(disp);
+        try {
+          if (typeof webCtx?.effect === 'function') {
+            webCtx.effect(() => disp);
+          }
+        } catch {}
+      });
+    } else {
+      try {
+        if (typeof ctx.webServer?.register === 'function') {
+          unlistenWeb = registerWebRoutes(ctx, currentDb, cfg);
+        }
+      } catch {}
+    }
     if (disposed) {
       await cleanup(true);
     }

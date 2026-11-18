@@ -11,3 +11,4 @@ Thumbs.db
 !.env.example
 coverage/
 *.local
+*.tgz
