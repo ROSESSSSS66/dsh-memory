@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH Long-Term Memory",
+    "description": "Local-first long-term memory system for DSH with hybrid recall, working memory buffer, and background consolidation."
+  }
+}

@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import type { LLMTaskKind } from './types.js';
@@ -65,6 +68,334 @@ export interface OfflineLLMFailure {
 export type OfflineLLMResult = OfflineLLMSuccess | OfflineLLMFailure;
 
 export type LLMProtocol = 'chat/completions' | 'responses' | 'messages';
+
+export interface DshHostLlmFallback {
+  baseURL: string;
+  apiKey: string;
+  model?: string;
+  protocol?: LLMProtocol;
+}
+
+function unquoteScalar(raw: string): string {
+  const s = raw.trim();
+  if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
+    return s.slice(1, -1);
+  }
+  // Strip inline YAML comment only when unquoted
+  const hashIdx = s.indexOf(' #');
+  return (hashIdx >= 0 ? s.slice(0, hashIdx) : s).trim();
+}
+
+function mapDshPiAiProtocol(api?: string): LLMProtocol | undefined {
+  const norm = (api || '').trim().toLowerCase();
+  if (norm === 'openai-responses' || norm === 'responses') return 'responses';
+  if (norm === 'anthropic-messages' || norm === 'messages') return 'messages';
+  if (norm === 'openai-completions' || norm === 'chat/completions') return 'chat/completions';
+  return undefined;
+}
+
+function isPlaceholderModel(model?: string): boolean {
+  const m = (model || '').trim();
+  return !m || m === 'gpt-4o-mini' || m === 'deepseek-ai/deepseek-v4-flash-0731';
+}
+
+function normalizeProviderBaseUrl(rawUrl: string, api?: string): string {
+  const trimmed = rawUrl.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    const proto = (api || '').trim().toLowerCase();
+    if (
+      (parsed.pathname === '' || parsed.pathname === '/') &&
+      (proto === 'openai-responses' || proto === 'openai-completions')
+    ) {
+      return `${trimmed}/v1`;
+    }
+  } catch {}
+  return trimmed;
+}
+
+function parseDotEnvInto(filePath: string, target: Record<string, string>): void {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const content = fs.readFileSync(filePath, 'utf8');
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const cleaned = line.startsWith('export ') ? line.slice(7).trim() : line;
+      const eq = cleaned.indexOf('=');
+      if (eq <= 0) continue;
+      const key = cleaned.slice(0, eq).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+      const val = unquoteScalar(cleaned.slice(eq + 1));
+      if (val && !(key in target)) {
+        target[key] = val;
+      }
+    }
+  } catch {}
+}
+
+function parseCredentialsYamlInto(filePath: string, target: Record<string, string>): void {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const content = fs.readFileSync(filePath, 'utf8');
+    let inEnvBlock = false;
+    let envBlockIndent = 0;
+    for (const rawLine of content.split(/\r?\n/)) {
+      if (!rawLine.trim() || rawLine.trimStart().startsWith('#')) continue;
+      const indent = rawLine.length - rawLine.trimStart().length;
+      const trimmed = rawLine.trim();
+      if (trimmed.startsWith('-')) {
+        inEnvBlock = false;
+        continue;
+      }
+      const colon = trimmed.indexOf(':');
+      if (colon <= 0) continue;
+      const key = unquoteScalar(trimmed.slice(0, colon));
+      const rest = trimmed.slice(colon + 1).trim();
+      if (key === 'env' && !rest) {
+        inEnvBlock = true;
+        envBlockIndent = indent;
+        continue;
+      }
+      if (indent <= envBlockIndent) {
+        inEnvBlock = false;
+      }
+      if ((indent === 0 || (inEnvBlock && indent > envBlockIndent)) && rest && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        const val = unquoteScalar(rest);
+        if (val && !(key in target)) {
+          target[key] = val;
+        }
+      }
+    }
+  } catch {}
+}
+
+interface ParsedPatchProvider {
+  baseURL?: string;
+  apiKeyEnv?: string;
+  api?: string;
+}
+
+function parsePatchLlmConfig(
+  filePath: string,
+  providersOut: Map<string, ParsedPatchProvider>,
+  defaultModelOut: { provider?: string; model?: string }
+): void {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const content = fs.readFileSync(filePath, 'utf8');
+    let entryId = '';
+    let entryName = '';
+    let inConfig = false;
+    let configIndent = -1;
+    let inProviders = false;
+    let providersIndent = -1;
+    let currentProvider = '';
+    let currentProviderIndent = -1;
+
+    for (const rawLine of content.split(/\r?\n/)) {
+      const stripped = rawLine.trimStart();
+      if (!stripped || stripped.startsWith('#')) continue;
+      const indent = rawLine.length - stripped.length;
+
+      // Top-level YAML list entry resets item context
+      if (indent === 0 && stripped.startsWith('-')) {
+        entryId = '';
+        entryName = '';
+        inConfig = false;
+        configIndent = -1;
+        inProviders = false;
+        providersIndent = -1;
+        currentProvider = '';
+        currentProviderIndent = -1;
+        const afterDash = stripped.slice(1).trim();
+        if (afterDash.startsWith('id:')) entryId = unquoteScalar(afterDash.slice(3));
+        else if (afterDash.startsWith('name:')) entryName = unquoteScalar(afterDash.slice(5));
+        continue;
+      }
+
+      if (indent <= 2 && !stripped.startsWith('-')) {
+        if (stripped.startsWith('id:')) {
+          entryId = unquoteScalar(stripped.slice(3));
+          continue;
+        }
+        if (stripped.startsWith('name:')) {
+          entryName = unquoteScalar(stripped.slice(5));
+          continue;
+        }
+        if (stripped === 'config:' || stripped.startsWith('config:')) {
+          inConfig = true;
+          configIndent = indent;
+          inProviders = false;
+          currentProvider = '';
+          continue;
+        }
+      }
+
+      if (!inConfig || indent <= configIndent) continue;
+
+      const isDefaultModelEntry =
+        entryId === 'agent-default-model' || entryName === '@deepseek-ai/dsh-agent-default-model';
+      const isPiAiEntry = entryId === 'llm-pi-ai' || entryName === '@deepseek-ai/dsh-llm-pi-ai';
+
+      const colon = stripped.indexOf(':');
+      if (colon <= 0) continue;
+      const key = unquoteScalar(stripped.slice(0, colon));
+      const val = stripped.slice(colon + 1).trim();
+
+      if (isDefaultModelEntry && indent > configIndent) {
+        if (key === 'provider' && val) defaultModelOut.provider = unquoteScalar(val);
+        else if (key === 'model' && val) defaultModelOut.model = unquoteScalar(val);
+        continue;
+      }
+
+      if (isPiAiEntry) {
+        if (key === 'providers' && !val) {
+          inProviders = true;
+          providersIndent = indent;
+          currentProvider = '';
+          currentProviderIndent = -1;
+          continue;
+        }
+        if (!inProviders) continue;
+        if (indent <= providersIndent) {
+          inProviders = false;
+          currentProvider = '';
+          continue;
+        }
+        if (currentProviderIndent === -1 || indent === currentProviderIndent) {
+          if (!val && !stripped.startsWith('-')) {
+            currentProvider = key;
+            currentProviderIndent = indent;
+            if (!providersOut.has(currentProvider)) {
+              providersOut.set(currentProvider, {});
+            }
+          }
+          continue;
+        }
+        if (currentProvider && indent > currentProviderIndent) {
+          // Only read direct scalar fields under providers.<name> (not nested models[] items)
+          if (indent > currentProviderIndent + 4 || stripped.startsWith('-')) continue;
+          const p = providersOut.get(currentProvider);
+          if (p && val) {
+            if (key === 'baseURL') p.baseURL = unquoteScalar(val);
+            else if (key === 'apiKeyEnv') p.apiKeyEnv = unquoteScalar(val);
+            else if (key === 'api') p.api = unquoteScalar(val);
+          }
+        }
+      }
+    }
+  } catch {}
+}
+
+/**
+ * 解析 DSH 宿主 LLM 兜底通道：
+ * 1) 优先读取当前进程环境（含 DSH_LLM / DEEPSEEK / OPENAI / ANTHROPIC）
+ * 2) 若进程环境未直接给出，读取 ~/.dsh/.env、~/.dsh/.credentials.yaml（不修改 process.env）
+ *    与 cordis.patch.yml 中的 agent-default-model + llm-pi-ai provider 配置
+ */
+export function resolveDshHostLlmFallback(
+  currentModel?: string,
+  options?: { dshHome?: string; env?: Record<string, string | undefined> }
+): DshHostLlmFallback | null {
+  const procEnv = options?.env ?? process.env;
+
+  // Tier 1: Direct process environment variables
+  for (const prefix of ['DSH_LLM', 'DEEPSEEK', 'OPENAI', 'ANTHROPIC'] as const) {
+    const url = (procEnv[`${prefix}_BASE_URL`] || '').trim();
+    if (url) {
+      const apiKey = (procEnv[`${prefix}_API_KEY`] || '').trim();
+      return {
+        baseURL: url,
+        apiKey,
+        ...(prefix === 'ANTHROPIC' ? { protocol: 'messages' as const } : {}),
+      };
+    }
+  }
+
+  const procDeepSeekKey = (procEnv.DEEPSEEK_API_KEY || '').trim();
+  if (procDeepSeekKey) {
+    const preferredModel = (currentModel || '').trim();
+    const envModel = (procEnv.DEEPSEEK_MODEL || '').trim();
+    return {
+      baseURL: 'https://api.deepseek.com/v1',
+      apiKey: procDeepSeekKey,
+      model: !isPlaceholderModel(preferredModel)
+        ? preferredModel
+        : envModel || 'deepseek-chat',
+      protocol: 'chat/completions',
+    };
+  }
+
+  // Tier 2: DSH home disk config (.env, .credentials.yaml, cordis.patch.yml)
+  const dshHome = (options?.dshHome || procEnv.DSH_HOME || path.join(os.homedir(), '.dsh')).trim();
+  const diskEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(procEnv)) {
+    if (typeof v === 'string' && v.trim()) diskEnv[k] = v;
+  }
+  parseDotEnvInto(path.join(dshHome, '.env'), diskEnv);
+  parseCredentialsYamlInto(path.join(dshHome, '.credentials.yaml'), diskEnv);
+
+  const providers = new Map<string, ParsedPatchProvider>();
+  const defaultModelInfo: { provider?: string; model?: string } = {};
+  parsePatchLlmConfig(path.join(dshHome, 'cordis.patch.yml'), providers, defaultModelInfo);
+  parsePatchLlmConfig(path.join(dshHome, 'profiles', 'desktop', 'cordis.patch.yml'), providers, defaultModelInfo);
+
+  const pickProvider = (name: string): DshHostLlmFallback | null => {
+    const p = providers.get(name);
+    if (!p?.baseURL) return null;
+    const keyEnv = p.apiKeyEnv?.trim() || '';
+    const apiKey = keyEnv && isSafeApiKeyEnvName(keyEnv) ? (diskEnv[keyEnv] || '').trim() : '';
+    if (!apiKey) return null;
+    const protocol = mapDshPiAiProtocol(p.api);
+    const normalizedUrl = normalizeProviderBaseUrl(p.baseURL, p.api);
+    const preferredModel = (currentModel || '').trim();
+    return {
+      baseURL: normalizedUrl,
+      apiKey,
+      model: !isPlaceholderModel(preferredModel)
+        ? preferredModel
+        : defaultModelInfo.model || undefined,
+      ...(protocol ? { protocol } : {}),
+    };
+  };
+
+  if (defaultModelInfo.provider) {
+    const picked = pickProvider(defaultModelInfo.provider);
+    if (picked) return picked;
+  }
+  for (const providerName of providers.keys()) {
+    const picked = pickProvider(providerName);
+    if (picked) return picked;
+  }
+
+  // Tier 3: Disk env fallback for DSH_LLM / DEEPSEEK / OPENAI / ANTHROPIC
+  for (const prefix of ['DSH_LLM', 'DEEPSEEK', 'OPENAI', 'ANTHROPIC'] as const) {
+    const url = (diskEnv[`${prefix}_BASE_URL`] || '').trim();
+    if (url) {
+      return {
+        baseURL: url,
+        apiKey: (diskEnv[`${prefix}_API_KEY`] || '').trim(),
+        ...(prefix === 'ANTHROPIC' ? { protocol: 'messages' as const } : {}),
+      };
+    }
+  }
+  const diskDeepSeekKey = (diskEnv.DEEPSEEK_API_KEY || '').trim();
+  if (diskDeepSeekKey) {
+    const preferredModel = (currentModel || '').trim();
+    return {
+      baseURL: 'https://api.deepseek.com/v1',
+      apiKey: diskDeepSeekKey,
+      model: !isPlaceholderModel(preferredModel)
+        ? preferredModel
+        : (diskEnv.DEEPSEEK_MODEL || '').trim() || 'deepseek-chat',
+      protocol: 'chat/completions',
+    };
+  }
+
+  return null;
+}
 
 export function resolveEndpointAndProtocol(
   baseURL: string,
@@ -252,16 +583,15 @@ export async function callOfflineLLM(
   // 宿主兜底按「同一供应商的 URL + 密钥」成对解析：分别取各自第一个非空值会把
   // 一家的密钥发给另一家的端点（如 ANTHROPIC_BASE_URL 配上 OPENAI_API_KEY）
   let hostFallbackKey = '';
+  let hostFallbackModel: string | undefined;
   let configuredProtocol = cfg.offlineLLM.protocol;
   if (usingHostFallback) {
-    for (const prefix of ['DSH_LLM', 'OPENAI', 'ANTHROPIC']) {
-      const url = (process.env[`${prefix}_BASE_URL`] || '').trim();
-      if (url) {
-        baseURL = url;
-        hostFallbackKey = process.env[`${prefix}_API_KEY`] || '';
-        if (prefix === 'ANTHROPIC') configuredProtocol = 'messages';
-        break;
-      }
+    const fallback = resolveDshHostLlmFallback(cfg.offlineLLM.model);
+    if (fallback) {
+      baseURL = fallback.baseURL;
+      hostFallbackKey = fallback.apiKey;
+      if (fallback.protocol) configuredProtocol = fallback.protocol;
+      if (fallback.model) hostFallbackModel = fallback.model;
     }
   }
   if (!baseURL) {
@@ -301,7 +631,15 @@ export async function callOfflineLLM(
     return { ok: false, error: 'input_budget_exceeded' };
   }
 
-  const model = cfg.offlineLLM.model || 'deepseek-ai/deepseek-v4-flash-0731';
+  const model =
+    usingHostFallback &&
+    hostFallbackModel &&
+    (!cfg.offlineLLM.model ||
+      cfg.offlineLLM.model === 'deepseek-ai/deepseek-v4-flash-0731' ||
+      cfg.offlineLLM.model === 'deepseek-chat' ||
+      cfg.offlineLLM.model === 'gpt-4o-mini')
+      ? hostFallbackModel
+      : cfg.offlineLLM.model || 'deepseek-ai/deepseek-v4-flash-0731';
   const isReasoningModel = /v4|r1|reasoner|thinking|qwq|\bo[134]\b/i.test(model);
   let currentMaxOutputTokens =
     isReasoningModel && params.maxOutputTokens >= 1200

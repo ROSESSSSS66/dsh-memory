@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { performance } from 'node:perf_hooks';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { openDb } from '../../src/core/db.js';
 import type { Db } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
 import { renderStableLayer, PromptSectionManager } from '../../src/dsh/prompt-section.js';
+import plugin from '../../src/dsh/plugin.js';
 import { upsertCandidate } from '../../src/core/writer.js';
 import { budgetTokens } from '../../src/core/tokens.js';
 import { DEFAULTS } from '../../src/config.js';
@@ -237,5 +241,168 @@ describe('Prompt Section (prompt-section.ts)', () => {
     // 清理
     mgr.disposeAll();
     expect(parentSectionContent).toBe('');
+  });
+
+  it('syncs memory-stable on startup agents, agent/created, and system-prompt/assemble without requiring webServer upfront', async () => {
+    expect(plugin.inject).toEqual(['agents', 'sessionProjections', 'systemPrompt', 'tools', 'commands']);
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-plugin-prompt-'));
+    const dbPath = path.join(tmpDir, 'mem.db');
+    const wsPath = path.join(tmpDir, 'ws');
+    fs.mkdirSync(wsPath, { recursive: true });
+
+    // Seed a pinned memory before plugin startup
+    const seedDb = openDb(dbPath);
+    upsertCandidate(
+      seedDb,
+      {
+        type: 'semantic',
+        content: 'Pinned workspace fact for system-prompt/assemble verification.',
+        scope: 'workspace',
+        workspaceId: workspaceId(wsPath),
+        source_kind: 'user',
+        origin_kinds: ['user'],
+        confidence: 0.95,
+        actor: 'user',
+        sources: [{ session_id: 's_init', seq: 1, kind: 'user' }],
+      },
+      fixedNow
+    );
+    seedDb.run(`UPDATE memories SET pinned = 1 WHERE content LIKE '%system-prompt/assemble%'`);
+    seedDb.close();
+
+    const listeners = new Map<string, Function[]>();
+    const injectCallbacks: Array<{ deps: string[]; cb: Function }> = [];
+    const registeredCommands: any[] = [];
+    const registeredWebRoutes: any[] = [];
+    const registeredSections = new Map<string, string>();
+
+    const makeAgent = (id: string) => ({
+      id,
+      cwd: wsPath,
+      session: { id: `sess_${id}`, header: { cwd: wsPath } },
+      ctx: {
+        systemPrompt: {
+          section: (opts: any) => {
+            registeredSections.set(`${id}:${opts.name}`, opts.text);
+            return () => {
+              registeredSections.delete(`${id}:${opts.name}`);
+            };
+          },
+        },
+      },
+    });
+
+    const startupAgent = makeAgent('agent_startup');
+    const createdAgent = makeAgent('agent_created');
+    const assembleAgent = {
+      id: 'agent_assemble',
+      cwd: wsPath,
+      session: { id: 'sess_assemble', header: { cwd: wsPath } },
+    };
+
+    const mockCtx: any = {
+      agents: {
+        list: () => [startupAgent],
+      },
+      sessionProjections: {
+        register: () => () => {},
+        stateOf: () => ({ visibleInjections: [] }),
+      },
+      systemPrompt: {
+        section: () => () => {},
+      },
+      tools: {
+        register: () => () => {},
+      },
+      commands: {
+        register: (cmd: any) => {
+          registeredCommands.push(cmd);
+          return () => {};
+        },
+      },
+      inject: (deps: string[], cb: Function) => {
+        injectCallbacks.push({ deps, cb });
+        return () => {};
+      },
+      on: (event: string, fn: Function, opts?: { prepend?: boolean }) => {
+        const list = listeners.get(event) || [];
+        if (opts?.prepend) list.unshift(fn);
+        else list.push(fn);
+        listeners.set(event, list);
+        return () => {
+          const cur = listeners.get(event) || [];
+          const idx = cur.indexOf(fn);
+          if (idx >= 0) cur.splice(idx, 1);
+        };
+      },
+    };
+
+    try {
+      await plugin.apply(mockCtx, { dbPath, autoBootstrap: false });
+
+      // 1. Existing agent receives memory-stable at startup
+      expect(registeredSections.get('agent_startup:memory-stable')).toContain(
+        'Pinned workspace fact for system-prompt/assemble verification.'
+      );
+
+      // 2. agent/created syncs newly created agent before any pre-step fires
+      for (const fn of listeners.get('agent/created') || []) {
+        await fn({ agent: createdAgent });
+      }
+      expect(registeredSections.get('agent_created:memory-stable')).toContain(
+        'Pinned workspace fact for system-prompt/assemble verification.'
+      );
+
+      // 3. system-prompt/assemble updates assembly.sections BEFORE agent/pre-step
+      const assembly: any = {
+        sections: [
+          { name: 'harness:identity', text: 'You are an AI agent.' },
+          { name: 'deployment:persona-suffix', text: 'Suffix' },
+        ],
+        contexts: [],
+        variables: {},
+      };
+      const assembleListeners = listeners.get('system-prompt/assemble') || [];
+      expect(assembleListeners.length).toBeGreaterThan(0);
+      await assembleListeners[0](
+        assembly,
+        { agent: assembleAgent, scope: assembleAgent },
+        async () => assembly
+      );
+      const memSectionIdx = assembly.sections.findIndex((s: any) => s.name === 'memory-stable');
+      const suffixIdx = assembly.sections.findIndex((s: any) => s.name === 'deployment:persona-suffix');
+      expect(memSectionIdx).toBeGreaterThanOrEqual(0);
+      expect(memSectionIdx).toBeLessThan(suffixIdx);
+      expect(assembly.sections[memSectionIdx].interpolate).toBe(false);
+      expect(assembly.sections[memSectionIdx].text).toContain(
+        'Pinned workspace fact for system-prompt/assemble verification.'
+      );
+
+      // 4. Required commands registered directly & deferred optional webServer registered via ctx.inject
+      expect(registeredCommands.some((c) => c.name === 'memory')).toBe(true);
+      expect(injectCallbacks.map((i) => i.deps)).toEqual([['webServer']]);
+      for (const entry of injectCallbacks) {
+        if (entry.deps[0] === 'webServer') {
+          entry.cb({
+            webServer: {
+              register: (route: any) => {
+                registeredWebRoutes.push(route);
+                return () => {};
+              },
+            },
+          });
+        }
+      }
+      expect(registeredWebRoutes.some((r) => r.path === '/api/dsh-memory')).toBe(true);
+
+      // Dispose plugin cleanly
+      for (const fn of listeners.get('dispose') || []) {
+        await fn();
+      }
+      expect(registeredSections.size).toBe(0);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

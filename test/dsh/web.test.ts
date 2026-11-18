@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { openDb } from '../../src/core/db.js';
-import { registerWebRoutes, API_PREFIX } from '../../src/dsh/web.js';
+import { registerWebRoutes, API_PREFIX, isTrustedOrigin } from '../../src/dsh/web.js';
 import { upsertCandidate } from '../../src/core/writer.js';
 import { DEFAULTS } from '../../src/config.js';
 import type { Db } from '../../src/types.js';
@@ -651,5 +651,183 @@ describe('Web Server API & Sidebar Backend (web.ts)', () => {
     expect(healthRes.ok).toBe(true);
     expect(healthRes.health.score).toBeGreaterThanOrEqual(80);
     expect(healthRes.health.ftsConsistent).toBe(true);
+  });
+
+  it('should accept dsh-app://app and same-origin LAN hosts while enforcing connection & peer guards', async () => {
+    expect(isTrustedOrigin('dsh-app://app')).toBe(true);
+    expect(isTrustedOrigin('http://192.168.1.50:13600', '192.168.1.50:13600')).toBe(true);
+    expect(isTrustedOrigin('http://192.168.1.99:13600', '192.168.1.50:13600')).toBe(false);
+
+    // 1. Custom dsh-app://app & same-origin LAN request against default mockCtx
+    registerWebRoutes(mockCtx, db, DEFAULTS);
+
+    const invoke = async (req: any, peer?: any) => {
+      let status = 0;
+      let body = '';
+      const res: any = {
+        writeHead: (code: number) => {
+          status = code;
+        },
+        end: (data: string) => {
+          body = data;
+        },
+      };
+      await registeredHandler(req, res, peer);
+      return { status, json: body ? JSON.parse(body) : null };
+    };
+
+    const appOriginRes = await invoke({
+      method: 'GET',
+      url: '/api/dsh-memory/stats',
+      headers: { host: '127.0.0.1:13600', origin: 'dsh-app://app' },
+    });
+    expect(appOriginRes.status).toBe(200);
+    expect(appOriginRes.json.ok).toBe(true);
+
+    const lanSameOriginRes = await invoke({
+      method: 'GET',
+      url: '/api/dsh-memory/stats',
+      headers: { host: '192.168.1.50:13600', origin: 'http://192.168.1.50:13600' },
+    });
+    expect(lanSameOriginRes.status).toBe(200);
+    expect(lanSameOriginRes.json.ok).toBe(true);
+
+    // 2. Peer validation
+    const badPeerRes = await invoke(
+      { method: 'GET', url: '/api/dsh-memory/stats', headers: { host: '127.0.0.1:13600' } },
+      { principal: { kind: 'guest' }, signal: { aborted: false } }
+    );
+    expect(badPeerRes.status).toBe(403);
+
+    const abortedPeerRes = await invoke(
+      { method: 'GET', url: '/api/dsh-memory/stats', headers: { host: '127.0.0.1:13600' } },
+      { principal: { kind: 'owner' }, signal: { aborted: true } }
+    );
+    expect(abortedPeerRes.status).toBe(403);
+
+    const ownerPeerRes = await invoke(
+      { method: 'GET', url: '/api/dsh-memory/stats', headers: { host: '127.0.0.1:13600' } },
+      { principal: { kind: 'owner' }, signal: { aborted: false } }
+    );
+    expect(ownerPeerRes.status).toBe(200);
+
+    // 3. ctx.connection.requestRejection guard (401 / 403 / undefined)
+    let rejection: 401 | 403 | undefined = 401;
+    let connHandler: any = null;
+    const disposeConn = registerWebRoutes(
+      {
+        webServer: {
+          register: (opts: any) => {
+            connHandler = opts.handler;
+            return () => {
+              connHandler = null;
+            };
+          },
+        },
+        get: (key: string) =>
+          key === 'connection'
+            ? {
+                requestRejection: () => rejection,
+              }
+            : undefined,
+      },
+      db,
+      DEFAULTS
+    );
+
+    const runConn = async (headers: Record<string, string>) => {
+      let status = 0;
+      let body = '';
+      await connHandler(
+        { method: 'GET', url: '/api/dsh-memory/stats', headers },
+        {
+          writeHead: (c: number) => {
+            status = c;
+          },
+          end: (d: string) => {
+            body = d;
+          },
+        }
+      );
+      return { status, json: body ? JSON.parse(body) : null };
+    };
+
+    expect((await runConn({ host: '127.0.0.1:13600' })).status).toBe(401);
+    rejection = 403;
+    expect((await runConn({ host: '127.0.0.1:13600' })).status).toBe(403);
+    rejection = undefined;
+    // Admitted trustedHost from DSH connection service works even if not an IP literal
+    expect(
+      (await runConn({ host: 'trusted-dev.local:13600', origin: 'http://trusted-dev.local:13600' })).status
+    ).toBe(200);
+
+    disposeConn();
+    disposeConn();
+  });
+
+  it('should resolve DSH DEEPSEEK_API_KEY host fallback in /llm/test when useDshLlm=true', async () => {
+    const prevBase = process.env.DEEPSEEK_BASE_URL;
+    const prevKey = process.env.DEEPSEEK_API_KEY;
+    const prevDshUrl = process.env.DSH_LLM_BASE_URL;
+    const prevOpenAiUrl = process.env.OPENAI_BASE_URL;
+    const prevAnthropicUrl = process.env.ANTHROPIC_BASE_URL;
+    const originalFetch = globalThis.fetch;
+
+    process.env.DSH_LLM_BASE_URL = '';
+    process.env.OPENAI_BASE_URL = '';
+    process.env.ANTHROPIC_BASE_URL = '';
+    process.env.DEEPSEEK_BASE_URL = '';
+    process.env.DEEPSEEK_API_KEY = 'sk-ds-host-fallback-test';
+
+    try {
+      (globalThis as any).fetch = async (url: string, init: any) => {
+        expect(url).toBe('https://api.deepseek.com/v1/chat/completions');
+        expect(init.headers['Authorization']).toBe('Bearer sk-ds-host-fallback-test');
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ choices: [{ message: { content: '{"ok":true}' } }] }),
+        };
+      };
+
+      registerWebRoutes(mockCtx, db, {
+        ...DEFAULTS,
+        offlineLLM: { ...DEFAULTS.offlineLLM, useDshLlm: true, baseURL: '', apiKey: '' },
+      });
+
+      let testBody = '';
+      await registeredHandler(
+        {
+          method: 'POST',
+          url: '/api/dsh-memory/llm/test',
+          headers: { 'content-type': 'application/json' },
+          on: (ev: string, cb: any) => {
+            if (ev === 'data') cb(Buffer.from(JSON.stringify({ useDshLlm: true })));
+            if (ev === 'end') cb();
+          },
+        },
+        {
+          writeHead: () => {},
+          end: (d: string) => {
+            testBody = d;
+          },
+        }
+      );
+      const parsed = JSON.parse(testBody);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.model).toBe('deepseek-chat');
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (prevBase === undefined) delete process.env.DEEPSEEK_BASE_URL;
+      else process.env.DEEPSEEK_BASE_URL = prevBase;
+      if (prevKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+      else process.env.DEEPSEEK_API_KEY = prevKey;
+      if (prevDshUrl === undefined) delete process.env.DSH_LLM_BASE_URL;
+      else process.env.DSH_LLM_BASE_URL = prevDshUrl;
+      if (prevOpenAiUrl === undefined) delete process.env.OPENAI_BASE_URL;
+      else process.env.OPENAI_BASE_URL = prevOpenAiUrl;
+      if (prevAnthropicUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
+      else process.env.ANTHROPIC_BASE_URL = prevAnthropicUrl;
+    }
   });
 });

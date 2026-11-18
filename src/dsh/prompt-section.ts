@@ -8,6 +8,7 @@ import { DEFAULTS, type PluginConfig } from '../config.js';
 export interface StableSectionState {
   disposer?: () => void;
   lastHash?: string;
+  text?: string;
   visibleRefs: Set<string>; // id@contentRev
   stableTokens: number;
   estimatedTokens: number;
@@ -102,6 +103,10 @@ export class PromptSectionManager {
     this.cfg = cfg;
   }
 
+  public buildStableSection(scopeCtx: { workspaceId: string; sessionId?: string }) {
+    return renderStableLayer(this.db, scopeCtx, this.cfg);
+  }
+
   public updateSection(
     agent: any,
     scopeCtx: { workspaceId: string; sessionId?: string }
@@ -113,16 +118,13 @@ export class PromptSectionManager {
       this.agentStates.set(agentId, state);
     }
 
-    const { text, visibleRefs, stableTokens, estimatedTokens } = renderStableLayer(
-      this.db,
-      scopeCtx,
-      this.cfg
-    );
+    const { text, visibleRefs, stableTokens, estimatedTokens } = this.buildStableSection(scopeCtx);
 
     const hash = crypto.createHash('sha256').update(text).digest('hex');
 
     // 只有文本 hash 发生变化时才注销重注
     if (hash === state.lastHash && state.disposer) {
+      state.text = text;
       state.visibleRefs = visibleRefs;
       state.stableTokens = stableTokens;
       state.estimatedTokens = estimatedTokens;
@@ -138,6 +140,7 @@ export class PromptSectionManager {
     }
 
     state.lastHash = undefined;
+    state.text = '';
     state.visibleRefs = new Set();
     state.stableTokens = 0;
     state.estimatedTokens = 0;
@@ -152,12 +155,15 @@ export class PromptSectionManager {
           interpolate: false, // 严禁插值，防止用户记忆中的 {{ }} 破坏组装
         });
         state.lastHash = hash;
+        state.text = text;
         state.visibleRefs = visibleRefs;
         state.stableTokens = stableTokens;
         state.estimatedTokens = estimatedTokens;
       } catch (err: any) {
         console.warn('[dsh-memory] Failed to register memory-stable section:', err?.message || err);
       }
+    } else {
+      state.text = text;
     }
 
     return state;

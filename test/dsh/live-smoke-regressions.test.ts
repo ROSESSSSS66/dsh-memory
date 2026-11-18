@@ -60,6 +60,8 @@ describe('DSH live smoke regressions (strict Cordis inject & real session shape)
 
     const allowedProps = new Set<string>([
       ...inject,
+      'get',
+      'inject',
       'on',
       'emit',
       'then',
@@ -68,6 +70,21 @@ describe('DSH live smoke regressions (strict Cordis inject & real session shape)
     ]);
 
     const rawCtx: Record<string, any> = {
+      get: (key: string) => rawCtx[key],
+      inject: (deps: string[], cb: (scoped: any) => any) => {
+        const scopedAllowed = new Set([...allowedProps, ...deps]);
+        const scopedCtx = new Proxy(rawCtx, {
+          get(target, prop, receiver) {
+            if (typeof prop === 'symbol') return Reflect.get(target, prop, receiver);
+            if (!scopedAllowed.has(prop)) {
+              throw new Error(`cannot get property "${prop}" without inject`);
+            }
+            return Reflect.get(target, prop, receiver);
+          },
+        });
+        cb(scopedCtx);
+        return () => {};
+      },
       agents: {
         list: () => [liveAgent],
       },

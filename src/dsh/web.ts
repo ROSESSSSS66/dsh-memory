@@ -55,7 +55,12 @@ import {
   pruneInvalidMemories,
   curateMemoriesWithLLM,
 } from '../evolution/maintenance.js';
-import { resolveEndpointAndProtocol, buildProtocolPayload, type LLMProtocol } from '../evolution/llm.js';
+import {
+  resolveEndpointAndProtocol,
+  buildProtocolPayload,
+  resolveDshHostLlmFallback,
+  type LLMProtocol,
+} from '../evolution/llm.js';
 import {
   getActiveStrategy,
   listStrategies,
@@ -142,20 +147,29 @@ function isIpLiteral(hostname: string): boolean {
 }
 
 /**
- * 跨源校验：仅信任回环地址与桌面壳协议。
+ * 跨源校验：仅信任回环地址、同源受控 Host 与桌面壳协议（含 Electron dsh-app://app）。
  * 注意：`Origin: null`（沙箱 iframe / data: URL / 跨源重定向）不再被信任，
  * 否则任意网页都能借此发起 CSRF 并读取带 ACAO 回显的响应（如 /export 全量记忆）。
  */
-export function isTrustedOrigin(originHeader?: string): boolean {
+export function isTrustedOrigin(originHeader?: string, hostHeader?: string): boolean {
   if (!originHeader) return true;
   const trimmed = originHeader.trim();
-  if (trimmed.startsWith('file://') || trimmed.startsWith('app://') || trimmed.startsWith('dsh://')) {
+  if (
+    trimmed.startsWith('file://') ||
+    trimmed.startsWith('app://') ||
+    trimmed.startsWith('dsh://') ||
+    trimmed.startsWith('dsh-app://')
+  ) {
     return true;
   }
   try {
     const u = new URL(trimmed);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    return isLoopbackHostname(u.hostname);
+    if (isLoopbackHostname(u.hostname)) return true;
+    if (hostHeader && isAllowedHostHeader(hostHeader)) {
+      return u.host.toLowerCase() === hostHeader.trim().toLowerCase();
+    }
+    return false;
   } catch {
     return false;
   }
@@ -303,15 +317,54 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
   const dispose = ctx.webServer.register({
     kind: 'prefix',
     path: API_PREFIX,
-    handler: async (req: IncomingMessage, res: ServerResponse) => {
+    handler: async (req: IncomingMessage, res: ServerResponse, peer?: any) => {
+      if (peer !== undefined) {
+        if (!peer || typeof peer !== 'object' || peer.signal?.aborted === true || peer.principal?.kind !== 'owner') {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, error: 'Forbidden: untrusted peer scope' }));
+          return;
+        }
+      }
+      let connection: any;
+      try {
+        connection = typeof ctx?.get === 'function' ? ctx.get('connection') : ctx?.connection;
+      } catch {}
+      let connectionAdmitted = false;
+      if (peer === undefined && typeof connection?.requestRejection === 'function') {
+        const rejection = connection.requestRejection(req);
+        if (rejection !== undefined) {
+          res.writeHead(rejection, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error: rejection === 401 ? 'Unauthorized' : 'Forbidden: rejected by host connection guard',
+            })
+          );
+          return;
+        }
+        connectionAdmitted = true;
+      }
+
       const reqOrigin = typeof req?.headers?.origin === 'string' ? req.headers.origin : undefined;
       const reqHost = typeof req?.headers?.host === 'string' ? req.headers.host : undefined;
-      if (!isAllowedHostHeader(reqHost)) {
+      if (!connectionAdmitted && !isAllowedHostHeader(reqHost)) {
         res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, error: 'Host not allowed' }));
         return;
       }
-      if (reqOrigin && !isTrustedOrigin(reqOrigin)) {
+      const sameAdmittedOrigin = (() => {
+        if (!connectionAdmitted || !reqOrigin || !reqHost) return false;
+        try {
+          const u = new URL(reqOrigin.trim());
+          return (
+            (u.protocol === 'http:' || u.protocol === 'https:') &&
+            u.host.toLowerCase() === reqHost.trim().toLowerCase()
+          );
+        } catch {
+          return false;
+        }
+      })();
+      if (reqOrigin && !isTrustedOrigin(reqOrigin, reqHost) && !sameAdmittedOrigin) {
         res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, error: 'Cross-origin request denied' }));
         return;
@@ -1398,7 +1451,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
 
           sendJson(res, 200, {
             ok: true,
-            version: '0.8.2',
+            version: '0.9.0',
             exportedAt: Date.now(),
             total: items.length,
             memories: items.map(({ embedding: _emb, ...rest }) => rest),
@@ -1648,8 +1701,20 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         if (subPath === '/llm/test' && req.method === 'POST') {
           const body = await readBodyJson(req);
           const bodyBaseURL = str(body.baseURL);
-          const baseURL = (bodyBaseURL || cfg.offlineLLM.baseURL || '').trim();
-          const model = (str(body.model) || cfg.offlineLLM.model || 'deepseek-chat').trim();
+          const useDshLlm =
+            typeof body.useDshLlm === 'boolean' ? body.useDshLlm : !!cfg.offlineLLM.useDshLlm;
+          const candidateModel = (str(body.model) || cfg.offlineLLM.model || 'deepseek-chat').trim();
+          const shouldTryHostFallback =
+            !bodyBaseURL && (body.useDshLlm === true || (!cfg.offlineLLM.baseURL && useDshLlm));
+          const hostFallback = shouldTryHostFallback ? resolveDshHostLlmFallback(candidateModel) : null;
+          const usingHostFallback = !bodyBaseURL && !!hostFallback;
+          const baseURL = (
+            bodyBaseURL ||
+            (body.useDshLlm === true ? '' : cfg.offlineLLM.baseURL) ||
+            hostFallback?.baseURL ||
+            ''
+          ).trim();
+          const model = (usingHostFallback && hostFallback?.model) || candidateModel;
 
           if (!baseURL) {
             sendJson(res, 400, { ok: false, error: '请先填写接口 Base URL' });
@@ -1669,9 +1734,10 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           }
 
           const isSameConfiguredEndpoint =
-            !bodyBaseURL ||
-            bodyBaseURL === (cfg.offlineLLM.baseURL || '').trim() ||
-            isSameOriginUrl(baseURL, cfg.offlineLLM.baseURL);
+            !usingHostFallback &&
+            (!bodyBaseURL ||
+              bodyBaseURL === (cfg.offlineLLM.baseURL || '').trim() ||
+              isSameOriginUrl(baseURL, cfg.offlineLLM.baseURL));
 
           let apiKey = '';
           if (
@@ -1680,6 +1746,8 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
             !body.apiKey.includes('****')
           ) {
             apiKey = body.apiKey.trim();
+          } else if (usingHostFallback && hostFallback?.apiKey) {
+            apiKey = hostFallback.apiKey;
           } else if (isSameConfiguredEndpoint) {
             apiKey = cfg.offlineLLM.apiKey || '';
           }
@@ -1695,7 +1763,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
           const rawProtocol = str(body.protocol);
           const chosenProtocol: LLMProtocol = (['chat/completions', 'responses', 'messages'] as const).includes(rawProtocol as LLMProtocol)
             ? (rawProtocol as LLMProtocol)
-            : cfg.offlineLLM.protocol || 'chat/completions';
+            : (usingHostFallback && hostFallback?.protocol) || cfg.offlineLLM.protocol || 'chat/completions';
           const { endpointUrl, protocol } = resolveEndpointAndProtocol(baseURL, chosenProtocol);
           const { requestBody, headers: protoHeaders } = buildProtocolPayload(
             protocol,
@@ -1792,5 +1860,10 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
     },
   });
 
-  return dispose;
+  let closed = false;
+  return () => {
+    if (closed) return;
+    closed = true;
+    if (typeof dispose === 'function') dispose();
+  };
 }

@@ -1,10 +1,13 @@
 {
   "name": "dsh-memory",
-  "version": "0.8.2",
+  "version": "0.9.0",
+  "icon": "assets/icon.svg",
   "description": "Local-first long-term memory plugin for DeepSeek Desktop (DSH): auto-distills preferences and lessons from sessions, recalls the most relevant in ~1ms, and self-corrects over time.",
   "keywords": [
     "dsh",
+    "dsh-plugin",
     "deepseek",
+    "deepseek-harness",
     "agent-memory",
     "long-term-memory",
     "self-evolving",
@@ -26,7 +29,8 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.0.0",
+    "dsh": ">=0.2.0-rc.1 || ^0.2.1-rc.0 || ^0.2.2-rc.0 || ^0.2.3-rc.0 || ^0.2.4-rc.0 || ^0.2.5-rc.0 || >=0.3.0-rc.0"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -34,6 +38,10 @@
     "dist",
     "src/core/migrations",
     "scripts/postinstall.mjs",
+    "locale",
+    "assets/icon.svg",
+    "assets/icon.png",
+    "screenshots.json",
     "README.md",
     "cordis.patch.yml",
     "LICENSE"
@@ -43,9 +51,13 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./client": "./dist/client.js"
+    "./client": "./dist/client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*": "./locale/*"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -61,7 +73,6 @@
   "scripts": {
     "build": "tsup && npm run build:client",
     "build:client": "node scripts/build-client.mjs",
-    "postinstall": "node scripts/postinstall.mjs",
     "init": "node scripts/postinstall.mjs --force",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -73,9 +84,9 @@
     "zod": "^4.6.7"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh": ">=0.1.0-rc.7",
-    "@deepseek-ai/schemastery": "^3.18.3"
+    "@deepseek-ai/cordis": ">=4.0.1 <5.0.0",
+    "@deepseek-ai/dsh": "^0.1.0-rc.7 || >=0.2.0-rc.1 || ^0.2.1-rc.0 || ^0.2.2-rc.0 || ^0.2.3-rc.0 || ^0.2.4-rc.0 || ^0.2.5-rc.0 || >=0.3.0-rc.0",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4.0.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

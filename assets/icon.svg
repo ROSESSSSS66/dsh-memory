@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">DSH Long-Term Memory</title>
+  <rect width="128" height="128" rx="28" fill="#191919" />
+  <rect x="2" y="2" width="124" height="124" rx="26" fill="none" stroke="#342f2d" stroke-width="2" />
+  <g transform="translate(20 20) scale(3.6667)" fill="none" stroke="#d97757" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-2.04z" />
+    <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-2.04z" />
+  </g>
+</svg>
