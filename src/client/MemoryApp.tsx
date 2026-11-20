@@ -191,6 +191,8 @@ export function MemoryApp() {
         m.summary?.toLowerCase().includes(q) ||
         m.content?.toLowerCase().includes(q) ||
         (m.slot_key && m.slot_key.toLowerCase().includes(q)) ||
+        (m.vikingUri && m.vikingUri.toLowerCase().includes(q)) ||
+        (m.hindsightNetwork && m.hindsightNetwork.toLowerCase().includes(q)) ||
         m.type.toLowerCase().includes(q) ||
         typeLabel.toLowerCase().includes(q) ||
         m.id.toLowerCase().includes(q)
@@ -430,6 +432,10 @@ export function MemoryApp() {
                     <div className="dshm-process-content">{m.content}</div>
                     <div className="dshm-process-meta-bar">
                       <span>ID: {m.id.slice(-8)}</span>
+                      {m.hindsightNetwork && (
+                        <span>网络: {m.hindsightNetwork.toUpperCase()}</span>
+                      )}
+                      {m.vikingUri && <span>URI: {m.vikingUri}</span>}
                       <span>版本: v{m.version}</span>
                       <span>
                         作用域: {SCOPE_LABELS[m.scope] || m.scope}

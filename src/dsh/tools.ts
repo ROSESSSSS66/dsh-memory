@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import type { Db, MemoryRecord, MemoryType } from '../types.js';
+import type { Db, MemoryRecord, MemoryType, VikingContextTier } from '../types.js';
 import { get, sources } from '../core/store.js';
 import { workspaceId, scopeFilterSQL } from '../core/scope.js';
 import { buildQueryPlan } from '../retrieval/query.js';
@@ -19,6 +19,24 @@ import {
 } from '../core/core-memory.js';
 import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
+import {
+  parseHindsightNetwork,
+  HINDSIGHT_NETWORK_TYPES,
+  classifyHindsightNetwork,
+  runHindsightReflect,
+  formatHindsightReflectReport,
+} from '../core/hindsight.js';
+import {
+  resolveVikingUri,
+  normalizeVikingUriInput,
+  resolveMemoryByVikingUriOrId,
+  browseVikingDirectory,
+  findInVikingTree,
+  getVikingEvolutionDiff,
+  formatVikingEvolutionDiff,
+  buildInlineL1Overview,
+  buildTieredMemoryView,
+} from '../core/viking.js';
 import { reconcileAndUpsert } from '../evolution/reconciler.js';
 import { enqueueRepairJobIfEligible } from '../evolution/repair.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
@@ -45,10 +63,17 @@ export class MemoryTools {
   }
 
   /**
-   * 1. memory_search (§6.6)
+   * 1. memory_search (§6.6 + Hindsight 4-Network & OpenViking URI / Tiered L0-L1 Filter)
    */
   public search(
-    params: { query: string; limit?: number; types?: string[] },
+    params: {
+      query: string;
+      limit?: number;
+      types?: string[];
+      network?: string;
+      uriPrefix?: string;
+      tier?: VikingContextTier;
+    },
     agentCtx: { workspaceId: string; sessionId: string; turn?: number }
   ): string {
     if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
@@ -112,9 +137,22 @@ export class MemoryTools {
       allIds
     );
     const memoriesMap = new Map<string, MemoryRecord>();
+    const targetNet = parseHindsightNetwork(params.network);
+    const allowedNetTypes = targetNet ? new Set<string>(HINDSIGHT_NETWORK_TYPES[targetNet]) : null;
+    const normUriPrefix = params.uriPrefix ? normalizeVikingUriInput(params.uriPrefix) : null;
+
     for (const m of memRows) {
       if (params.types && params.types.length > 0 && !params.types.includes(m.type)) {
         continue;
+      }
+      if (allowedNetTypes && !allowedNetTypes.has(m.type) && classifyHindsightNetwork(m.type, m.slot_key) !== targetNet) {
+        continue;
+      }
+      if (normUriPrefix && normUriPrefix !== 'viking://') {
+        const memUri = resolveVikingUri(m).toLowerCase();
+        if (!memUri.startsWith(normUriPrefix)) {
+          continue;
+        }
       }
       memoriesMap.set(m.id, m);
     }
@@ -188,15 +226,25 @@ export class MemoryTools {
       return 'No relevant memories found.';
     }
 
-    // 格式化输出: [TAG id] summary (c=..., u=...)
+    // 格式化输出: 默认 L0 [TAG id] summary (c=..., u=...)，当 tier='L1' 时附带 OpenViking URI 与 L1 结构化概览
     const lines: string[] = [];
+    const useL1 = params.tier === 'L1';
     for (let i = 0; i < filtered.length; i++) {
       const item = filtered[i];
       const m = item.memory;
       const tag = TAG_MAP[m.type] || 'FACT';
-      const cleanSummary = redactSecrets(m.summary || m.content).text;
-      const line = `[${tag} ${m.id}] ${cleanSummary} (c=${m.confidence.toFixed(2)}, u=${m.utility.toFixed(2)})`;
-      lines.push(line);
+      if (useL1) {
+        const uri = resolveVikingUri(m);
+        const net = classifyHindsightNetwork(m.type, m.slot_key).toUpperCase();
+        const l1Text = buildInlineL1Overview(m, 170);
+        lines.push(
+          `[${tag} ${m.id}] (${net} · ${uri} · c=${m.confidence.toFixed(2)}, u=${m.utility.toFixed(2)}) ${l1Text}`
+        );
+      } else {
+        const cleanSummary = redactSecrets(m.summary || m.content).text;
+        const line = `[${tag} ${m.id}] ${cleanSummary} (c=${m.confidence.toFixed(2)}, u=${m.utility.toFixed(2)})`;
+        lines.push(line);
+      }
     }
 
     let output = lines.join('\n');
@@ -221,10 +269,10 @@ export class MemoryTools {
   }
 
   /**
-   * 2. memory_expand (§6.6)
+   * 2. memory_expand (§6.6 + OpenViking L0/L1/L2 分层展开与 `viking://` 虚拟路径寻址)
    */
   public expand(
-    params: { id: string },
+    params: { id: string; tier?: VikingContextTier },
     agentCtx: { workspaceId: string; sessionId?: string; turn?: number }
   ): string {
     if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
@@ -234,7 +282,10 @@ export class MemoryTools {
     const wsId = workspaceId(agentCtx.workspaceId);
     let mem: MemoryRecord | undefined;
     try {
-      mem = get(this.db, rawId, { workspaceId: wsId, sessionId: agentCtx.sessionId });
+      mem = resolveMemoryByVikingUriOrId(this.db, rawId, {
+        workspaceId: wsId,
+        sessionId: agentCtx.sessionId,
+      });
     } catch (err: any) {
       return `Error: ${err?.message || 'Memory lookup failed'}`;
     }
@@ -244,6 +295,25 @@ export class MemoryTools {
     }
     if (mem.status !== 'active' && mem.status !== 'frozen') {
       return `Error: memory '${rawId}' is not active.`;
+    }
+
+    const requestedTier: VikingContextTier = params.tier || 'L2';
+    if (requestedTier === 'L0' || requestedTier === 'L1') {
+      const view = buildTieredMemoryView(mem);
+      const tierOut =
+        requestedTier === 'L0'
+          ? `[${TAG_MAP[mem.type] || 'FACT'} ${mem.id}] [L0 ${view.uri}] ${view.l0Abstract}`
+          : view.l1Overview;
+      if (agentCtx.sessionId) {
+        const stratVer = getActiveStrategy(this.db, this.cfg).version || this.strategyVersion;
+        this.db.run(
+          `INSERT OR IGNORE INTO injections (
+            session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
+          ) VALUES (?, ?, ?, ?, 'tool', 1, ?, 'summary', ?, ?)`,
+          [agentCtx.sessionId, agentCtx.turn ?? 0, mem.id, mem.content_rev, mem.summary_cost, stratVer, Date.now()]
+        );
+      }
+      return tierOut;
     }
 
     // 提取正文并脱敏
@@ -712,6 +782,67 @@ export class MemoryTools {
   }
 
   /**
+   * 11.9 tree (汲取自 volcengine/OpenViking `viking://` 虚拟文件系统目录递归检索、子树混合搜索与 L0/L1/L2 分层浏览)
+   */
+  public tree(
+    params: { uri?: string; query?: string; tier?: VikingContextTier; limit?: number },
+    agentCtx: { workspaceId: string; sessionId?: string }
+  ): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const wsId = workspaceId(agentCtx.workspaceId);
+    if (params.query && params.query.trim()) {
+      return findInVikingTree(this.db, {
+        query: params.query.trim(),
+        uri: params.uri,
+        workspaceId: wsId,
+        sessionId: agentCtx.sessionId,
+        tier: params.tier || 'L1',
+        limit: params.limit,
+      });
+    }
+    return browseVikingDirectory(this.db, {
+      uri: params.uri,
+      workspaceId: wsId,
+      sessionId: agentCtx.sessionId,
+      tier: params.tier || 'L0',
+      limit: params.limit,
+    });
+  }
+
+  /**
+   * 11.95 diff (汲取自 volcengine/OpenViking Self-Evolving Context Diff Audit)
+   */
+  public diff(agentCtx: { workspaceId: string }): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const wsId = workspaceId(agentCtx.workspaceId);
+    return formatVikingEvolutionDiff(getVikingEvolutionDiff(this.db, { workspaceId: wsId }));
+  }
+
+  /**
+   * 11.10 reflect (汲取自 vectorize-io/hindsight 四层认知网络盘点、证据密度置信度校准与心智模型合成)
+   */
+  public reflect(
+    params: { topic?: string; autoSynthesize?: boolean },
+    agentCtx: { workspaceId: string; sessionId?: string }
+  ): string {
+    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const wsId = workspaceId(agentCtx.workspaceId);
+    const report = runHindsightReflect(this.db, {
+      workspaceId: wsId,
+      sessionId: agentCtx.sessionId,
+      topic: params.topic,
+      autoSynthesize: params.autoSynthesize !== false,
+    });
+    return formatHindsightReflectReport(report);
+  }
+
+  /**
    * 12. 统一 memory 工具接口 (汲取自 LZMW/dsh-memory 单工具设计，节省提示词上下文)
    */
   public unified(
@@ -730,9 +861,19 @@ export class MemoryTools {
         | 'doctor'
         | 'heal'
         | 'init'
-        | 'bootstrap';
+        | 'bootstrap'
+        | 'tree'
+        | 'ls'
+        | 'viking'
+        | 'find'
+        | 'diff'
+        | 'reflect';
       query?: string;
       id?: string;
+      uri?: string;
+      tier?: VikingContextTier;
+      network?: string;
+      topic?: string;
       sourceId?: string;
       targetId?: string;
       content?: string;
@@ -753,9 +894,19 @@ export class MemoryTools {
     const action = params.action;
     switch (action) {
       case 'search':
-        return this.search({ query: params.query || '', limit: params.limit, types: params.types }, agentCtx);
+        return this.search(
+          {
+            query: params.query || '',
+            limit: params.limit,
+            types: params.types,
+            network: params.network,
+            uriPrefix: params.uri,
+            tier: params.tier,
+          },
+          agentCtx
+        );
       case 'expand':
-        return this.expand({ id: params.id || '' }, agentCtx);
+        return this.expand({ id: params.id || params.uri || '', tier: params.tier }, agentCtx);
       case 'note':
         return this.note({ content: params.content || '', kind: params.kind || 'fact' }, agentCtx);
       case 'feedback':
@@ -790,8 +941,34 @@ export class MemoryTools {
       case 'init':
       case 'bootstrap':
         return this.init(agentCtx, { force: params.force });
+      case 'tree':
+      case 'ls':
+      case 'viking':
+        return this.tree(
+          {
+            uri: params.uri || (!params.query ? params.id : undefined),
+            query: params.uri ? params.query : undefined,
+            tier: params.tier,
+            limit: params.limit,
+          },
+          agentCtx
+        );
+      case 'find':
+        return this.tree(
+          {
+            uri: params.uri,
+            query: params.query || params.content || params.id || '',
+            tier: params.tier || 'L1',
+            limit: params.limit,
+          },
+          agentCtx
+        );
+      case 'diff':
+        return this.diff(agentCtx);
+      case 'reflect':
+        return this.reflect({ topic: params.topic || params.query }, agentCtx);
       default:
-        return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal, init`;
+        return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal, init, tree, find, diff, reflect`;
     }
   }
 }

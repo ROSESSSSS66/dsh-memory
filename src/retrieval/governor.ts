@@ -1,8 +1,9 @@
-import type { Db, MemoryRecord } from '../types.js';
+import type { Db, MemoryRecord, VikingContextTier } from '../types.js';
 import type { ScoredCandidate } from './fuse.js';
-import { budgetTokens } from '../core/tokens.js';
+import { budgetTokens, estimateTokens } from '../core/tokens.js';
 import { tokenSet, jaccard } from '../core/text.js';
 import { cosineSimilarity, getOrComputeEmbedding } from '../core/vector.js';
+import { buildInlineL1Overview } from '../core/viking.js';
 import { render, type RenderItem } from './render.js';
 
 /**
@@ -54,6 +55,8 @@ export interface GovernOptions {
 export interface SelectedItem {
   memory: MemoryRecord;
   form: 'content' | 'summary';
+  tier?: VikingContextTier;
+  overview?: string;
   score: number;
   tokens: number;
 }
@@ -156,11 +159,17 @@ export function govern(
   function tryPackCandidate(item: (typeof withVpt)[0]): boolean {
     if (selected.length >= opts.maxItems) return false;
     const m = item.cand.memory;
+    const baseItems: RenderItem[] = selected.map((s) => ({
+      memory: s.memory,
+      form: s.form,
+      tier: s.tier,
+      overview: s.overview,
+    }));
 
-    // 先尝试 content
+    // 1. 先尝试 OpenViking L2 (完整 content)
     const tryContentItems: RenderItem[] = [
-      ...selected.map((s) => ({ memory: s.memory, form: s.form })),
-      { memory: m, form: 'content' },
+      ...baseItems,
+      { memory: m, form: 'content', tier: 'L2' },
     ];
     const tokensWithContent = testBudget(tryContentItems);
 
@@ -168,6 +177,7 @@ export function govern(
       selected.push({
         memory: m,
         form: 'content',
+        tier: 'L2',
         score: item.cand.score,
         tokens: m.token_cost,
       });
@@ -175,10 +185,42 @@ export function govern(
       return true;
     }
 
-    // 再尝试 summary
+    // 2. 再尝试 OpenViking L1 (中层结构化 Overview：当长正文无法完整装入，但预算足以容纳比一句话 L0 更丰富的关键槽位/步骤概览时)
+    const sumLen = (m.summary || '').length;
+    if (m.content.length > sumLen + 40) {
+      const targetL1Chars = Math.min(
+        140,
+        Math.max(sumLen + 24, Math.floor(m.content.length * 0.58))
+      );
+      const l1Overview = buildInlineL1Overview(m, targetL1Chars);
+      if (
+        l1Overview.length < m.content.length - 15 &&
+        l1Overview.length > sumLen + 12
+      ) {
+        const tryL1Items: RenderItem[] = [
+          ...baseItems,
+          { memory: m, form: 'summary', tier: 'L1', overview: l1Overview },
+        ];
+        const tokensWithL1 = testBudget(tryL1Items);
+        if (tokensWithL1 <= opts.budget) {
+          selected.push({
+            memory: m,
+            form: 'summary',
+            tier: 'L1',
+            overview: l1Overview,
+            score: item.cand.score,
+            tokens: Math.max(m.summary_cost, estimateTokens(l1Overview)),
+          });
+          selectedFeatures.push({ tokens: item.tokens, vec: item.vec, type: m.type });
+          return true;
+        }
+      }
+    }
+
+    // 3. 回退至 OpenViking L0 (一句话超简 Abstract / summary)
     const trySummaryItems: RenderItem[] = [
-      ...selected.map((s) => ({ memory: s.memory, form: s.form })),
-      { memory: m, form: 'summary' },
+      ...baseItems,
+      { memory: m, form: 'summary', tier: 'L0' },
     ];
     const tokensWithSummary = testBudget(trySummaryItems);
 
@@ -186,6 +228,7 @@ export function govern(
       selected.push({
         memory: m,
         form: 'summary',
+        tier: 'L0',
         score: item.cand.score,
         tokens: m.summary_cost,
       });
@@ -234,12 +277,25 @@ export function govern(
     // 携带 db 渲染：短码发生前缀碰撞时会变长，必须按最终实际输出复核
     const actualTokens = budgetTokens(
       render(
-        selected.map((s) => ({ memory: s.memory, form: s.form })),
+        selected.map((s) => ({
+          memory: s.memory,
+          form: s.form,
+          tier: s.tier,
+          overview: s.overview,
+        })),
         { strategyVersion, layer, db: opts.db, scopeCtx: opts.scopeCtx }
       )
     );
     if (actualTokens <= opts.budget) {
       break;
+    }
+    // 若最后一项为 L1，先尝试将其原地降级为 L0 summary，仍超限再弹出
+    const last = selected[selected.length - 1];
+    if (last.tier === 'L1') {
+      last.tier = 'L0';
+      last.overview = undefined;
+      last.tokens = last.memory.summary_cost;
+      continue;
     }
     // 移除最后一项 (最低价值项)
     selected.pop();

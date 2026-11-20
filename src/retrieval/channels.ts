@@ -509,6 +509,7 @@ export interface AssociativeNeighbor {
   hop?: 1 | 2;
   seedDegree?: number;
   activationWeight?: number;
+  bridgeEntity?: string;
 }
 
 /**
@@ -661,6 +662,61 @@ export function expandGraphNeighbors(
           hop: 2,
           seedDegree: bridgeDegree,
           activationWeight: hop2Weight,
+        });
+      }
+    }
+
+    // 三、Hindsight (vectorize-io/hindsight) 实体二部图桥接遍历 (Bipartite Entity-Bridge Traversal: seed -> @entity -> neighbor)
+    // 当显式 memory_relations 边未填满邻域容量时，沿着低扇出高区分度共享实体发现跨记忆隐式关联
+    if (results.length < maxNeighbors) {
+      const entitySeeds = uniqueSeeds.slice(0, 4);
+      const entPlaceholders = entitySeeds.map(() => '?').join(', ');
+      const entityBridgeRows = db.all<{
+        seed_id: string;
+        entity: string;
+        neighbor_id: string;
+      }>(
+        `SELECT e1.memory_id AS seed_id, e1.entity AS entity, m.id AS neighbor_id
+         FROM memory_entities e1
+         JOIN memory_entities e2 ON e2.entity = e1.entity AND e2.memory_id != e1.memory_id
+         JOIN memories m ON m.id = e2.memory_id
+         WHERE e1.memory_id IN (${entPlaceholders})
+           AND m.status IN ('active', 'frozen')
+           AND m.type != 'meta'
+           AND (${scope.sql})
+         LIMIT ?`,
+        [...entitySeeds, ...scope.params, maxNeighbors * 4]
+      );
+
+      const entityFanMap = new Map<string, number>();
+      for (const er of entityBridgeRows) {
+        entityFanMap.set(er.entity, (entityFanMap.get(er.entity) || 0) + 1);
+      }
+
+      for (const er of entityBridgeRows) {
+        if (results.length >= maxNeighbors) break;
+        if (!er.entity || er.entity.length < 2) continue;
+        const entityFan = (entityFanMap.get(er.entity) || 1) + 1;
+        // 过滤泛化高频 Hub 实体 (fan > 10)，仅通过高区分度实体桥接
+        if (entityFan > 10) continue;
+        if (er.neighbor_id === er.seed_id || seedRankMap.has(er.neighbor_id)) continue;
+
+        const pairKey = `${er.seed_id}->${er.neighbor_id}`;
+        if (seen.has(pairKey)) continue;
+        seen.add(pairKey);
+
+        const seedRank = seedRankMap.get(er.seed_id) ?? 1;
+        const bridgeWeight = Number((0.78 * computeFanAttenuation(entityFan)).toFixed(4));
+
+        results.push({
+          neighborId: er.neighbor_id,
+          seedId: er.seed_id,
+          rel: 'related',
+          seedRank,
+          hop: 1,
+          seedDegree: entityFan,
+          activationWeight: bridgeWeight,
+          bridgeEntity: er.entity,
         });
       }
     }

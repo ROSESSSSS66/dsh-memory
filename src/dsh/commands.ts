@@ -42,6 +42,22 @@ import {
 import { reconcileAndUpsert } from '../evolution/reconciler.js';
 import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
+import {
+  classifyHindsightNetwork,
+  runHindsightReflect,
+  formatHindsightReflectReport,
+  traceHindsightEvolution,
+} from '../core/hindsight.js';
+import {
+  resolveVikingUri,
+  resolveMemoryByVikingUriOrId,
+  browseVikingDirectory,
+  findInVikingTree,
+  getVikingEvolutionDiff,
+  formatVikingEvolutionDiff,
+  exportVikingContextTree,
+  importVikingContextTree,
+} from '../core/viking.js';
 import { workspaceId } from '../core/scope.js';
 import { redactSecrets } from '../core/privacy.js';
 import { runBackfill } from '../ingest/backfill.js';
@@ -186,16 +202,19 @@ export class MemoryCommands {
   }
 
   /**
-   * /memory inspect <id>
+   * /memory inspect <idOrVikingUri>
    */
   public inspect(idOrShortId: string, ctx: CommandContext): string {
     const rawId = (idOrShortId || '').trim();
-    if (!rawId) return 'Usage: /memory inspect <id>';
+    if (!rawId) return 'Usage: /memory inspect <id|viking://uri>';
 
     const wsId = workspaceId(ctx.workspaceId);
     let mem: MemoryRecord | undefined;
     try {
-      mem = get(this.db, rawId, { workspaceId: wsId, sessionId: ctx.sessionId });
+      mem = resolveMemoryByVikingUriOrId(this.db, rawId, {
+        workspaceId: wsId,
+        sessionId: ctx.sessionId,
+      });
     } catch (err: any) {
       return `Error: ${err?.message || 'Lookup failed'}`;
     }
@@ -222,9 +241,13 @@ export class MemoryCommands {
       ...inRelRows.map((r) => `  - [${r.rel}] <- ${r.from_id}`),
     ];
 
+    const vikingUri = resolveVikingUri(mem);
+    const hindsightNet = classifyHindsightNetwork(mem.type, mem.slot_key).toUpperCase();
+
     const lines = [
       `ID: ${mem.id} (rev ${mem.content_rev}, v${mem.version})`,
-      `Type: ${mem.type} | Status: ${mem.status} | Scope: ${mem.scope}${mem.slot_key ? ` | Slot: ${mem.slot_key}` : ''}`,
+      `Type: ${mem.type} | Network: ${hindsightNet} | Status: ${mem.status} | Scope: ${mem.scope}${mem.slot_key ? ` | Slot: ${mem.slot_key}` : ''}`,
+      `Viking URI: ${vikingUri}`,
       `Workspace: ${mem.workspace_id || 'global'} | Pinned: ${mem.pinned ? 'yes' : 'no'}`,
       `Confidence: ${mem.confidence.toFixed(2)} | Utility: ${mem.utility.toFixed(2)}`,
       `Stats: used ${mem.use_count} times (ok ${mem.success_count} / fail ${mem.fail_count})`,
@@ -241,6 +264,16 @@ export class MemoryCommands {
 
     if (relLines.length > 0) {
       lines.push(`Relations:\n${relLines.join('\n')}`);
+    }
+
+    // Hindsight 认知演化时间线与归纳溯源链
+    const trace = traceHindsightEvolution(this.db, mem);
+    if (trace.timeline.length > 1) {
+      const tlLines = trace.timeline.map(
+        (n) =>
+          `  - [${n.relationToCurrent}] ${n.id} (v${n.version}, ${n.status}, c=${n.confidence.toFixed(2)}): ${n.summary}`
+      );
+      lines.push(`Hindsight Evolution Timeline:\n${tlLines.join('\n')}`);
     }
 
     return lines.join('\n');
@@ -630,7 +663,7 @@ export class MemoryCommands {
     if (!trimmed || trimmed === 'help') {
       return {
         kind: 'success',
-        text: 'Available commands: init [--force] | stats | doctor [--fix] | heal | inspect <id> | list | confirm <id> | merge <src> <tgt> | restore <id> | graph [limit|<id>] | export-md <dir> | import-md <dir> | migrate <format> <path> | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
+        text: 'Available commands: init [--force] | stats | doctor [--fix] | heal | tree [viking://uri] [--l1|--l2] | reflect [topic] | inspect <id|viking://uri> | list | confirm <id> | merge <src> <tgt> | restore <id> | graph [limit|<id>] | export-viking [dir] | import-viking [dir] | export-md <dir> | import-md <dir> | migrate <format> <path> | history <id> | rollback <id> <version> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <proposalId> | reject-repair <proposalId> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
       };
     }
 
@@ -648,6 +681,72 @@ export class MemoryCommands {
         output = this.doctor(ctx, rest.includes('--fix') || rest.includes('fix'));
       } else if (sub === 'heal') {
         output = this.heal(ctx);
+      } else if (sub === 'tree' || sub === 'viking' || sub === 'ls') {
+        const tier = rest.some((r) => /^--?l2$/i.test(r))
+          ? 'L2'
+          : rest.some((r) => /^--?l1$/i.test(r))
+            ? 'L1'
+            : 'L0';
+        const nonFlagArgs = rest.filter((r) => !r.startsWith('-'));
+        const uriArg = nonFlagArgs[0];
+        const queryArg = nonFlagArgs.slice(1).join(' ').trim();
+        output = queryArg
+          ? findInVikingTree(this.db, {
+              uri: uriArg,
+              query: queryArg,
+              workspaceId: ctx.workspaceId,
+              sessionId: ctx.sessionId,
+              tier: tier === 'L0' ? 'L1' : tier,
+            })
+          : browseVikingDirectory(this.db, {
+              uri: uriArg,
+              workspaceId: ctx.workspaceId,
+              sessionId: ctx.sessionId,
+              tier,
+            });
+      } else if (sub === 'find') {
+        const tier = rest.some((r) => /^--?l2$/i.test(r))
+          ? 'L2'
+          : rest.some((r) => /^--?l0$/i.test(r))
+            ? 'L0'
+            : 'L1';
+        const nonFlagArgs = rest.filter((r) => !r.startsWith('-'));
+        const hasUriFirst =
+          nonFlagArgs.length >= 2 &&
+          (nonFlagArgs[0].startsWith('viking://') ||
+            /^(?:core|profile|preferences|entities|events|cases|skills|models)(?:\/|$)/i.test(
+              nonFlagArgs[0]
+            ));
+        const uriArg = hasUriFirst ? nonFlagArgs[0] : 'viking://';
+        const queryArg = (hasUriFirst ? nonFlagArgs.slice(1) : nonFlagArgs).join(' ').trim();
+        output = findInVikingTree(this.db, {
+          uri: uriArg,
+          query: queryArg,
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.sessionId,
+          tier,
+        });
+      } else if (sub === 'diff' || sub === 'viking-diff') {
+        output = formatVikingEvolutionDiff(
+          getVikingEvolutionDiff(this.db, { workspaceId: ctx.workspaceId })
+        );
+      } else if (sub === 'reflect') {
+        const topic = rest.filter((r) => !r.startsWith('-')).join(' ').trim() || undefined;
+        const report = runHindsightReflect(this.db, {
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.sessionId,
+          topic,
+          autoSynthesize: !rest.includes('--no-synth'),
+        });
+        output = formatHindsightReflectReport(report);
+      } else if (sub === 'export-viking') {
+        const targetDir = rest[0] || path.join(process.cwd(), '.dsh', 'viking-context');
+        const res = exportVikingContextTree(this.db, targetDir, { workspaceId: ctx.workspaceId });
+        output = `Successfully exported ${res.totalMemories} memories across [${res.categoriesExported.join(', ')}] (with L0 .abstract.md, L1 .overview.md, and L2 .md files) to OpenViking context tree at: ${res.dir}`;
+      } else if (sub === 'import-viking') {
+        const sourceDir = rest[0] || path.join(process.cwd(), '.dsh', 'viking-context');
+        const res = importVikingContextTree(this.db, sourceDir, { workspaceId: ctx.workspaceId, trusted: true });
+        output = `Successfully imported OpenViking context tree from ${sourceDir}: ${res.importedCount} inserted, ${res.updatedCount} updated (${res.skippedIndexes} L0/L1 index files skipped).`;
       } else if (sub === 'inspect') {
         output = this.inspect(rest[0], ctx);
       } else if (sub === 'history') {

@@ -13,6 +13,9 @@ const ONE_OFF_TASK_PROMPT_REGEX =
 const DURABLE_HABIT_MARKER_REGEX =
   /(?:以后|今后|总是|一律|永远|每次都|统一使用|必须使用|from now on|always|must always)/i;
 
+const NON_PREFERENCE_CONVERSATIONAL_REGEX =
+  /^(?:以后再(?:说|看|聊|议|处理|决定|讲|研究)|我(?:从来|从)?没(?:有)?(?:说过|见过|听过|想过|要过|写过)|从来没(?:见过|听说过)|i\s+never\s+(?:said|thought|saw|heard|knew|meant|asked|did|mentioned)\b)/i;
+
 export const CORRECTION_REGEX =
   /(?:不对|错了|不是这样|搞错|不行|没用|还是不行|重来|wrong|incorrect|doesn't work|not what)/i;
 
@@ -171,8 +174,8 @@ export function runRules(
       const slotRes = resolveFixedSlot(trimmed);
       const isOneOffTask =
         !slotRes.slotKey &&
-        ONE_OFF_TASK_PROMPT_REGEX.test(trimmed) &&
-        !DURABLE_HABIT_MARKER_REGEX.test(trimmed);
+        ((ONE_OFF_TASK_PROMPT_REGEX.test(trimmed) && !DURABLE_HABIT_MARKER_REGEX.test(trimmed)) ||
+          NON_PREFERENCE_CONVERSATIONAL_REGEX.test(trimmed));
       // 疑问句（"这个测试为什么总是失败？"）只是碰巧含有偏好词，与引用/示例一样只记为待审批候选
       const isQuotedOrExample =
         /(?:^>|```|例如|比如|有人说|示例|规则说明|“|”|")/i.test(trimmed) ||

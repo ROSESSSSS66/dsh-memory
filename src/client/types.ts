@@ -52,6 +52,8 @@ export interface MemoryItem {
   created_at: number;
   updated_at: number;
   last_used_at?: number | null;
+  vikingUri?: string;
+  hindsightNetwork?: string;
 }
 
 export interface CoreMemoryBlock {

@@ -41,6 +41,8 @@ import { registerWebRoutes } from './web.js';
 import { backfillMissingEmbeddings } from '../core/vector.js';
 import { weaveZettelkastenLinks, autoHealMemoryHealth } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
+import { runHindsightReflect } from '../core/hindsight.js';
+import { syncAutonomousVikingTree } from '../core/viking.js';
 import type { Db } from '../types.js';
 
 export const name = 'dsh-memory';
@@ -318,6 +320,15 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
           return jobFailure(res.error || 'consolidate_failed');
         }
       }
+      // Hindsight 零网络开销确定性跨网络心智模型合成兜底 (即使未配置外部 LLM 也能持续进化心智模型)
+      try {
+        runHindsightReflect(currentDb, {
+          workspaceId: wsId,
+          autoSynthesize: true,
+          minClusterSize: 3,
+          persistCalibration: true,
+        });
+      } catch {}
       return { action: 'done' };
     });
 
@@ -346,6 +357,7 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
       });
       autoHealMemoryHealth(currentDb, { workspaceId: maintainWsId });
       weaveZettelkastenLinks(currentDb, { maxNewLinks: 25 });
+      syncAutonomousVikingTree(currentDb, { workspacePath: rawCwd, workspaceId: maintainWsId });
       cleanOldTelemetry(currentDb);
       checkSentinelAndRollback(currentDb);
 
@@ -645,11 +657,23 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
         ctx.tools.register({
           name: 'memory_search',
           description:
-            '在长期记忆库中检索历史事实、配置与经验规则。注意：只有在当前系统提供的 memory_context 中找不到所需信息时才调用此工具。',
+            '在长期记忆库中检索历史事实、配置与经验规则（支持 Hindsight 四层认知网络过滤与 OpenViking 虚拟路径/L0-L1 分层输出）。注意：只有在当前系统提供的 memory_context 中找不到所需信息时才调用此工具。',
           parameters: {
             query: { type: 'string', required: true, description: '搜索关键词或问题' },
             limit: { type: 'number', description: '最多返回结果数 (1-8)' },
             types: { type: 'array', items: { type: 'string' }, description: '过滤的记忆类型' },
+            network: {
+              type: 'string',
+              description: 'Hindsight 认知网络过滤: world | experience | observation | opinion',
+            },
+            uriPrefix: {
+              type: 'string',
+              description: 'OpenViking 虚拟路径前缀过滤 (如 viking://workspace/memories/skills)',
+            },
+            tier: {
+              type: 'string',
+              description: 'OpenViking 上下文层级: L0 (一句话摘要, 默认) | L1 (结构化概览)',
+            },
           },
           output: {
             schema: { type: 'string' },
@@ -666,9 +690,18 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
       addDisp(
         ctx.tools.register({
           name: 'memory_expand',
-          description: '展开某条记忆的完整正文与来源证据详情。',
+          description:
+            '按 OpenViking L0/L1/L2 层级展开某条记忆的摘要、结构化概览或完整正文与来源证据详情（支持记忆 ID、短码或 viking:// 虚拟路径）。',
           parameters: {
-            id: { type: 'string', required: true, description: '记忆 ID 或 4 位短码 (如 m_ab12)' },
+            id: {
+              type: 'string',
+              required: true,
+              description: '记忆 ID、4 位短码 (如 m_ab12) 或 OpenViking 虚拟路径 (如 viking://...)',
+            },
+            tier: {
+              type: 'string',
+              description: '展开层级: L0 (摘要) | L1 (概览) | L2 (完整正文+证据+拓扑关系, 默认)',
+            },
           },
           output: {
             schema: { type: 'string' },
@@ -772,16 +805,20 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
         ctx.tools.register({
           name: 'memory',
           description:
-            '长期记忆统一集成工具 (支持 search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal, init)。',
+            '长期记忆统一集成工具 (支持 search, expand, tree, reflect, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal, init)。',
           parameters: {
             action: {
               type: 'string',
               required: true,
               description:
-                '操作类型: search | expand | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile | doctor | heal | init',
+                '操作类型: search | expand | tree | reflect | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile | doctor | heal | init',
             },
-            query: { type: 'string', description: '搜索关键词 (action=search 时使用)' },
-            id: { type: 'string', description: '记忆 ID (action=expand/feedback/confirm 时使用)' },
+            query: { type: 'string', description: '搜索关键词或主题 (action=search/reflect/tree 时使用)' },
+            id: { type: 'string', description: '记忆 ID 或 viking:// 路径 (action=expand/feedback/confirm 时使用)' },
+            uri: { type: 'string', description: 'OpenViking 虚拟目录或路径 (如 viking://workspace/memories/skills)' },
+            tier: { type: 'string', description: 'OpenViking 分层上下文粒度: L0 | L1 | L2' },
+            network: { type: 'string', description: 'Hindsight 四层认知网络: world | experience | observation | opinion' },
+            topic: { type: 'string', description: 'Hindsight 心智模型归纳主题 (action=reflect 时使用)' },
             sourceId: { type: 'string', description: '待合并的源记忆 ID (action=merge 时使用)' },
             targetId: { type: 'string', description: '目标记忆 ID (action=merge 时使用)' },
             content: {
@@ -861,7 +898,7 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
           name: 'memory',
           description: '长期记忆系统管理与状态检查',
           input: {
-            hint: 'init | stats | doctor | heal | inspect <id> | list [page] | confirm <id> | merge <src> <tgt> | restore <id> | core [block] [text] | reconcile <text> | graph [id|limit] | export-md <dir> | import-md <dir> | export-bank [dir] | import-bank [dir] | migrate <fmt> <path> | history <id> | rollback <id> <v> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <id> | reject-repair <id> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
+            hint: 'init | stats | doctor | heal | tree [viking://uri] [--l1|--l2] | reflect [topic] | inspect <id|viking://uri> | list [page] | confirm <id> | merge <src> <tgt> | restore <id> | core [block] [text] | reconcile <text> | graph [id|limit] | export-viking [dir] | import-viking [dir] | export-md <dir> | import-md <dir> | export-bank [dir] | import-bank [dir] | migrate <fmt> <path> | history <id> | rollback <id> <v> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <id> | reject-repair <id> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
           },
           handler: ({ agent, session, rawInput }: any) => {
             const { cwd, sessId } = resolveRuntimeScope({ agent, session });
@@ -950,11 +987,20 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                 workspaceId: wsId,
               });
 
-              // 节流执行本地无效记忆清理与 A-Mem 双链织网 (至少间隔 60s)，每 10 分钟时间桶自动排队一次后台自愈与 LLM 记忆审阅淘汰
+              // 节流执行本地无效记忆清理、Hindsight 置信度校准/心智模型合成、A-Mem 双链织网与 OpenViking 目录树同步 (至少间隔 60s)
               if (now - lastTurnWeaveAt >= 60_000) {
                 lastTurnWeaveAt = now;
                 pruneInvalidMemories(currentDb, { workspaceId: wsId, now });
+                runHindsightReflect(currentDb, {
+                  workspaceId: wsId,
+                  sessionId: sessId,
+                  autoSynthesize: true,
+                  minClusterSize: 3,
+                  persistCalibration: true,
+                  now,
+                });
                 weaveZettelkastenLinks(currentDb, { workspaceId: wsId, maxNewLinks: 15, now });
+                syncAutonomousVikingTree(currentDb, { workspacePath: rawCwd, workspaceId: wsId });
               }
               const bucket10m = Math.floor(now / 600_000);
               localScheduler.enqueue('maintain', `auto_maintain:${bucket10m}`, {

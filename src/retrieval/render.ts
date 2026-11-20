@@ -1,4 +1,4 @@
-import type { MemoryRecord, MemoryType, Db } from '../types.js';
+import type { MemoryRecord, MemoryType, Db, VikingContextTier } from '../types.js';
 import { redactSecrets } from '../core/privacy.js';
 import { scopeFilterSQL } from '../core/scope.js';
 
@@ -16,6 +16,8 @@ export const TAG_MAP: Record<MemoryType, string> = {
 export interface RenderItem {
   memory: MemoryRecord;
   form: 'content' | 'summary';
+  tier?: VikingContextTier;
+  overview?: string;
 }
 
 export interface RenderOptions {
@@ -158,6 +160,12 @@ export function renderLine(item: RenderItem, shortCode: string): string {
   const singleLine = (text: string) => text.replace(/[^\S \t]+/g, ' ');
 
   if (item.form === 'summary') {
+    if (item.tier === 'L1' && item.overview) {
+      const rawOverview = singleLine(redactSecrets(item.overview).text);
+      const escOverview = escapeXmlData(rawOverview);
+      const history = m.status === 'superseded' ? ' (history)' : '';
+      return `[${tag} ${shortCode}] ${escOverview}${history}  ⟨L1 · memory_expand("${shortCode}")⟩`;
+    }
     const rawSummary = singleLine(redactSecrets(m.summary || m.content).text);
     const escSummary = escapeXmlData(rawSummary);
     // 摘要形态同样要标出已被取代的历史记录，否则旧事实会被当作现行事实

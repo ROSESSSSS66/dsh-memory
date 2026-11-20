@@ -202,7 +202,12 @@ export function recall(
 
   // 6. 渲染
   const block = render(
-    selected.map((s) => ({ memory: s.memory, form: s.form })),
+    selected.map((s) => ({
+      memory: s.memory,
+      form: s.form,
+      tier: s.tier,
+      overview: s.overview,
+    })),
     {
       strategyVersion,
       layer: 'dynamic',

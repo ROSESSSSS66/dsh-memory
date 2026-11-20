@@ -447,7 +447,7 @@ export function exportMemoryBank(
       const cleanSummary = redactSecrets(item.summary || item.content).text;
       const cleanContent = redactSecrets(item.content).text;
       lines.push(`### [${item.type.toUpperCase()} ${item.id}] ${cleanSummary}`);
-      lines.push(`- **ID**: \`${item.id}\` | **重要度**: \`${item.importance ?? 5}/10\` | **置信度**: \`${item.confidence.toFixed(2)}\``);
+      lines.push(`- **ID**: \`${item.id}\` | **作用域**: \`${item.scope}\` | **重要度**: \`${item.importance ?? 5}/10\` | **置信度**: \`${item.confidence.toFixed(2)}\``);
       if (item.slot_key) lines.push(`- **槽位**: \`${item.slot_key}\``);
       lines.push('');
       lines.push(cleanContent);
@@ -546,6 +546,7 @@ export function importMemoryBank(
         .split('\n');
 
       let parsedSlotKey: string | undefined;
+      let parsedScope: Scope | undefined;
       const contentLines: string[] = [];
       let inLeadingMeta = true;
       for (const line of rawBodyLines) {
@@ -559,7 +560,11 @@ export function importMemoryBank(
             if (!slot.startsWith('core:')) parsedSlotKey = slot;
             continue;
           }
-          if (/^-\s*\*\*(?:ID|重要度|置信度|更新时间)\*\*:/.test(trimmedLine)) {
+          if (/^-\s*\*\*(?:ID|作用域|重要度|置信度|更新时间)\*\*:/.test(trimmedLine)) {
+            const scopeMatch = /\*\*作用域\*\*:\s*`(user|workspace|global|session)`/i.exec(trimmedLine);
+            if (scopeMatch) {
+              parsedScope = scopeMatch[1].toLowerCase() as Scope;
+            }
             continue;
           }
           inLeadingMeta = false;
@@ -592,6 +597,14 @@ export function importMemoryBank(
 
       const cleanSummary = headerLine.replace(/^\[.*?\]\s*/, '').trim();
 
+      const effectiveScope: Scope = !trusted
+        ? 'workspace'
+        : parsedScope && parsedScope !== 'session'
+          ? parsedScope
+          : parsedType === 'preference'
+            ? 'user'
+            : 'workspace';
+
       const upsertRes = upsertCandidate(
         db,
         {
@@ -599,8 +612,8 @@ export function importMemoryBank(
           content: body,
           summary: cleanSummary.slice(0, 80),
           slot_key: parsedSlotKey,
-          scope: trusted && parsedType === 'preference' ? 'user' : 'workspace',
-          workspaceId: wsId,
+          scope: effectiveScope,
+          workspaceId: effectiveScope === 'user' || effectiveScope === 'global' ? undefined : wsId,
           source_kind: trusted ? 'user' : 'system',
           confidence: trusted ? 0.9 : 0.5,
           importance: 8,
