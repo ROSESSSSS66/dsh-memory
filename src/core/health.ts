@@ -16,6 +16,7 @@ import {
 } from './writer.js';
 import { checkAndRepairFts, pruneInvalidMemories } from '../evolution/maintenance.js';
 import { approveRepairProposal, listRepairProposals } from '../evolution/repair.js';
+import { runHindsightReflect } from './hindsight.js';
 
 export interface DuplicatePairItem {
   sourceId: string;
@@ -79,6 +80,8 @@ export interface AutoHealResult {
   repairsApplied?: number;
   coreBlocksSynced?: number;
   invalidPruned?: number;
+  confidenceCalibrated?: number;
+  modelsSynthesized?: number;
   report: MemoryHealthReport;
 }
 
@@ -952,6 +955,23 @@ export function autoHealMemoryHealth(
     now,
   });
 
+  // 7.5 全自动 Hindsight 证据密度置信度校准与跨网络心智模型合成 (Autonomous Hindsight Reflect)
+  let confidenceCalibrated = 0;
+  let modelsSynthesized = 0;
+  try {
+    const reflectReport = runHindsightReflect(db, {
+      workspaceId: options.workspaceId,
+      autoSynthesize: true,
+      minClusterSize: 3,
+      persistCalibration: true,
+      now,
+    });
+    confidenceCalibrated = reflectReport.calibratedMemories.length;
+    modelsSynthesized = reflectReport.synthesizedModels.length;
+  } catch {
+    // 保持自愈流水线幂等继续
+  }
+
   // 8. A-Mem Zettelkasten 孤岛节点自动双链织网
   const linksWeaved = weaveZettelkastenLinks(db, {
     workspaceId: options.workspaceId,
@@ -974,6 +994,8 @@ export function autoHealMemoryHealth(
     repairsApplied,
     coreBlocksSynced,
     invalidPruned,
+    confidenceCalibrated,
+    modelsSynthesized,
     report: afterReport,
   };
 }

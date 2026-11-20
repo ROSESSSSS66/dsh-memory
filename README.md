@@ -1,14 +1,14 @@
 # 🧠 DSH Self-Evolving Memory System (`dsh-memory`)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.9.0_DSH_2.0_Runtime_%26_Marketplace_Ready-indigo?style=flat-square" alt="v0.9.0" />
+  <img src="https://img.shields.io/badge/Version-v0.10.0_Hindsight_%26_OpenViking_Autonomous-indigo?style=flat-square" alt="v0.10.0" />
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
   <img src="https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&style=flat-square" alt="CI Status" />
-  <img src="https://img.shields.io/badge/Tests-539_Passed_(61_Suites)-success?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-546_Passed_(62_Suites)-success?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Recall%40Inject-100.0%25_(120%2F120)-blueviolet?style=flat-square" alt="Recall Rate" />
-  <img src="https://img.shields.io/badge/Online_Latency-p95_1.2ms-red?style=flat-square" alt="Latency" />
+  <img src="https://img.shields.io/badge/Online_Latency-p95_1.0ms-red?style=flat-square" alt="Latency" />
   <img src="https://img.shields.io/badge/Dependencies-Zero_Native_C%2B%2B-teal?style=flat-square" alt="Zero Addons" />
 </p>
 
@@ -80,6 +80,8 @@
 | **A-Mem** (*Agentic Memory for LLM Agents*, NeurIPS 2025, arXiv:2502.12110) | **Zettelkasten 卡片盒动态双链织网** | 写入新记忆 (`upsertCandidate`) 与健康自愈 (`weaveZettelkastenLinks`) 时，基于 `0.45 * 128D余弦 + 0.35 * 词法Jaccard + 0.20 * 实体共现` 自动为孤立记忆建立 Top-3 双向 `related` 关联边 |
 | **Zep / Graphiti & Mem0** (arXiv:2501.13956, 2025) | **蒸馏-调和全闭环与规范槽位推演** | `extractor.ts` 与 `reconciler.ts` 深度打通：慢环蒸馏产物自动归一化工作区哈希并结合规范槽位与混合相似度决断 `ADD / UPDATE / DELETE / NOOP`，自动编织新旧技术栈演进因果边 |
 | **Letta / MemGPT + MemRL / EvolveMem** (2025–2026) | **常驻核心记忆自主同步与帕累托策略进化** | `syncAutonomousCoreMemory` 将经实战检验的高置信偏好/规范幂等同步至 `human` / `project` 核心块；`lab.ts` 基于真实收获样本（`eval_cases`）执行策略变异寻优与哨兵自动回滚 |
+| **Hindsight** (`vectorize-io/hindsight`, 2026) | **四层认知网络 (`World`/`Experience`/`Observation`/`Opinion`)、实体二部图桥接遍历与 `Reflect` 心智模型归纳** | `hindsight.ts` + `channels.ts` + `fuse.ts`：划分四层认知记忆网络并与查询意图对齐；在 `expandGraphNeighbors` 中引入 `seed -> @entity -> neighbor` 低扇出实体二部图桥接遍历；`runHindsightReflect` 基于多会话证据密度与认知倾向 (`Disposition`) 动态校准置信度并自动合成心智模型 (`hindsight.model.*`) |
+| **OpenViking** (`volcengine/OpenViking`, 2026) | **`viking://` 虚拟上下文文件系统与 L0 / L1 / L2 三层渐进式上下文装箱加载** | `viking.ts` + `governor.ts` + `render.ts`：将记忆确定性映射至 `viking://{agent,user,workspace}/...` 语义目录树；在 `governor.ts` 中实现 **L2 (`content`) → L1 (`overview`) → L0 (`summary`)** 三级渐进式 Token 预算降级装箱；支持目录递归检索 (`tree` / `ls`) 与 `.abstract.md` / `.overview.md` 三层目录树无损导入导出 |
 
 ### 🆕 v0.9.0 新版 DSH 兼容与插件市场适配
 - **DSH `2.0.24-next` / `@deepseek-ai/dsh@0.2.2-rc.5` / `Cordis@4.1.0` 全量适配**：
@@ -275,7 +277,7 @@ dsh-memory/
 ```bash
 dsh plugin --profile web add "https://github.com/ROSESSSSS66/dsh-memory/releases/latest/download/dsh-memory.tgz"
 # 或指定版本包 / npm 直接安装：
-# npm i https://github.com/ROSESSSSS66/dsh-memory/releases/download/v0.9.0/dsh-memory-0.9.0.tgz
+# npm i https://github.com/ROSESSSSS66/dsh-memory/releases/download/v0.10.0/dsh-memory-0.10.0.tgz
 ```
 
 **方式 B：克隆源码并构建**
@@ -355,6 +357,9 @@ npm run build
 | | `/memory heal` | **`[v0.4.0]`** 一键智能自愈：自动修复 FTS5 索引、回填 128D 向量、编织 A-Mem 双链、合并重复记忆对并消解非冻结矛盾 |
 | | `/memory eval` | 原地运行 120 条基准回归评测，即时输出召回率、隔离度与延迟报告 |
 | **前沿范式** | `/memory core [block] [内容]` | **`[Letta]`** 查看或更新常驻 Core Memory 核心块（`human` / `persona` / `project`） |
+| | `/memory tree [viking://uri] [--l1\|--l2]` | **`[OpenViking]`** 在 `viking://` 虚拟上下文文件系统上执行目录递归检索与 L0 (`.abstract`) / L1 (`.overview`) / L2 (`detail`) 分层浏览 |
+| | `/memory reflect [topic]` | **`[Hindsight]`** 执行四层认知网络 (`World`/`Experience`/`Observation`/`Opinion`) 盘点、证据密度置信度校准与跨网络心智模型 (`Mental Model`) 自动归纳合成 |
+| | `/memory export-viking [目录]` / `import-viking` | **`[OpenViking]`** 导出或导入带 L0 `.abstract.md`、L1 `.overview.md` 与 L2 `.md` 的三层虚拟上下文目录树 |
 | | `/memory reconcile <内容>` | **`[Mem0]`** 对输入事实执行动态冲突调和（自动判定 `ADD/UPDATE/DELETE/NOOP`）并落库 |
 | | `/memory export-bank [目录]` | **`[Cline]`** 一键导出标准化四文件 Memory Bank（`activeContext`、`systemPatterns` 等） |
 | | `/memory import-bank [目录]` | **`[Cline]`** 从项目 Memory Bank 目录解析导入并双向同步至 SQLite 记忆库 |

@@ -4,9 +4,11 @@ import type {
   ChannelName,
   StrategyConfig,
   MemoryType,
+  HindsightNetwork,
 } from '../types.js';
 import type { Candidate, AssociativeNeighbor } from './channels.js';
 import { tokenSet, isTokenMatch } from '../core/text.js';
+import { classifyHindsightNetwork, computeNetworkIntentBonus } from '../core/hindsight.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
@@ -48,6 +50,7 @@ export interface ScoredCandidate {
   score: number;
   relevance: number;
   fusedRrf: number;
+  network?: HindsightNetwork;
   graphExpanded?: boolean;
   synergyBoosted?: boolean;
   convergentSeeds?: number;
@@ -374,6 +377,10 @@ export function fuseCandidates(
     const multiSeedBonus = convergentSeeds >= 2 ? Math.min(0.03, 0.012 * (convergentSeeds - 1)) : 0;
     const synergyBonus = (isSynergy ? 0.02 + 0.015 * synFan : 0) + multiSeedBonus;
 
+    // Hindsight 四层认知网络意图对齐增益 (World / Experience / Observation / Opinion)
+    const network = classifyHindsightNetwork(mem.type, mem.slot_key);
+    const networkBonus = computeNetworkIntentBonus(network, plan.intents);
+
     const rawScore =
       weights.relevance * relevance +
       weights.confidence * mem.confidence +
@@ -382,7 +389,8 @@ export function fuseCandidates(
       weights.consistency * consistency +
       weights.specificity * specificity +
       impWeight * importanceScore +
-      synergyBonus;
+      synergyBonus +
+      networkBonus;
 
     const score = Math.min(1.0, rawScore);
 
@@ -391,6 +399,7 @@ export function fuseCandidates(
       score,
       relevance,
       fusedRrf: fused,
+      network,
       graphExpanded: graphExpandedIds.has(id),
       synergyBoosted: isSynergy,
       ...(convergentSeeds > 0 ? { convergentSeeds } : {}),

@@ -241,6 +241,17 @@ export class SessionListener {
     const eventCount = (this.sessionEventCounts.get(sessionId) || 0) + 1;
     this.sessionEventCounts.set(sessionId, eventCount);
 
+    // 防止长期运行进程中会话级 Map 无限累积 (LRU 淘汰最旧会话状态)
+    if (this.sessionEventCounts.size > 200) {
+      const oldestSess = this.sessionEventCounts.keys().next().value;
+      if (oldestSess && oldestSess !== sessionId) {
+        this.sessionEventCounts.delete(oldestSess);
+        this.sessionTurnCounts.delete(oldestSess);
+        this.toolCallMaps.delete(oldestSess);
+        this.pressureNotified.delete(oldestSess);
+      }
+    }
+
     const currentTurn = this.sessionTurnCounts.get(sessionId) || 0;
     if ((currentTurn >= 15 || eventCount >= 40) && !this.pressureNotified.has(sessionId)) {
       this.pressureNotified.add(sessionId);

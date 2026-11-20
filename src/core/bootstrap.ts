@@ -8,6 +8,7 @@ import { isWorkspaceExcluded } from './privacy.js';
 import { getCoreMemory, setCoreMemory } from './core-memory.js';
 import { upsertCandidate } from './writer.js';
 import { importFromMarkdown, importMemoryBank } from './markdown.js';
+import { importVikingContextTree } from './viking.js';
 import { backfillMissingEmbeddings } from './vector.js';
 import { weaveZettelkastenLinks } from './health.js';
 import { initDefaultStrategy, listStrategies } from '../evolution/strategy.js';
@@ -219,6 +220,14 @@ export function autoBootstrapMemory(
     if (fs.existsSync(mdDir)) {
       const mdRes = importFromMarkdown(db, mdDir, { workspaceId: wsId, actor: 'maintenance' });
       markdownMemoriesImported += mdRes.importedCount + mdRes.updatedCount;
+    }
+  } catch {}
+
+  try {
+    const vikingDir = path.join(wsPath, '.dsh', 'viking-context');
+    if (fs.existsSync(vikingDir)) {
+      const vkRes = importVikingContextTree(db, vikingDir, { workspaceId: wsId, trusted: false });
+      markdownMemoriesImported += vkRes.importedCount + vkRes.updatedCount;
     }
   } catch {}
 

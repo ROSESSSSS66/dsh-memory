@@ -26,6 +26,19 @@ import { serializeMemoryToMarkdown, trashMemory, resolveTrashDir } from '../core
 import { estimateTokens } from '../core/tokens.js';
 import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
+import {
+  classifyHindsightNetwork,
+  runHindsightReflect,
+  traceHindsightEvolution,
+} from '../core/hindsight.js';
+import {
+  resolveVikingUri,
+  resolveMemoryByVikingUriOrId,
+  browseVikingDirectory,
+  findInVikingTree,
+  getVikingEvolutionDiff,
+  syncAutonomousVikingTree,
+} from '../core/viking.js';
 import { contentHash } from '../core/text.js';
 import {
   backfillMissingEmbeddings,
@@ -238,7 +251,11 @@ function sendJson(res: ServerResponse, statusCode: number, data: unknown) {
 function stripEmbedding(m: MemoryRecord | null | undefined) {
   if (!m) return null;
   const { embedding: _emb, ...rest } = m;
-  return rest;
+  return {
+    ...rest,
+    vikingUri: resolveVikingUri(m),
+    hindsightNetwork: classifyHindsightNetwork(m.type, m.slot_key),
+  };
 }
 
 class HttpError extends Error {
@@ -307,6 +324,7 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
     lastAutoCycleAt = now;
     try {
       autoHealMemoryHealth(db, { workspaceId: wsId, now });
+      syncAutonomousVikingTree(db, { workspaceId: wsId });
     } catch {}
     if (cfg.privacy?.offlineConsent && now - lastLlmCurateAt >= 600_000) {
       lastLlmCurateAt = now;
@@ -396,6 +414,44 @@ export function registerWebRoutes(ctx: any, db: Db, cfg: PluginConfig) {
         const reqUrl = new URL(req.url || '/', 'http://127.0.0.1');
         const pathname = reqUrl.pathname;
         const subPath = pathname.slice(API_PREFIX.length).replace(/\/+$/, '') || '/';
+
+        // 0. OpenViking Virtual Context Filesystem & Hindsight 4-Network Epistemic Endpoints
+        if (subPath === '/viking' && req.method === 'GET') {
+          const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
+          const wsId = rawWs ? workspaceId(rawWs) : workspaceId(process.cwd());
+          const uri = reqUrl.searchParams.get('uri') || 'viking://';
+          const query = reqUrl.searchParams.get('query') || '';
+          const tierParam = (reqUrl.searchParams.get('tier') || 'L0').toUpperCase();
+          const tier = tierParam === 'L2' ? 'L2' : tierParam === 'L1' ? 'L1' : 'L0';
+          const treeText = query.trim()
+            ? findInVikingTree(db, { uri, query, workspaceId: wsId, tier })
+            : browseVikingDirectory(db, { uri, workspaceId: wsId, tier });
+          const diff = getVikingEvolutionDiff(db, { workspaceId: wsId });
+          sendJson(res, 200, { ok: true, uri, tier, tree: treeText, diff });
+          return;
+        }
+
+        if (subPath === '/hindsight' && req.method === 'GET') {
+          const rawWs = reqUrl.searchParams.get('workspaceId') || undefined;
+          const wsId = rawWs ? workspaceId(rawWs) : workspaceId(process.cwd());
+          const topic = reqUrl.searchParams.get('topic') || undefined;
+          const traceTarget = reqUrl.searchParams.get('trace') || undefined;
+          const report = runHindsightReflect(db, {
+            workspaceId: wsId,
+            topic,
+            autoSynthesize: reqUrl.searchParams.get('synthesize') === '1',
+            persistCalibration: reqUrl.searchParams.get('calibrate') === '1',
+          });
+          let trace = null;
+          if (traceTarget) {
+            const targetMem = resolveMemoryByVikingUriOrId(db, traceTarget, { workspaceId: wsId });
+            if (targetMem) {
+              trace = traceHindsightEvolution(db, targetMem);
+            }
+          }
+          sendJson(res, 200, { ok: true, report, trace });
+          return;
+        }
 
         // 1. Overview & Stats
         if (subPath === '/overview' || subPath === '/stats') {

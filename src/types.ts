@@ -31,6 +31,42 @@ export type Scope = 'session' | 'workspace' | 'user' | 'global';
 
 export type RelationType = 'supersedes' | 'derived_from' | 'contradicts' | 'related';
 
+/**
+ * Hindsight (vectorize-io/hindsight) 四层认知记忆网络
+ * - world: 客观事实、实体与环境约束 (semantic)
+ * - experience: 时间锚定的情景事件、报错与执行轨迹 (episodic, failure)
+ * - observation: 跨经验归纳出的可复用程序性模式与操作规程 (procedural)
+ * - opinion: 随证据置信度动态演化的心智模型、信念、用户偏好与目标 (belief, preference, goal)
+ */
+export type HindsightNetwork = 'world' | 'experience' | 'observation' | 'opinion';
+
+/**
+ * Hindsight Reflect 认知倾向配置 (Disposition)
+ */
+export interface HindsightDisposition {
+  skepticism: number; // 0..1: 对单源/工具/低证据结论的怀疑权重
+  literalism: number; // 0..1: 偏向精确槽位/显式规则的程度
+  empathy: number;    // 0..1: 对用户偏好与习惯信号的放大权重
+}
+
+/**
+ * OpenViking (volcengine/OpenViking) 虚拟上下文文件系统语义目录分类
+ */
+export type VikingCategory =
+  | 'core'
+  | 'profile'
+  | 'preferences'
+  | 'entities'
+  | 'events'
+  | 'cases'
+  | 'skills'
+  | 'models';
+
+/**
+ * OpenViking 三级分层上下文加载层级 (L0 Abstract / L1 Overview / L2 Detail)
+ */
+export type VikingContextTier = 'L0' | 'L1' | 'L2';
+
 export interface MemoryRef {
   id: string;
   contentRev: number;

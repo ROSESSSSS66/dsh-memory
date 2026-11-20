@@ -264,7 +264,43 @@ export async function distillSession(
     sessionId: targetSessionId,
   });
 
+  const minSeq = batchEvents[0].seq;
+  const maxSeq = batchEvents[batchEvents.length - 1].seq;
+  const parseFailMetaKey = `distill_parse_fail:${targetSessionId}:${minSeq}..${maxSeq}`;
+
   if (!parseRes.success) {
+    // 记录同一批次连续解析失败次数：首次失败保留 processed=0 等待重试；
+    // 若同一批次连续 >= 2 次无法解析（坏批次死锁），自动推进游标跳过该中毒批次，保障全自动流水线永不卡死
+    const prevFails = Number(
+      db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [parseFailMetaKey])?.value || '0'
+    );
+    const nextFails = prevFails + 1;
+    if (nextFails >= 2) {
+      db.transaction(() => {
+        db.run(
+          `UPDATE raw_events SET processed = 2 WHERE session_id = ? AND seq >= ? AND seq <= ?`,
+          [targetSessionId, minSeq, maxSeq]
+        );
+        db.run(
+          `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          [
+            `distill:${targetSessionId}`,
+            JSON.stringify({ lastSeq: maxSeq, updatedAt: Date.now(), skippedPoisonedBatch: true }),
+          ]
+        );
+        db.run('DELETE FROM meta WHERE key = ?', [parseFailMetaKey]);
+      });
+      return {
+        success: true,
+        sessionId: targetSessionId,
+        consumedCount: batchEvents.length,
+        itemsCreated: 0,
+      };
+    }
+    db.run(
+      `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [parseFailMetaKey, String(nextFails)]
+    );
     return {
       success: false,
       sessionId: targetSessionId,
@@ -273,6 +309,8 @@ export async function distillSession(
       error: parseRes.error,
     };
   }
+
+  db.run('DELETE FROM meta WHERE key = ?', [parseFailMetaKey]);
 
   // 5. 同一事务提交：智能调和 (Mem0/Zep Slot & Semantic Reconciliation) + LLM 自动舍弃无效记忆 + 自动升级旧记忆
   const candidateIds: string[] = [];
