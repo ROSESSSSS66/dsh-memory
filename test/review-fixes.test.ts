@@ -27,7 +27,7 @@ import { PromptSectionManager } from '../src/dsh/prompt-section.js';
 import { runRules } from '../src/ingest/rules.js';
 import { runReflectJob } from '../src/evolution/reflector.js';
 import { distillSession } from '../src/evolution/extractor.js';
-import { curateMemoriesWithLLM, pruneInvalidMemories } from '../src/evolution/maintenance.js';
+import { curateMemoriesWithLLM } from '../src/evolution/maintenance.js';
 import { parseOutput } from '../src/evolution/parse.js';
 
 describe('Comprehensive Review Fixes Regression Suite', () => {
@@ -283,23 +283,29 @@ describe('Comprehensive Review Fixes Regression Suite', () => {
   it('10. strategy cache is isolated per Db instance via WeakMap', () => {
     const db1 = openDb(':memory:');
     const db2 = openDb(':memory:');
-    initDefaultStrategy(db1);
-    initDefaultStrategy(db2);
-    const s1Init = getActiveStrategy(db1);
-    // Modify db2's strategy row before getActiveStrategy(db2) caches it (or clear and reload)
-    const customStrat = { ...s1Init.config, rrfK: 99 };
-    db2.run(`UPDATE strategies SET config = ? WHERE version = 1`, [JSON.stringify(customStrat)]);
-    // Create a fresh db3 with custom rrfK in DB before first getActiveStrategy call
     const db3 = openDb(':memory:');
-    db3.run(
-      `INSERT INTO strategies (version, config, status, parent, eval_report, created_at, promoted_at)
-       VALUES (1, ?, 'active', NULL, NULL, 1000, 1000)`,
-      [JSON.stringify(customStrat)]
-    );
-    const s1 = getActiveStrategy(db1);
-    const s3 = getActiveStrategy(db3);
-    expect(s1.config.rrfK).toBe(60);
-    expect(s3.config.rrfK).toBe(99);
+    try {
+      initDefaultStrategy(db1);
+      initDefaultStrategy(db2);
+      const s1Init = getActiveStrategy(db1);
+      // Modify db2's strategy row before getActiveStrategy(db2) caches it (or clear and reload)
+      const customStrat = { ...s1Init.config, rrfK: 99 };
+      db2.run(`UPDATE strategies SET config = ? WHERE version = 1`, [JSON.stringify(customStrat)]);
+      // Create a fresh db3 with custom rrfK in DB before first getActiveStrategy call
+      db3.run(
+        `INSERT INTO strategies (version, config, status, parent, eval_report, created_at, promoted_at)
+         VALUES (1, ?, 'active', NULL, NULL, 1000, 1000)`,
+        [JSON.stringify(customStrat)]
+      );
+      const s1 = getActiveStrategy(db1);
+      const s3 = getActiveStrategy(db3);
+      expect(s1.config.rrfK).toBe(25);
+      expect(s3.config.rrfK).toBe(99);
+    } finally {
+      db1.close();
+      db2.close();
+      db3.close();
+    }
   });
 
   it('11. MemoryTools.expand records tool injection so cross-turn MemoryTools.feedback succeeds', () => {
@@ -611,76 +617,245 @@ describe('Comprehensive Review Fixes Regression Suite', () => {
     }
   });
 
-  it('17. distillSession and curateMemoriesWithLLM autonomously update memories and discard invalid ones via LLM', async () => {
+  it('17. distillSession protects user-approved active memories, supersedes LLM-origin active memories, and curateMemoriesWithLLM curates unprotected candidates', async () => {
     const db = openDb(':memory:');
-    const ws = workspaceId('/project/llm-auto-curate');
-    const now = Date.now();
+    try {
+      const ws = workspaceId('/project/llm-auto-curate');
+      const now = Date.now();
 
-    // 1. Insert an old active memory (to be superseded via supersedes_id) and an invalid noisy memory (to be discarded via discard_ids)
-    const oldMem = upsertCandidate(
-      db,
-      {
-        type: 'semantic',
-        content: '项目网关默认监听端口为 3000',
-        slot_key: 'project.gateway.port',
-        scope: 'workspace',
-        workspaceId: ws,
-        source_kind: 'user',
-        origin_kinds: ['user'],
-        confidence: 0.9,
-        status: 'active',
-        sources: [{ session_id: 's0', seq: 1, kind: 'user_msg' }],
-        actor: 'user',
-      },
-      now
-    );
-    const oldId = (oldMem as any).id;
+      // 1a. User-approved active memory -> MUST be protected from silent LLM overwrite
+      const userProtectedMem = upsertCandidate(
+        db,
+        {
+          type: 'semantic',
+          content: '核心业务数据库统一使用 PostgreSQL 16 集群部署',
+          slot_key: 'project.db.engine',
+          scope: 'workspace',
+          workspaceId: ws,
+          source_kind: 'user',
+          origin_kinds: ['user'],
+          confidence: 0.95,
+          status: 'active',
+          sources: [{ session_id: 's0', seq: 1, kind: 'user_msg' }],
+          actor: 'user',
+        },
+        now
+      );
+      const userProtectedId = (userProtectedMem as any).id as string;
 
-    const noisyMem = upsertCandidate(
-      db,
-      {
-        type: 'episodic',
-        content: '刚才临时测试了一下健康检查接口返回 200',
-        scope: 'workspace',
-        workspaceId: ws,
-        source_kind: 'llm_extract',
-        origin_kinds: ['assistant'],
-        confidence: 0.6,
-        status: 'active',
-        sources: [{ session_id: 's0', seq: 2, kind: 'assistant_msg' }],
-        actor: 'llm',
-      },
-      now + 5
-    );
-    const noisyId = (noisyMem as any).id;
+      // 1b. LLM-origin active memory (no user approval / no user evidence) -> CAN be cleanly superseded by distillSession
+      const llmOldMem = upsertCandidate(
+        db,
+        {
+          type: 'semantic',
+          content: '项目网关默认监听端口为 3000',
+          slot_key: 'project.gateway.port',
+          scope: 'workspace',
+          workspaceId: ws,
+          source_kind: 'llm_extract',
+          origin_kinds: ['assistant'],
+          confidence: 0.85,
+          status: 'candidate',
+          sources: [{ session_id: 's0', seq: 2, kind: 'assistant_msg' }],
+          actor: 'llm',
+        },
+        now + 2
+      );
+      const llmOldId = (llmOldMem as any).id as string;
+      db.run(
+        `UPDATE memories SET status = 'active', approved_by = 'llm-auto-update', approved_at = ? WHERE id = ?`,
+        [now + 2, llmOldId]
+      );
 
-    // 2. Insert session events for distillSession
-    db.run(
-      `INSERT INTO raw_events (session_id, seq, workspace_id, type, time, turn, role, origin_kind, is_error, text, processed)
-       VALUES ('s_distill', 1, ?, 'user', ?, 1, 'user', 'user', 0, '我们已经把网关默认监听端口统一升级为 8080 了，旧的 3000 端口彻底停用。', 0)`,
-      [ws, now + 20]
-    );
+      // 1c. Noisy LLM-origin candidate -> CAN be discarded via discard_ids
+      const noisyMem = upsertCandidate(
+        db,
+        {
+          type: 'episodic',
+          content: '刚才临时测试了一下健康检查接口返回 200',
+          scope: 'workspace',
+          workspaceId: ws,
+          source_kind: 'llm_extract',
+          origin_kinds: ['assistant'],
+          confidence: 0.6,
+          status: 'candidate',
+          sources: [{ session_id: 's0', seq: 3, kind: 'assistant_msg' }],
+          actor: 'llm',
+        },
+        now + 5
+      );
+      const noisyId = (noisyMem as any).id as string;
 
-    const mockCfg = validateConfig({
-      distillMinEvents: 1,
-      privacy: {
-        offlineConsent: true,
-        allowedOfflineEndpoints: ['http://localhost:11434'],
-      },
-      offlineLLM: {
-        useDshLlm: false,
-        baseURL: 'http://localhost:11434/v1',
-        model: 'test-model',
-        apiKeyEnv: '',
-      },
-    } as any);
+      // 2. Insert session events for distillSession
+      db.run(
+        `INSERT INTO raw_events (session_id, seq, workspace_id, type, time, turn, role, origin_kind, is_error, text, processed)
+         VALUES ('s_distill', 1, ?, 'user', ?, 1, 'user', 'user', 0, '我们已经把网关默认监听端口统一升级为 8080 了，旧的 3000 端口彻底停用；另外测试环境提议尝试改用 MySQL 8 作为数据库。', 0)`,
+        [ws, now + 20]
+      );
 
-    const distillFetch: any = async (_url: string, init: any) => {
-      const bodyStr = String(init?.body || '');
-      // Verify existing workspace memories were injected into distill prompt
-      expect(bodyStr).toContain('EXISTING WORKSPACE MEMORIES');
-      expect(bodyStr).toContain(oldId);
-      return {
+      const mockCfg = validateConfig({
+        distillMinEvents: 1,
+        privacy: {
+          offlineConsent: true,
+          allowedOfflineEndpoints: ['http://localhost:11434'],
+        },
+        offlineLLM: {
+          useDshLlm: false,
+          baseURL: 'http://localhost:11434/v1',
+          model: 'test-model',
+          apiKeyEnv: '',
+        },
+      } as any);
+
+      const distillFetch: any = async (_url: string, init: any) => {
+        const bodyStr = String(init?.body || '');
+        // Verify existing workspace memories were injected into distill prompt
+        expect(bodyStr).toContain('EXISTING WORKSPACE MEMORIES');
+        expect(bodyStr).toContain(llmOldId);
+        expect(bodyStr).toContain(userProtectedId);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    items: [
+                      {
+                        type: 'semantic',
+                        text: '核心业务数据库改为使用 MySQL 8。',
+                        slot_key: 'project.db.engine',
+                        supersedes_id: userProtectedId,
+                        confidence: 0.9,
+                        scope: 'workspace',
+                        evidence: [
+                          {
+                            seq: 1,
+                            quote: '尝试改用 MySQL 8 作为数据库',
+                          },
+                        ],
+                      },
+                      {
+                        type: 'semantic',
+                        text: '项目网关默认监听端口已统一升级为 8080。',
+                        slot_key: 'project.gateway.port',
+                        supersedes_id: llmOldId,
+                        confidence: 0.92,
+                        scope: 'workspace',
+                        evidence: [
+                          {
+                            seq: 1,
+                            quote: '把网关默认监听端口统一升级为 8080',
+                          },
+                        ],
+                      },
+                    ],
+                    discard_ids: [noisyId, userProtectedId],
+                  }),
+                },
+              },
+            ],
+            usage: { prompt_tokens: 100, completion_tokens: 80 },
+          }),
+        };
+      };
+
+      const distillRes = await distillSession(db, mockCfg, {
+        sessionId: 's_distill',
+        fetchFn: distillFetch,
+        isIdle: true,
+      });
+      expect(distillRes.success).toBe(true);
+      expect(distillRes.itemsCreated).toBe(2);
+      // Only llmOldId is superseded; userProtectedId is protected from silent overwrite and discard
+      expect(distillRes.itemsUpdated).toBe(1);
+      expect(distillRes.itemsDiscarded).toBe(1);
+
+      // (a) User-approved active memory remains active & untouched; conflicting LLM item stays candidate
+      expect(get(db, userProtectedId)?.status).toBe('active');
+      const attemptedDbOverrideId = distillRes.candidateIds![0];
+      expect(get(db, attemptedDbOverrideId)?.status).toBe('candidate');
+
+      // (b) LLM-origin active memory IS cleanly superseded, noisy candidate rejected, replacement activated
+      expect(get(db, llmOldId)?.status).toBe('superseded');
+      expect(['archived', 'rejected']).toContain(get(db, noisyId)?.status);
+      const newGatewayId = distillRes.candidateIds![1];
+      expect(get(db, newGatewayId)?.status).toBe('active');
+      expect(get(db, newGatewayId)?.content).toContain('8080');
+
+      // 3. Test curateMemoriesWithLLM (deterministic prune + LLM discard + LLM in-place update/absorb on unprotected candidates)
+      const transientNoise = upsertCandidate(
+        db,
+        {
+          type: 'episodic',
+          content: '请帮我写一个临时测试脚本看看输出',
+          scope: 'workspace',
+          workspaceId: ws,
+          source_kind: 'llm_extract',
+          origin_kinds: ['user'],
+          confidence: 0.6,
+          status: 'candidate',
+          sources: [{ session_id: 's2', seq: 1, kind: 'user_msg' }],
+          actor: 'llm',
+        },
+        now + 100
+      );
+
+      const invalidCand = upsertCandidate(
+        db,
+        {
+          type: 'semantic',
+          content: '刚才控制台打印了一段临时调试日志',
+          scope: 'workspace',
+          workspaceId: ws,
+          source_kind: 'llm_extract',
+          origin_kinds: ['assistant'],
+          confidence: 0.55,
+          status: 'candidate',
+          sources: [{ session_id: 's2', seq: 2, kind: 'assistant_msg' }],
+          actor: 'llm',
+        },
+        now + 110
+      );
+
+      const candTarget = upsertCandidate(
+        db,
+        {
+          type: 'semantic',
+          content: '服务缓存默认 TTL 设定为 600 秒',
+          slot_key: 'project.cache.ttl',
+          scope: 'workspace',
+          workspaceId: ws,
+          source_kind: 'llm_extract',
+          origin_kinds: ['user'],
+          confidence: 0.8,
+          status: 'candidate',
+          sources: [{ session_id: 's2', seq: 3, kind: 'user_msg' }],
+          actor: 'llm',
+        },
+        now + 115
+      );
+      const candTargetId = (candTarget as any).id as string;
+
+      const dupMem = upsertCandidate(
+        db,
+        {
+          type: 'semantic',
+          content: '服务缓存 TTL 为 600 秒，同时开启本地二级缓存加速',
+          scope: 'workspace',
+          workspaceId: ws,
+          source_kind: 'llm_extract',
+          origin_kinds: ['user'],
+          confidence: 0.8,
+          status: 'candidate',
+          sources: [{ session_id: 's2', seq: 4, kind: 'user_msg' }],
+          actor: 'llm',
+        },
+        now + 120
+      );
+
+      const curateFetch: any = async () => ({
         ok: true,
         status: 200,
         json: async () => ({
@@ -688,142 +863,43 @@ describe('Comprehensive Review Fixes Regression Suite', () => {
             {
               message: {
                 content: JSON.stringify({
-                  items: [
+                  discard_ids: [(invalidCand as any).id, userProtectedId],
+                  updates: [
                     {
+                      target_id: candTargetId,
+                      absorb_ids: [(dupMem as any).id],
                       type: 'semantic',
-                      text: '项目网关默认监听端口已统一升级为 8080。',
-                      slot_key: 'project.gateway.port',
-                      supersedes_id: oldId,
-                      confidence: 0.92,
-                      scope: 'workspace',
-                      evidence: [
-                        {
-                          seq: 1,
-                          quote: '把网关默认监听端口统一升级为 8080',
-                        },
-                      ],
+                      text: '服务缓存默认 TTL 为 600 秒，并启用本地二级缓存策略。',
+                      slot_key: 'project.cache.ttl',
+                      confidence: 0.95,
                     },
                   ],
-                  discard_ids: [noisyId],
+                  reason: 'Discarded transient log and merged cache TTL candidate details',
                 }),
               },
             },
           ],
-          usage: { prompt_tokens: 100, completion_tokens: 60 },
+          usage: { prompt_tokens: 120, completion_tokens: 80 },
         }),
-      };
-    };
+      });
 
-    const distillRes = await distillSession(db, mockCfg, {
-      sessionId: 's_distill',
-      fetchFn: distillFetch,
-      isIdle: true,
-    });
-    expect(distillRes.success).toBe(true);
-    expect(distillRes.itemsCreated).toBe(1);
-    expect(distillRes.itemsUpdated).toBe(1);
-    expect(distillRes.itemsDiscarded).toBe(1);
-
-    // Old memory is superseded, noisy memory is rejected/archived, new memory is auto-activated
-    expect(get(db, oldId)?.status).toBe('superseded');
-    expect(['archived', 'rejected']).toContain(get(db, noisyId)?.status);
-    const newId = distillRes.candidateIds![0];
-    expect(get(db, newId)?.status).toBe('active');
-    expect(get(db, newId)?.content).toContain('8080');
-
-    // 3. Test curateMemoriesWithLLM (deterministic prune + LLM discard + LLM in-place update/absorb)
-    const transientNoise = upsertCandidate(
-      db,
-      {
-        type: 'episodic',
-        content: '请帮我写一个临时测试脚本看看输出',
-        scope: 'workspace',
+      const curateRes = await curateMemoriesWithLLM(db, mockCfg, {
         workspaceId: ws,
-        source_kind: 'llm_extract',
-        origin_kinds: ['user'],
-        confidence: 0.6,
-        status: 'candidate',
-        sources: [{ session_id: 's2', seq: 1, kind: 'user_msg' }],
-        actor: 'llm',
-      },
-      now + 100
-    );
+        fetchFn: curateFetch,
+        now: now + 200,
+      });
+      expect(curateRes.ok).toBe(true);
+      expect(curateRes.deterministicPruned).toBe(1);
+      expect(curateRes.llmDiscarded).toBe(1);
+      expect(curateRes.llmUpdated).toBe(1);
 
-    const invalidCand = upsertCandidate(
-      db,
-      {
-        type: 'semantic',
-        content: '刚才控制台打印了一段临时调试日志',
-        scope: 'workspace',
-        workspaceId: ws,
-        source_kind: 'llm_extract',
-        origin_kinds: ['assistant'],
-        confidence: 0.55,
-        status: 'candidate',
-        sources: [{ session_id: 's2', seq: 2, kind: 'assistant_msg' }],
-        actor: 'llm',
-      },
-      now + 110
-    );
-
-    const dupMem = upsertCandidate(
-      db,
-      {
-        type: 'semantic',
-        content: '网关监听在 8080 端口，支持 HTTP/2 协议',
-        scope: 'workspace',
-        workspaceId: ws,
-        source_kind: 'llm_extract',
-        origin_kinds: ['user'],
-        confidence: 0.8,
-        status: 'candidate',
-        sources: [{ session_id: 's2', seq: 3, kind: 'user_msg' }],
-        actor: 'llm',
-      },
-      now + 120
-    );
-
-    const curateFetch: any = async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                discard_ids: [(invalidCand as any).id],
-                updates: [
-                  {
-                    target_id: newId,
-                    absorb_ids: [(dupMem as any).id],
-                    type: 'semantic',
-                    text: '项目网关默认监听端口为 8080，并启用 HTTP/2 协议支持。',
-                    slot_key: 'project.gateway.port',
-                    confidence: 0.95,
-                  },
-                ],
-                reason: 'Discarded transient log and merged HTTP/2 gateway detail',
-              }),
-            },
-          },
-        ],
-        usage: { prompt_tokens: 120, completion_tokens: 80 },
-      }),
-    });
-
-    const curateRes = await curateMemoriesWithLLM(db, mockCfg, {
-      workspaceId: ws,
-      fetchFn: curateFetch,
-      now: now + 200,
-    });
-    expect(curateRes.ok).toBe(true);
-    expect(curateRes.deterministicPruned).toBe(1);
-    expect(curateRes.llmDiscarded).toBe(1);
-    expect(curateRes.llmUpdated).toBe(1);
-
-    expect(get(db, (transientNoise as any).id)?.status).toBe('rejected');
-    expect(get(db, (invalidCand as any).id)?.status).toBe('rejected');
-    expect(get(db, (dupMem as any).id)?.status).toBe('superseded');
-    expect(get(db, newId)?.content).toBe('项目网关默认监听端口为 8080，并启用 HTTP/2 协议支持。');
+      expect(get(db, userProtectedId)?.status).toBe('active');
+      expect(get(db, (transientNoise as any).id)?.status).toBe('rejected');
+      expect(get(db, (invalidCand as any).id)?.status).toBe('rejected');
+      expect(get(db, (dupMem as any).id)?.status).toBe('superseded');
+      expect(get(db, candTargetId)?.content).toBe('服务缓存默认 TTL 为 600 秒，并启用本地二级缓存策略。');
+    } finally {
+      db.close();
+    }
   });
 });

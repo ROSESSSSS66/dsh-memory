@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import type { MemoryRecord, QueryPlan } from '../../src/types.js';
-import { fuseCandidates, DEFAULT_STRATEGY } from '../../src/retrieval/fuse.js';
+import {
+  fuseCandidates,
+  DEFAULT_STRATEGY,
+  computeActRBaseActivation,
+} from '../../src/retrieval/fuse.js';
 import { buildQueryPlan } from '../../src/retrieval/query.js';
 
 function createMockMemory(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
@@ -464,6 +468,189 @@ describe('Fusion and Scoring (fuse.ts)', () => {
       expect(convRes.convergentSeeds).toBe(2);
       expect(convRes.fusedRrf).toBeGreaterThan(singRes.fusedRrf);
       expect(convRes.score).toBeGreaterThan(singRes.score);
+    });
+
+    it('uses rebalanced DEFAULT_STRATEGY weights & rrfK=25 while defending against NaN/Infinity/non-positive rrfK', () => {
+      expect(DEFAULT_STRATEGY.rrfK).toBe(25);
+      expect(DEFAULT_STRATEGY.scoreWeights.relevance).toBe(0.5);
+      expect(DEFAULT_STRATEGY.scoreWeights.importance).toBe(0.05);
+
+      const badMem = createMockMemory({
+        id: 'm_nan_0000000001',
+        content: 'PostgreSQL 连接超时配置',
+        confidence: Number.NaN,
+        utility: Number.POSITIVE_INFINITY,
+        importance: Number.NaN,
+      });
+
+      const plan: QueryPlan = {
+        text: 'PostgreSQL 连接超时',
+        tokens: ['postgresql', '连接', '超时'],
+        contentTokens: ['postgresql', '连接', '超时'],
+        entities: ['postgresql'],
+        contextEntities: [],
+        intents: { temporal: false, causal: false, procedural: false, preference: false },
+        temporalBrowse: false,
+        preferenceBrowse: false,
+        now: fixedNow,
+      };
+
+      const badStrategy = {
+        ...DEFAULT_STRATEGY,
+        rrfK: -10,
+      };
+
+      const scored = fuseCandidates(
+        plan,
+        {
+          lexical: [{ id: badMem.id, channel: 'lexical', rank: 1 }],
+          entity: [],
+          typed: [],
+          temporal: [],
+          preference: [],
+          vector: [],
+        },
+        new Map([[badMem.id, badMem]]),
+        new Map(),
+        new Set(),
+        badStrategy,
+        undefined,
+        fixedNow
+      );
+
+      expect(scored).toHaveLength(1);
+      expect(Number.isFinite(scored[0].score)).toBe(true);
+      expect(Number.isFinite(scored[0].rawScore!)).toBe(true);
+      expect(scored[0].score).toBeGreaterThan(0);
+      expect(scored[0].docTokens).toBeInstanceOf(Set);
+    });
+
+    it('sorts by unclamped rawScore and applies deterministic tie-breakers', () => {
+      const memA = createMockMemory({
+        id: 'm_tie_b000000002',
+        content: 'PostgreSQL 连接超时配置',
+        confidence: 1.0,
+        utility: 1.0,
+        importance: 10,
+        updated_at: fixedNow,
+        last_used_at: fixedNow,
+      });
+      const memB = createMockMemory({
+        id: 'm_tie_a000000001',
+        content: 'PostgreSQL 连接超时配置',
+        confidence: 1.0,
+        utility: 1.0,
+        importance: 10,
+        updated_at: fixedNow,
+        last_used_at: fixedNow,
+      });
+
+      const plan: QueryPlan = {
+        text: 'PostgreSQL 连接超时',
+        tokens: ['postgresql', '连接', '超时'],
+        contentTokens: ['postgresql', '连接', '超时'],
+        entities: ['postgresql'],
+        contextEntities: [],
+        intents: { temporal: false, causal: false, procedural: false, preference: false },
+        temporalBrowse: false,
+        preferenceBrowse: false,
+        now: fixedNow,
+      };
+
+      const scored = fuseCandidates(
+        plan,
+        {
+          lexical: [
+            { id: memA.id, channel: 'lexical', rank: 1 },
+            { id: memB.id, channel: 'lexical', rank: 1 },
+          ],
+          entity: [],
+          typed: [],
+          temporal: [],
+          preference: [],
+          vector: [],
+        },
+        new Map([
+          [memA.id, memA],
+          [memB.id, memB],
+        ]),
+        new Map(),
+        new Set(),
+        DEFAULT_STRATEGY,
+        undefined,
+        fixedNow
+      );
+
+      // Identical rawScore, relevance, fusedRrf, updated_at -> deterministic id ascending tie-breaker
+      expect(scored.map((s) => s.memory.id)).toEqual([memB.id, memA.id]);
+    });
+
+    it('computeActRBaseActivation does not reward purely failed injections', () => {
+      const baseline = computeActRBaseActivation(30, 30, 0, 0, 1.0, 0);
+      const allFailed = computeActRBaseActivation(30, 30, 10, 0, 1.0, 10);
+      const successful = computeActRBaseActivation(30, 30, 10, 8, 1.0, 0);
+      expect(allFailed).toBeCloseTo(baseline, 5);
+      expect(successful).toBeGreaterThan(allFailed + 0.15);
+    });
+
+    it('allows strong multi-seed convergent & seedRank>4 graph neighbors without direct lexical overlap with capped relevance', () => {
+      const seed1 = createMockMemory({ id: 'm_g_seed1_000001', content: '网关鉴权中间件采用 RS256 验签' });
+      const seed2 = createMockMemory({ id: 'm_g_seed2_000002', content: '网关鉴权公钥存放在 KMS 中' });
+      // No lexical overlap with query ("网关鉴权 RS256"), linked via 2 seeds + seedRank > 4
+      const bridgeMem = createMockMemory({
+        id: 'm_g_bridge_00003',
+        content: '轮换密钥对时务必保留 15 分钟宽限期防止 401',
+        summary: '密钥轮换宽限期',
+      });
+
+      const plan: QueryPlan = {
+        text: '网关鉴权 RS256',
+        tokens: ['网关', '关鉴', '鉴权', 'rs256'],
+        contentTokens: ['网关', '关鉴', '鉴权', 'rs256'],
+        entities: [],
+        contextEntities: [],
+        intents: { temporal: false, causal: false, procedural: false, preference: false },
+        temporalBrowse: false,
+        preferenceBrowse: false,
+        now: fixedNow,
+      };
+
+      const scored = fuseCandidates(
+        plan,
+        {
+          lexical: [
+            { id: seed1.id, channel: 'lexical', rank: 1 },
+            { id: seed2.id, channel: 'lexical', rank: 2 },
+          ],
+          entity: [],
+          typed: [],
+          temporal: [],
+          preference: [],
+          vector: [],
+        },
+        new Map([
+          [seed1.id, seed1],
+          [seed2.id, seed2],
+          [bridgeMem.id, bridgeMem],
+        ]),
+        new Map(),
+        new Set(),
+        DEFAULT_STRATEGY,
+        undefined,
+        fixedNow,
+        [
+          { neighborId: bridgeMem.id, seedId: seed1.id, rel: 'related', seedRank: 5, hop: 1, activationWeight: 0.9 },
+          { neighborId: bridgeMem.id, seedId: seed2.id, rel: 'related', seedRank: 6, hop: 1, activationWeight: 0.9 },
+        ]
+      );
+
+      const bridgeScored = scored.find((s) => s.memory.id === bridgeMem.id);
+      expect(bridgeScored).toBeDefined();
+      expect(bridgeScored!.graphExpanded).toBe(true);
+      expect(bridgeScored!.convergentSeeds).toBe(2);
+      expect(bridgeScored!.relevance).toBeLessThanOrEqual(0.55);
+      // Direct seed still ranks strictly higher than graph-only bridge
+      expect(scored[0].memory.id).toBe(seed1.id);
     });
   });
 });

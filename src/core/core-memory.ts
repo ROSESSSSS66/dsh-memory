@@ -1,14 +1,23 @@
-import type { Db, MemoryRecord, CoreMemoryBlock, CoreMemoryEntry, Scope, MemoryType } from '../types.js';
+import type {
+  Db,
+  CoreMemoryBlock,
+  CoreMemoryEntry,
+  Scope,
+  MemoryType,
+} from '../types.js';
 import { workspaceId as resolveWorkspaceId, scopeFilterSQL } from './scope.js';
-import { upsertCandidate, editContent, pin } from './writer.js';
+import { upsertCandidate, editContent, truncateCodePoints } from './writer.js';
 import { redactSecrets } from './privacy.js';
 
 export const DEFAULT_CORE_BLOCKS: CoreMemoryBlock[] = ['human', 'persona', 'project'];
 
-interface CoreMemoryWriteOptions {
+const CORE_BLOCK_NAME_REGEX = /^[a-z][a-z0-9_-]{0,31}$/;
+
+export interface CoreMemoryWriteOptions {
   workspaceId?: string;
   sessionId?: string;
   actor?: string;
+  now?: number;
 }
 
 interface CoreMemoryWriteResult {
@@ -16,8 +25,20 @@ interface CoreMemoryWriteResult {
   action: 'created' | 'updated' | 'proposed' | 'unchanged';
 }
 
+function normalizeBlockName(block: string): string {
+  return (typeof block === 'string' ? block : '').toLowerCase().trim();
+}
+
+function assertValidCoreBlock(block: string): string {
+  const normBlock = normalizeBlockName(block);
+  if (!CORE_BLOCK_NAME_REGEX.test(normBlock)) {
+    throw new Error('invalid_core_block');
+  }
+  return normBlock;
+}
+
 function resolveBlockScopeAndType(block: string): { scope: Scope; type: MemoryType } {
-  const b = block.toLowerCase().trim();
+  const b = normalizeBlockName(block);
   if (b === 'human') {
     return { scope: 'user', type: 'preference' };
   }
@@ -35,13 +56,21 @@ export function getCoreMemory(
   block: CoreMemoryBlock,
   scopeCtx?: { workspaceId?: string }
 ): CoreMemoryEntry | null {
-  const normBlock = block.toLowerCase().trim();
+  const normBlock = normalizeBlockName(block);
+  if (!CORE_BLOCK_NAME_REGEX.test(normBlock)) return null;
+
   const slotKey = `core:${normBlock}`;
   const { scope } = resolveBlockScopeAndType(normBlock);
-  const wsId = scope === 'workspace' ? resolveWorkspaceId(scopeCtx?.workspaceId || process.cwd()) : null;
+  const wsId =
+    scope === 'workspace' ? resolveWorkspaceId(scopeCtx?.workspaceId || process.cwd()) : null;
 
-  const row = db.get<MemoryRecord>(
-    `SELECT * FROM memories
+  const row = db.get<{
+    id: string;
+    content: string;
+    updated_at: number;
+    version: number;
+  }>(
+    `SELECT id, content, updated_at, version FROM memories
      WHERE slot_key = ?
        AND scope = ?
        AND COALESCE(workspace_id, '') = ?
@@ -63,7 +92,7 @@ export function getCoreMemory(
 }
 
 /**
- * 获取所有活跃的 Core Memory 块
+ * 获取所有活跃的 Core Memory 块（按块名去重，优先选用各块的规范 scope）
  */
 export function getAllCoreMemories(
   db: Db,
@@ -72,25 +101,47 @@ export function getAllCoreMemories(
   const wsId = resolveWorkspaceId(scopeCtx?.workspaceId || process.cwd());
   const scopeFilter = scopeFilterSQL({ workspaceId: wsId });
 
-  const rows = db.all<MemoryRecord>(
-    `SELECT * FROM memories
-     WHERE slot_key LIKE 'core:%'
+  const rows = db.all<{
+    id: string;
+    slot_key: string;
+    scope: Scope;
+    content: string;
+    updated_at: number;
+    version: number;
+  }>(
+    `SELECT id, slot_key, scope, content, updated_at, version FROM memories
+     WHERE slot_key >= 'core:' AND slot_key < 'core;'
        AND ${scopeFilter.sql}
        AND status IN ('active', 'frozen')
-     ORDER BY slot_key ASC`,
+     ORDER BY slot_key ASC, version DESC, updated_at DESC`,
     scopeFilter.params
   );
 
-  return rows.map((r) => {
-    const block = (r.slot_key || '').replace(/^core:/, '');
-    return {
-      block,
-      content: r.content,
-      updated_at: r.updated_at,
-      version: r.version,
-      id: r.id,
-    };
-  });
+  const byBlock = new Map<string, { entry: CoreMemoryEntry; isCanonical: boolean }>();
+
+  for (const r of rows) {
+    const block = (r.slot_key || '').slice(5);
+    if (!block) continue;
+
+    const canonicalScope = resolveBlockScopeAndType(block).scope;
+    const isCanonical = r.scope === canonicalScope;
+    const prev = byBlock.get(block);
+
+    if (!prev || (isCanonical && !prev.isCanonical)) {
+      byBlock.set(block, {
+        isCanonical,
+        entry: {
+          block,
+          content: r.content,
+          updated_at: r.updated_at,
+          version: r.version,
+          id: r.id,
+        },
+      });
+    }
+  }
+
+  return Array.from(byBlock.values()).map((v) => v.entry);
 }
 
 /**
@@ -103,18 +154,25 @@ export function setCoreMemory(
   options?: CoreMemoryWriteOptions
 ): CoreMemoryWriteResult {
   return db.transaction(() => {
-    const normBlock = block.toLowerCase().trim();
-    const cleanContent = redactSecrets(content.trim()).text;
-    if (!cleanContent) {
+    const normBlock = assertValidCoreBlock(block);
+    const trimmed = (typeof content === 'string' ? content : '').trim();
+    if (!trimmed) {
       throw new Error(`Core memory block '${normBlock}' content cannot be empty.`);
     }
 
+    const priv = redactSecrets(trimmed);
+    if (priv.hasSensitive) {
+      throw new Error('sensitive_content_detected');
+    }
+    const cleanContent = trimmed;
+
     const { scope, type } = resolveBlockScopeAndType(normBlock);
-    const wsId = scope === 'workspace' ? resolveWorkspaceId(options?.workspaceId || process.cwd()) : undefined;
+    const wsId =
+      scope === 'workspace' ? resolveWorkspaceId(options?.workspaceId || process.cwd()) : undefined;
     const slotKey = `core:${normBlock}`;
     const actor = options?.actor ?? 'user';
     const trusted = actor === 'user' || actor === 'system';
-    const now = Date.now();
+    const now = typeof options?.now === 'number' && Number.isFinite(options.now) ? options.now : Date.now();
 
     const existing = getCoreMemory(db, normBlock, { workspaceId: wsId });
     if (existing && !trusted && existing.content === cleanContent) {
@@ -133,7 +191,10 @@ export function setCoreMemory(
         throw new Error(`Failed to update core memory '${normBlock}'`);
       }
       // 确保 pinned=1 与 importance=10
-      db.run(`UPDATE memories SET pinned = 1, importance = 10, confidence = 1.0, utility = 1.0 WHERE id = ?`, [existing.id]);
+      db.run(
+        `UPDATE memories SET pinned = 1, importance = 10, confidence = 1.0, utility = 1.0 WHERE id = ?`,
+        [existing.id]
+      );
       return { id: existing.id, action: 'updated' };
     }
 
@@ -151,12 +212,14 @@ export function setCoreMemory(
         confidence: trusted ? 1.0 : 0.5,
         importance: 10,
         origin_kinds: [trusted ? actor : 'assistant'],
-        sources: [{
-          session_id: options?.sessionId || 'core_memory',
-          seq: 0,
-          kind: trusted ? 'manual' : 'assistant',
-          excerpt: cleanContent.slice(0, 100),
-        }],
+        sources: [
+          {
+            session_id: options?.sessionId || 'core_memory',
+            seq: 0,
+            kind: trusted ? 'manual' : 'assistant',
+            excerpt: truncateCodePoints(cleanContent, 100),
+          },
+        ],
         actor: trusted ? actor : 'llm',
         status: trusted ? 'active' : 'candidate',
       },
@@ -166,13 +229,17 @@ export function setCoreMemory(
     if ('id' in upsertRes) {
       // Candidates only enter the stable layer after explicit approval.
       if (trusted) {
-        pin(db, upsertRes.id, actor, now);
-        db.run(`UPDATE memories SET importance = 10, confidence = 1.0, utility = 1.0 WHERE id = ?`, [upsertRes.id]);
+        db.run(
+          `UPDATE memories SET pinned = 1, importance = 10, confidence = 1.0, utility = 1.0 WHERE id = ?`,
+          [upsertRes.id]
+        );
       }
       return { id: upsertRes.id, action: trusted ? 'created' : 'proposed' };
     }
 
-    throw new Error(`Failed to initialize core memory '${normBlock}': ${JSON.stringify(upsertRes)}`);
+    throw new Error(
+      `Failed to initialize core memory '${normBlock}': ${JSON.stringify(upsertRes)}`
+    );
   });
 }
 
@@ -186,11 +253,17 @@ export function appendCoreMemory(
   options?: CoreMemoryWriteOptions
 ): CoreMemoryWriteResult & { newContent: string } {
   return db.transaction(() => {
-    const normBlock = block.toLowerCase().trim();
-    const addition = redactSecrets(textToAppend.trim()).text;
-    if (!addition) {
+    const normBlock = assertValidCoreBlock(block);
+    const trimmed = (typeof textToAppend === 'string' ? textToAppend : '').trim();
+    if (!trimmed) {
       throw new Error('Cannot append empty text to core memory block.');
     }
+
+    const priv = redactSecrets(trimmed);
+    if (priv.hasSensitive) {
+      throw new Error('sensitive_content_detected');
+    }
+    const addition = trimmed;
 
     const existing = getCoreMemory(db, normBlock, options);
     if (!existing) {

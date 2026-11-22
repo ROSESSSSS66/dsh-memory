@@ -4,10 +4,12 @@ import type { MemoryRef } from '../types.js';
 
 export const MEMORY_VISIBILITY_KEY = 'dsh-memory.visibility';
 
-export const MemoryRefsSchema = z.array(z.object({
+export const MemoryRefItemSchema = z.object({
   id: z.string().regex(/^m_[a-z0-9_]{16,32}$/i),
   contentRev: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-})).min(1);
+});
+
+export const MemoryRefsSchema = z.array(MemoryRefItemSchema).min(1);
 
 const StateSchema = z.object({
   visibleInjections: z.array(z.object({
@@ -19,6 +21,10 @@ const StateSchema = z.object({
 });
 
 export type MemoryVisibilityState = z.infer<typeof StateSchema>;
+
+const derivedRefsCache = new WeakMap<object, Set<string>>();
+const validatedStateRefsCache = new WeakMap<object, Set<string> | null>();
+const WARN_THROTTLE_MS = 60_000;
 
 export function emptyMemoryVisibility(): MemoryVisibilityState {
   return { visibleInjections: [], invalidReferenceEvents: 0 };
@@ -45,11 +51,27 @@ export function foldMemoryVisibility(state: MemoryVisibilityState, event: any): 
   let invalidReferenceEvents = state.invalidReferenceEvents;
   const isDshMemory = source?.kind === 'dsh-memory' || (source?.kind === 'plugin' && source?.plugin === 'dsh-memory');
   if (event.type === 'user/message' && isDshMemory) {
-    const refs = MemoryRefsSchema.safeParse(source.memoryRefs);
-    if (!refs.success || typeof event.data.id !== 'string' || !event.data.id) {
+    const rawRefs = source?.memoryRefs;
+    if (typeof event.data?.id !== 'string' || !event.data.id || !Array.isArray(rawRefs) || rawRefs.length === 0) {
       invalidReferenceEvents++;
-    } else if (!visible.some(entry => entry.seq === event.seq)) {
-      visible = [...visible, { messageId: event.data.id, seq: event.seq, refs: refs.data }];
+    } else {
+      // 逐条校验 memoryRefs：单条坏引用仅累加计数，保留同批次其余合法引用
+      const validRefs: MemoryRef[] = [];
+      let invalidCount = 0;
+      for (const rawItem of rawRefs) {
+        const parsedItem = MemoryRefItemSchema.safeParse(rawItem);
+        if (parsedItem.success) {
+          validRefs.push(parsedItem.data);
+        } else {
+          invalidCount++;
+        }
+      }
+      if (invalidCount > 0) {
+        invalidReferenceEvents += invalidCount;
+      }
+      if (validRefs.length > 0 && !visible.some(entry => entry.seq === event.seq)) {
+        visible = [...visible, { messageId: event.data.id, seq: event.seq, refs: validRefs }];
+      }
     }
   }
   if (visible === state.visibleInjections && invalidReferenceEvents === state.invalidReferenceEvents) return state;
@@ -57,7 +79,20 @@ export function foldMemoryVisibility(state: MemoryVisibilityState, event: any): 
 }
 
 export function visibleMemoryRefs(state: MemoryVisibilityState): Set<string> {
-  return new Set(state.visibleInjections.flatMap(entry => entry.refs.map(ref => `${ref.id}@${ref.contentRev}`)));
+  if (state && typeof state === 'object') {
+    const cached = derivedRefsCache.get(state);
+    if (cached) return cached;
+  }
+  const refs = new Set<string>();
+  for (const entry of state.visibleInjections) {
+    for (const ref of entry.refs) {
+      refs.add(`${ref.id}@${ref.contentRev}`);
+    }
+  }
+  if (state && typeof state === 'object') {
+    derivedRefsCache.set(state, refs);
+  }
+  return refs;
 }
 
 export const memoryVisibilityProjection = {
@@ -75,22 +110,47 @@ export interface MemoryVisibilityReader {
   dispose(): void;
 }
 
-/** Support both the stateOf API and the earlier snapshot API. */
+/** Support both the stateOf API and the earlier snapshot API with O(1) WeakMap caching. */
 export async function registerMemoryVisibility(ctx: any): Promise<MemoryVisibilityReader> {
   const unavailable: MemoryVisibilityReader = { getVisibleRefs: () => null, dispose: () => {} };
-  if (!ctx.sessionProjections?.register) return unavailable;
+  if (!ctx?.sessionProjections?.register) return unavailable;
   try {
     const registration = await ctx.sessionProjections.register(memoryVisibilityProjection);
+    let lastWarnAt = 0;
     return {
       getVisibleRefs(session) {
         if (!session) return null;
-        const state = typeof registration?.stateOf === 'function'
-          ? registration.stateOf(session)
-          : typeof ctx.sessionProjections.stateOf === 'function'
-            ? ctx.sessionProjections.stateOf(session, MEMORY_VISIBILITY_KEY)
-            : ctx.sessionProjections.snapshot(session)?.values?.[MEMORY_VISIBILITY_KEY];
-        const parsed = StateSchema.safeParse(state);
-        return parsed.success ? visibleMemoryRefs(parsed.data) : null;
+        try {
+          let state: unknown;
+          if (typeof registration?.stateOf === 'function') {
+            state = registration.stateOf(session);
+          } else if (typeof ctx.sessionProjections?.stateOf === 'function') {
+            state = ctx.sessionProjections.stateOf(session, MEMORY_VISIBILITY_KEY);
+          } else if (typeof ctx.sessionProjections?.snapshot === 'function') {
+            state = ctx.sessionProjections.snapshot(session)?.values?.[MEMORY_VISIBILITY_KEY];
+          } else {
+            return null;
+          }
+
+          if (!state || typeof state !== 'object') return null;
+          const cached = validatedStateRefsCache.get(state);
+          if (cached !== undefined) return cached;
+
+          const parsed = StateSchema.safeParse(state);
+          const result = parsed.success ? visibleMemoryRefs(parsed.data) : null;
+          validatedStateRefsCache.set(state, result);
+          return result;
+        } catch (err: any) {
+          const now = Date.now();
+          if (now - lastWarnAt >= WARN_THROTTLE_MS) {
+            lastWarnAt = now;
+            console.warn(
+              '[dsh-memory] Failed to read memory visibility projection:',
+              err?.message || err
+            );
+          }
+          return null;
+        }
       },
       dispose() {
         if (typeof registration === 'function') registration();

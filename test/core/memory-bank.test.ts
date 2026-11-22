@@ -141,4 +141,61 @@ describe('Cline/Roo-Code Memory Bank (markdown.ts)', () => {
     const saved = db.all("SELECT * FROM memories WHERE content LIKE '%React 19%'");
     expect(saved).toHaveLength(1);
   });
+
+  it('preserves ### subheadings and --- horizontal rules inside body across export/import round-trip and handles CRLF', () => {
+    const complexBody = [
+      '架构分层说明：',
+      '',
+      '### 接入层',
+      '使用反向代理统一鉴权。',
+      '',
+      '---',
+      '',
+      '### 存储层',
+      '使用 SQLite WAL 持久化。',
+    ].join('\n');
+
+    upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: complexBody,
+        summary: '多层架构规范',
+        slot_key: 'arch.layers',
+        scope: 'workspace',
+        workspaceId: ws1,
+        source_kind: 'user',
+        confidence: 0.95,
+        importance: 9,
+        status: 'active',
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 1, kind: 'user' }],
+        actor: 'user',
+      },
+      now
+    );
+
+    exportMemoryBank(db, tempDir, { workspaceId: ws1 });
+    const exportedPath = path.join(tempDir, 'systemPatterns.md');
+    const exportedText = fs.readFileSync(exportedPath, 'utf8');
+    expect(exportedText).toContain('<!-- dsh-memory:entry -->');
+
+    // Convert to CRLF to test Windows line ending normalization
+    fs.writeFileSync(exportedPath, exportedText.replace(/\n/g, '\r\n'), 'utf8');
+
+    const destDb = openDb(':memory:');
+    try {
+      const imp = importMemoryBank(destDb, tempDir, { workspaceId: ws1, trusted: true });
+      expect(imp.imported).toBe(1);
+      const rows = destDb.all<{ content: string; slot_key: string }>(
+        `SELECT content, slot_key FROM memories WHERE slot_key = 'arch.layers'`
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].content).toContain('### 接入层');
+      expect(rows[0].content).toContain('---');
+      expect(rows[0].content).toContain('### 存储层');
+    } finally {
+      destDb.close();
+    }
+  });
 });

@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { openDb } from '../src/core/db.js';
 import type { Db, MemoryRecord } from '../src/types.js';
-import { DEFAULTS } from '../src/config.js';
+import { DEFAULTS, type PluginConfig } from '../src/config.js';
 import { workspaceId } from '../src/core/scope.js';
 import { upsertCandidate, approveCandidate } from '../src/core/writer.js';
 import { buildQueryPlan } from '../src/retrieval/query.js';
@@ -16,6 +16,7 @@ import { handlePreStep } from '../src/dsh/pre-step.js';
 import { PromptSectionManager } from '../src/dsh/prompt-section.js';
 import { generateDataset } from '../src/eval/gen-dataset.js';
 import { runEvalSuite } from '../src/eval/runner.js';
+import { distillSession, findEligibleDistillSession } from '../src/evolution/extractor.js';
 import {
   backupDatabase,
   exportDatabaseFile,
@@ -36,6 +37,7 @@ describe('§8.4 MVP 完整验收清单与回归门禁验证', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     try {
       db.close();
     } catch {}
@@ -286,6 +288,7 @@ describe('§8.4 MVP 完整验收清单与回归门禁验证', () => {
   });
 
   it('MVP-5: 在线回调绝对不调用 LLM/embedding (后台禁用时跑 20 turn，HTTP 和 ledger 增量严格为 0)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const promptSections = new PromptSectionManager(db);
     const agentCtx = {
       id: 'agent_test_online',
@@ -317,6 +320,9 @@ describe('§8.4 MVP 完整验收清单与回归门禁验证', () => {
 
       await handlePreStep(payload, next, { db, promptSections });
     }
+
+    // 校验在线回调期间绝对未触发任何 HTTP/fetch 请求
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     // 校验离线 LLM 账本调用记录增量严格为 0
     const ledgerRows = db.all('SELECT * FROM llm_ledger');
@@ -391,55 +397,148 @@ describe('§8.4 MVP 完整验收清单与回归门禁验证', () => {
     }
   });
 
-  it('MVP-8: M4 回归门禁验证 (120 条用例，MVP 各大门槛 100% 达标)', () => {
+  it('MVP-8: M4 回归门禁验证 (Eval v2 152 条用例跨 7 套件，MVP 与排序质量门槛 100% 达标)', () => {
     const dataset = generateDataset(42);
-    expect(dataset.length).toBe(120);
+    expect(dataset.length).toBe(152);
+    expect(new Set(dataset.map((c) => c.id)).size).toBe(152);
+    expect(new Set(dataset.map((c) => c.suite)).size).toBe(7);
 
     const report = runEvalSuite(dataset, DEFAULT_STRATEGY, DEFAULTS);
 
     expect(report.overall.recallAtInject).toBeGreaterThanOrEqual(0.7);
+    expect(report.overall.mrr).toBeGreaterThanOrEqual(0.9);
+    expect(report.overall.precisionAtInject).toBeGreaterThanOrEqual(0.9);
     expect(report.overall.excludeViolations).toBe(0);
     expect(report.overall.emptyPrecision).toBeGreaterThanOrEqual(0.8);
-    expect(report.overall.criticalPassed).toBe(20);
-    expect(report.overall.criticalTotal).toBe(20);
+    expect(report.overall.criticalTotal).toBeGreaterThanOrEqual(20);
+    expect(report.overall.criticalPassed).toBe(report.overall.criticalTotal);
     expect(report.overall.avgInjectTokens).toBeLessThanOrEqual(1600);
     expect(report.overall.maxBudgetTokens).toBeLessThanOrEqual(3200);
     expect(report.overall.p95LatencyMs).toBeLessThanOrEqual(50);
   });
 
-  it('MVP-9: Compaction 与 Memory 不重复消费同一段历史 (watermark 机制有效)', () => {
-    // 写入两批事件
+  it('MVP-9: Compaction 与 Memory 不重复消费同一段历史 (distillSession 端到端推进 watermark、账本与候选)', async () => {
+    const distillCfg: PluginConfig = {
+      ...DEFAULTS,
+      distillMinEvents: 2,
+      privacy: {
+        offlineConsent: true,
+        allowedOfflineEndpoints: ['https://api.deepseek.com'],
+      },
+      offlineLLM: {
+        useDshLlm: false,
+        baseURL: 'https://api.deepseek.com/v1',
+        model: 'deepseek-chat',
+        apiKeyEnv: '',
+      },
+    };
+
+    // 写入第一批未处理事件 (seq 1..2)
     db.run(
-      `INSERT INTO raw_events (session_id, workspace_id, seq, type, time, role, origin_kind, text, processed)
-       VALUES ('s_wm', ?, 1, 'user/message', 1000, 'user', 'user', '第一轮用户输入', 0),
-              ('s_wm', ?, 2, 'assistant/message', 2000, 'assistant', 'assistant', '第一轮助手输出', 0)`,
-      [ws, ws]
+      `INSERT INTO raw_events (session_id, workspace_id, seq, type, time, turn, role, origin_kind, text, processed)
+       VALUES ('s_wm', ?, 1, 'user/message', ?, 1, 'user', 'user', '生产部署集群统一采用 Kubernetes 1.31 与 Cilium CNI。', 0),
+              ('s_wm', ?, 2, 'assistant/message', ?, 1, 'assistant', 'assistant', '已记录 Kubernetes 1.31 与 Cilium CNI 部署架构。', 0)`,
+      [ws, fixedNow - 2000, ws, fixedNow - 1000]
     );
 
-    // 模拟抽取器推进 watermark
-    db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('watermark_s_wm', '2')");
-    db.run("UPDATE raw_events SET processed = 1 WHERE session_id = 's_wm' AND seq <= 2");
+    const capturedPrompts: string[] = [];
+    let callIndex = 0;
+    const mockFetch: typeof fetch = async (_input, init) => {
+      callIndex++;
+      const parsedBody = init?.body ? JSON.parse(String(init.body)) : {};
+      const userMsg = String(parsedBody?.messages?.[1]?.content || '');
+      capturedPrompts.push(userMsg);
 
-    // 写入后续新事件
+      const content =
+        callIndex === 1
+          ? JSON.stringify({
+              items: [
+                {
+                  type: 'semantic',
+                  text: '生产部署集群统一采用 Kubernetes 1.31 与 Cilium CNI。',
+                  slot_key: 'infra.k8s.cluster',
+                  confidence: 0.92,
+                  scope: 'workspace',
+                  evidence: [{ seq: 1, quote: 'Kubernetes 1.31 与 Cilium CNI' }],
+                },
+              ],
+            })
+          : JSON.stringify({ items: [] });
+
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content } }],
+          usage: { prompt_tokens: 120, completion_tokens: 45 },
+        }),
+        { status: 200 }
+      );
+    };
+
+    // 1. 端到端执行第一批 distillSession：验证候选生成、processed=2、watermark 与账本结算
+    const res1 = await distillSession(db, distillCfg, {
+      sessionId: 's_wm',
+      fetchFn: mockFetch,
+    });
+    expect(res1.success).toBe(true);
+    expect(res1.consumedCount).toBe(2);
+    expect(res1.itemsCreated).toBe(1);
+    expect(res1.candidateIds).toHaveLength(1);
+
+    const createdCand = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [
+      res1.candidateIds![0],
+    ]);
+    expect(createdCand).toBeDefined();
+    expect(createdCand?.status).toBe('candidate');
+    expect(createdCand?.content).toContain('Kubernetes 1.31');
+
+    const batch1States = db.all<{ seq: number; processed: number }>(
+      "SELECT seq, processed FROM raw_events WHERE session_id = 's_wm' ORDER BY seq ASC"
+    );
+    expect(batch1States).toEqual([
+      { seq: 1, processed: 2 },
+      { seq: 2, processed: 2 },
+    ]);
+
+    const wmRow1 = db.get<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'distill:s_wm'"
+    );
+    expect(wmRow1).toBeDefined();
+    expect(JSON.parse(wmRow1!.value).lastSeq).toBe(2);
+
+    const usage1 = getLedgerUsage(db);
+    expect(usage1.callsCount).toBe(1);
+    expect(usage1.tokensConsumed).toBe(165);
+
+    // 2. 写入后续新事件 seq=3，验证增量消费严格从 seq > watermark 开始且绝不重发 seq 1..2
     db.run(
-      `INSERT INTO raw_events (session_id, workspace_id, seq, type, time, role, origin_kind, text, processed)
-       VALUES ('s_wm', ?, 3, 'user/message', 3000, 'user', 'user', '第二轮用户新输入', 0)`,
-      [ws]
+      `INSERT INTO raw_events (session_id, workspace_id, seq, type, time, turn, role, origin_kind, text, processed)
+       VALUES ('s_wm', ?, 3, 'user/message', ?, 2, 'user', 'user', '第二轮仅讨论临时日志排查，不涉及历史架构。', 0)`,
+      [ws, fixedNow]
     );
 
-    const watermark = parseInt(
-      db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'watermark_s_wm'")?.value || '0',
-      10
-    );
-    expect(watermark).toBe(2);
+    const eligible = findEligibleDistillSession(db, distillCfg, true, 's_wm');
+    expect(eligible).not.toBeNull();
+    expect(eligible?.minSeq).toBe(3);
+    expect(eligible?.count).toBe(1);
 
-    // 下一批待处理事件严格从 seq > watermark 开始，不重复消费历史
-    const pendingEvents = db.all(
-      "SELECT * FROM raw_events WHERE session_id = 's_wm' AND seq > ? AND processed = 0",
-      [watermark]
+    const res2 = await distillSession(db, distillCfg, {
+      sessionId: 's_wm',
+      fetchFn: mockFetch,
+    });
+    expect(res2.success).toBe(true);
+    expect(res2.consumedCount).toBe(1);
+    expect(capturedPrompts).toHaveLength(2);
+    expect(capturedPrompts[1]).toContain('range: seq 3..3');
+    const transcriptPart = capturedPrompts[1].split('=== TRANSCRIPT ===')[1] || '';
+    expect(transcriptPart).toContain('临时日志排查');
+    expect(transcriptPart).not.toContain('Kubernetes 1.31 与 Cilium CNI');
+    expect(transcriptPart).not.toContain('已记录');
+
+    const wmRow2 = db.get<{ value: string }>(
+      "SELECT value FROM meta WHERE key = 'distill:s_wm'"
     );
-    expect(pendingEvents.length).toBe(1);
-    expect((pendingEvents[0] as any).seq).toBe(3);
+    expect(JSON.parse(wmRow2!.value).lastSeq).toBe(3);
+    expect(getLedgerUsage(db).callsCount).toBe(2);
   });
 
   it('MVP-10: 支持备份、导出与恢复 (§10 协议全流程通过)', () => {

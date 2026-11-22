@@ -1,3 +1,9 @@
+> **[Archived Historical Baseline Document]**
+> `APPENDIX-A-dsh-api.md` is preserved in `docs/archive/` as a historical engineering baseline record from earlier development milestones.
+> For current architecture, configuration, tooling, and verification gates, refer to [README.md](../../README.md) and [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
+---
+
 # 附录 A · DSH API 速查（实测版）
 
 > 核实时间：2026-10-03（并于 2026-11-19 针对 `dsh-desktop-next@2.0.24-next` / `@deepseek-ai/dsh@0.2.2-rc.5` / `@deepseek-ai/cordis@4.1.0` 完成二次核实与适配）。核实方式：直接读取本机 DSH Desktop 安装目录下各 `@deepseek-ai/*` 包的 `package.json`、`src/*.ts`、`README.zh.md` 与编译后的 `lib/*.js`。
@@ -25,10 +31,10 @@
 2. **提示词组装时序（`dsh-agent-loop/src/agent.ts`）**：`ReactLoopAgent.preStep()` 先调用 `systemPrompt.assemble()`（触发 `system-prompt/assemble` 瀑布，section 形状为 `{ name, text, interpolate }`），随后才执行 `agent/pre-step`。因此稳定层记忆必须在启动扫描已有 agent、`agent/created` 与 `system-prompt/assemble` 阶段同步就绪。
 3. **可选服务延迟注入（Cordis `4.1.0`）**：`commands` 与 `webServer` 在 headless / CLI / ACP 表面可能未挂载，不得列入插件顶层必填 `inject`（改用按需 `ctx.inject(['commands'], ...)` / `ctx.inject(['webServer'], ...)`）。
 4. **桌面端自定义协议与连接鉴权（`dsh-desktop-next` & `dsh-client-connection`）**：Electron 渲染层使用 `dsh-app://app` 原语并通过 `forwardWebRequest` 转发；Web 端点需放行 `dsh-app://` 与同源受控 Host，并优先配合 `ctx.connection?.requestRejection(req)` 与 `peer` 校验。
-| DSH 主目录 | `C:\Users\Windows11\.dsh\` |
-| 会话日志根 | `C:\Users\Windows11\.dsh\sessions\` |
-| 其他存储 | `C:\Users\Windows11\.dsh\storages\`（现有 `session_projcache/`、`workspace.json`） |
-| Profile 目录 | `C:\Users\Windows11\.dsh\profiles\desktop\` |
+| DSH 主目录 | `<USER_HOME>\.dsh\` |
+| 会话日志根 | `<USER_HOME>\.dsh\sessions\` |
+| 其他存储 | `<USER_HOME>\.dsh\storages\`（现有 `session_projcache/`、`workspace.json`） |
+| Profile 目录 | `<USER_HOME>\.dsh\profiles\desktop\` |
 
 **重要：** 所有会话事件里用的时间戳是**毫秒整数**（例：`1790851937149`）。
 
@@ -315,7 +321,7 @@ ctx.on('session/event', (session, event) => { ... })
 
 ## A.3 真实会话日志里的事件类型（✅ 实测统计）
 
-对 `--C-Users-Windows11-Desktop-fwq--/session-908430d3.../session.v4.jsonl.zstd`（1.85 MB，一个 3 轮 85 步的会话）逐事件统计：
+对 `--<USER_HOME>-Desktop-fwq--/session-908430d3.../session.v4.jsonl.zstd`（1.85 MB，一个 3 轮 85 步的会话）逐事件统计：
 
 | 数量 | 事件类型 |
 |---|---|
@@ -408,7 +414,7 @@ ctx.on('session/event', (session, event) => { ... })
 4. **同一条用户输入会出现两次**：一次在 `agent/inbox/spliced` 里，一次在 `user/message` 里。**只处理 `user/message`，忽略 `agent/inbox/spliced`**，否则会重复入账。
 5. **`session-log-deepseek/delivery-accepted` 占了 86 条（约 15%）**，是投递确认事件，与我们无关，**在映射阶段直接跳过**。
 6. `workspace/changes` 只带 `{turn}`，不含变更内容。
-7. **`session` 行是文件 header，不是事件**（没有 `seq`），但它有 `cwd` —— **回填时 workspace_id 直接取它，不要去解析目录名的 Unicode 转义**（方案 §7 M2-T4 的疑虑到此解决：header 里的 `cwd` 是 `"C:\\Users\\Windows11\\Desktop\\fwq"` 这种干净路径）。
+7. **`session` 行是文件 header，不是事件**（没有 `seq`），但它有 `cwd` —— **回填时 workspace_id 直接取它，不要去解析目录名的 Unicode 转义**（方案 §7 M2-T4 的疑虑到此解决：header 里的 `cwd` 是 `"<USER_HOME>\\Desktop\\fwq"` 这种干净路径）。
 
 ---
 
@@ -417,7 +423,7 @@ ctx.on('session/event', (session, event) => { ... })
 ### 磁盘布局
 
 ```text
-C:\Users\Windows11\.dsh\sessions\
+<USER_HOME>\.dsh\sessions\
   --<归一化后的 cwd>--\                    # 可读的项目目录；没有 cwd 时是 _no-cwd/
     session-<uuid>\
       session.v4.jsonl.zstd                # 当前格式（默认 zstd）
@@ -426,10 +432,10 @@ C:\Users\Windows11\.dsh\sessions\
 目录名的转义规则：非 ASCII 和特殊字符变成 `~` 加该字符的 **UTF-16 码点的十六进制大写**。实测真实目录名：
 
 ```text
---C-Users-Windows11-Desktop-fwq--
---C-Users-Windows11-Desktop-~4E2D~8F6C~7AD9~4F59~989D~63D2~4EF6--   （中转站余额插件）
---C-Users-Windows11-Desktop-~5C0F~8BF4--                             （小说）
---C-Users-Windows11-Desktop-~5F02~4E16~754C~7684~4F11~95F2~751F~6D3B-- （异世界的休闲生活）
+--<USER_HOME>-Desktop-fwq--
+--<USER_HOME>-Desktop-~4E2D~8F6C~7AD9~4F59~989D~63D2~4EF6--   （中转站余额插件）
+--<USER_HOME>-Desktop-~5C0F~8BF4--                             （小说）
+--<USER_HOME>-Desktop-~5F02~4E16~754C~7684~4F11~95F2~751F~6D3B-- （异世界的休闲生活）
 ```
 
 **结论：目录名可以反解，但没必要**——每个文件的 header 行里有权威的 `cwd` 字段。**回填时用 header 的 `cwd` 算 `workspace_id`。**
@@ -438,7 +444,7 @@ C:\Users\Windows11\.dsh\sessions\
 
 ```json
 {"type":"session","version":4,"id":"session-908430d3-c2ab-4b7d-b28f-3c4d8e50592c",
- "createdAt":1790851937149,"cwd":"C:\\Users\\Windows11\\Desktop\\fwq",
+ "createdAt":1790851937149,"cwd":"<USER_HOME>\\Desktop\\fwq",
  "isSeeded":false,"delegationDepth":0,"agentPreset":"standard"}
 ```
 
@@ -480,7 +486,7 @@ DSH 的实现原文：后端**自己拥有一套"拼接帧容器"**，以便"在
 
 ### 其他格式事实（✅）
 
-- 会话日志根目录由 `@deepseek-ai/dsh-session-persistence-jsonl` 的 `root` 配置项指定且**必填**（无默认值）。本机是 `C:\Users\Windows11\.dsh\sessions`。
+- 会话日志根目录由 `@deepseek-ai/dsh-session-persistence-jsonl` 的 `root` 配置项指定且**必填**（无默认值）。本机是 `<USER_HOME>\.dsh\sessions`。
 - **DSH 提供"列出所有已存会话"的能力**（`dsh-session-persistence-jsonl/lib/index.js:2564` 附近有 `List every stored session visible to this process`）。**如果它暴露成插件可用的服务方法，回填器应该用它而不是自己遍历目录。** ⚠️ 需实测。
 - 历史格式（v0、v1）用 packed Assistant delta 行；当前格式每行一个事件，并在 header 里存 `isSeeded`。**回填器只支持 v4**；遇到 `version != 4` 的文件跳过并在 `NOTES.md` 里记一行。
 
@@ -606,7 +612,7 @@ function createUserMessage(input) { return createMessage({ ...input, role: 'user
 `~/.dsh/profiles/desktop/` 下**有 `package.json` 但 `node_modules/` 是空的**，且有 `pnpm-workspace.yaml` / `pnpm-lock.yaml`。所以 profile 是一个 pnpm 工作区。
    - `cordis.patch.yml` 里用的是 `name:` 加**裸包名**（例：`dsh-plugin-desktop`、`@deepseek-ai/dsh-client-ui-settings-general`），说明解析走 profile 的依赖。
    - ⚠️ **未证实**：能否用 `file:` 或绝对路径直接挂一个本地插件目录。**两条路都试一遍**：
-     - **路线 1（推荐先试）：** 把插件目录加进 `~/.dsh/profiles/desktop/package.json` 的 dependencies（`"dsh-memory": "file:C:/Users/Windows11/Desktop/test/dsh-memory"`），然后在 profile 目录跑包管理器安装。
+     - **路线 1（推荐先试）：** 把插件目录加进 `~/.dsh/profiles/desktop/package.json` 的 dependencies（`"dsh-memory": "file:<USER_HOME>/Desktop/test/dsh-memory"`），然后在 profile 目录跑包管理器安装。
      - **路线 2：** 直接在 `cordis.patch.yml` 的 `insert` 列表里用绝对路径当 `name`。
    - **注意：`~/.dsh/profiles/desktop/cordis.patch.yml` 里含有用户的模型 provider 配置（含 API 端点）。修改前必须备份，只允许在文件末尾追加，不允许动已有任何一行。**
 

@@ -1,10 +1,26 @@
-import type { Db, QueryPlan, MemoryRecord, StrategyConfig } from '../types.js';
+import {
+  hydrateMemoryRow,
+  type Db,
+  type QueryPlan,
+  type MemoryRecord,
+  type MemoryRow,
+  type StrategyConfig,
+} from '../types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
-import { runAllChannels, expandGraphNeighbors } from './channels.js';
+import { scopeFilterSQL } from '../core/scope.js';
+import {
+  isRemoteEmbeddingEnabled,
+  embedQueryWithFallback,
+  type EmbedQueryOptions,
+} from '../core/embedding-client.js';
+import {
+  runAllChannels,
+  expandGraphNeighbors,
+  buildVectorQueryText,
+} from './channels.js';
 import { fuseCandidates, DEFAULT_STRATEGY } from './fuse.js';
-import { govern, type SelectedItem } from './governor.js';
-import { render } from './render.js';
-import { getActiveStrategy } from '../evolution/strategy.js';
+import { governWithResult, type SelectedItem } from './governor.js';
+import { getActiveStrategy, validateAndClampStrategy } from '../evolution/strategy.js';
 
 export interface RecallContext {
   workspaceId: string;
@@ -16,7 +32,10 @@ export interface RecallContext {
   now?: number;
   cfg?: PluginConfig;
   onlineBudgetMs?: number;
+  queryVec?: Float32Array;
 }
+
+export type RecallOptions = RecallContext;
 
 export interface RecallResult {
   items: SelectedItem[];
@@ -28,7 +47,24 @@ export interface RecallResult {
 }
 
 /**
- * 检索协调主入口 (§5.4 - §5.7)
+ * 只读安全获取当前生效策略：当只读库尚未写入 strategies 表时优雅回退内存默认策略
+ */
+function resolveActiveStrategy(
+  db: Db,
+  cfg: PluginConfig
+): { version: number; config: StrategyConfig } {
+  try {
+    return getActiveStrategy(db, cfg);
+  } catch {
+    return {
+      version: 1,
+      config: validateAndClampStrategy(DEFAULT_STRATEGY, cfg),
+    };
+  }
+}
+
+/**
+ * 检索协调主入口 (§5.4 - §5.7) — 纯同步零网络调用，直接利用本地全量向量矩阵与 FTS5
  */
 export function recall(
   db: Db,
@@ -40,7 +76,7 @@ export function recall(
   const now = ctx.now ?? Date.now();
   const activeStrat = ctx.strategy
     ? { version: ctx.strategyVersion ?? 1, config: ctx.strategy }
-    : getActiveStrategy(db, cfg);
+    : resolveActiveStrategy(db, cfg);
   const strategy = activeStrat.config;
   const strategyVersion = ctx.strategyVersion ?? activeStrat.version;
   const onlineBudget = ctx.onlineBudgetMs ?? cfg.onlineBudgetMs;
@@ -52,8 +88,9 @@ export function recall(
     plan,
     {
       workspaceId: ctx.workspaceId,
-      sessionId: ctx.sessionId || '',
+      sessionId: ctx.sessionId,
       cfg,
+      precomputedQueryVec: ctx.queryVec,
     },
     {
       onlineBudgetMs: onlineBudget,
@@ -84,18 +121,27 @@ export function recall(
     };
   }
 
-  // 2.5 GraphRAG 一跳拓扑关联候选发现 (沿着 related / derived_from 关系扩展)
-  const topSeedIds = [
-    ...channelResults.lexical.slice(0, 4).map((c) => c.id),
-    ...channelResults.entity.slice(0, 4).map((c) => c.id),
-    ...channelResults.vector.slice(0, 3).map((c) => c.id),
-  ];
+  // 2.5 GraphRAG 拓扑关联候选发现：轮询交错合并 lexical / entity / vector 高排种子，防止单一通道饿死其余通道
+  const topSeedIds: string[] = [];
+  const seenSeeds = new Set<string>();
+  const pushSeed = (id?: string) => {
+    if (id && !seenSeeds.has(id) && topSeedIds.length < 8) {
+      seenSeeds.add(id);
+      topSeedIds.push(id);
+    }
+  };
+  for (let i = 0; i < 4 && topSeedIds.length < 8; i++) {
+    pushSeed(channelResults.lexical[i]?.id);
+    pushSeed(channelResults.entity[i]?.id);
+    pushSeed(channelResults.vector[i]?.id);
+  }
+
   const associativeNeighbors =
     Date.now() - t0 <= onlineBudget
       ? expandGraphNeighbors(
           db,
           topSeedIds,
-          { workspaceId: ctx.workspaceId, sessionId: ctx.sessionId || '', cfg },
+          { workspaceId: ctx.workspaceId, sessionId: ctx.sessionId, cfg },
           12
         )
       : [];
@@ -103,17 +149,18 @@ export function recall(
     allIds.add(edge.neighborId);
   }
 
-  // 3. 批量从数据库加载记忆实体与矛盾关系
+  // 3. 批量从数据库加载记忆（通过 hydrateMemoryRow 正确反序列化 origin_kinds）、实体与作用域隔离矛盾关系
   const idList = Array.from(allIds);
   const placeholders = idList.map(() => '?').join(', ');
 
-  const memRows = db.all<MemoryRecord>(
+  const memRows = db.all<MemoryRow>(
     `SELECT * FROM memories WHERE id IN (${placeholders})`,
     idList
   );
   const memoriesMap = new Map<string, MemoryRecord>();
-  for (const m of memRows) {
-    memoriesMap.set(m.id, m);
+  for (const rawRow of memRows) {
+    const hydrated = hydrateMemoryRow(rawRow);
+    memoriesMap.set(hydrated.id, hydrated);
   }
 
   const entRows = db.all<{ memory_id: string; entity: string }>(
@@ -130,29 +177,35 @@ export function recall(
     s.add(row.entity.toLowerCase().trim());
   }
 
-  // 查询是否有处于 active 状态的矛盾项 (利用 memory_relations 联合主键与 memories(id) 快速索引查找)
+  // 作用域隔离矛盾关系探测：UNION 分别命中 ix_rel_type 与 ix_rel_type_to，并通过 scopeFilterSQL 阻断跨工作区/跨会话矛盾泄漏
+  const targetScope = scopeFilterSQL(
+    { workspaceId: ctx.workspaceId, sessionId: ctx.sessionId },
+    'target'
+  );
   const relRows = db.all<{ cand_id: string }>(
-    `SELECT r.from_id as cand_id
+    `SELECT r.from_id AS cand_id
      FROM memory_relations r
      JOIN memories target ON target.id = r.to_id
      WHERE r.rel = 'contradicts'
-       AND target.status IN ('active', 'frozen')
        AND r.from_id IN (${placeholders})
+       AND target.status IN ('active', 'frozen')
+       AND (${targetScope.sql})
      UNION
-     SELECT r.to_id as cand_id
+     SELECT r.to_id AS cand_id
      FROM memory_relations r
      JOIN memories target ON target.id = r.from_id
      WHERE r.rel = 'contradicts'
+       AND r.to_id IN (${placeholders})
        AND target.status IN ('active', 'frozen')
-       AND r.to_id IN (${placeholders})`,
-    [...idList, ...idList]
+       AND (${targetScope.sql})`,
+    [...idList, ...targetScope.params, ...idList, ...targetScope.params]
   );
   const contradictionsSet = new Set<string>();
   for (const rel of relRows) {
     contradictionsSet.add(rel.cand_id);
   }
 
-  // 4. 融合与打分 (绝对相关性门槛 -> GraphRAG 一跳协同 -> RRF -> 综合评分 -> 相对排名过滤)
+  // 4. 融合与打分 (绝对相关性门槛 -> GraphRAG 拓扑协同 -> RRF -> 综合评分 -> 相对排名过滤)
   const scored = fuseCandidates(
     plan,
     channelResults,
@@ -184,13 +237,16 @@ export function recall(
     };
   }
 
-  // 5. 预算装箱
-  // ctx.budget 是调用方给出的上限（硬预算扣除稳定层后的余量），不覆盖策略自身的动态预算，
-  // 否则实验室晋升的 dynamicBudgetTokens 在线上永远不生效
-  const budget = cfg.dynamicBudgetTokens === 0 ? 0
-    : Math.min(ctx.budget ?? Infinity, strategy.dynamicBudgetTokens ?? cfg.dynamicBudgetTokens ?? 1600);
+  // 5 & 6. 预算装箱并复用 governor 最终验证阶段产出的渲染块，消除重复 render() 调用
+  const budget =
+    cfg.dynamicBudgetTokens === 0
+      ? 0
+      : Math.min(
+          ctx.budget ?? Infinity,
+          strategy.dynamicBudgetTokens ?? cfg.dynamicBudgetTokens ?? 1600
+        );
   const scopeCtx = { workspaceId: ctx.workspaceId, sessionId: ctx.sessionId };
-  const selected = govern(scored, {
+  const governed = governWithResult(scored, {
     budget,
     maxItems: strategy.maxItems,
     alreadyInjected,
@@ -198,30 +254,39 @@ export function recall(
     layer: 'dynamic',
     db,
     scopeCtx,
+    temporalBrowse: plan.temporalBrowse,
+    contradictionsSet,
+    now,
   });
 
-  // 6. 渲染
-  const block = render(
-    selected.map((s) => ({
-      memory: s.memory,
-      form: s.form,
-      tier: s.tier,
-      overview: s.overview,
-    })),
-    {
-      strategyVersion,
-      layer: 'dynamic',
-      db,
-      scopeCtx,
-    }
-  );
-
   return {
-    items: selected,
-    block,
+    items: governed.items,
+    block: governed.renderedBlock,
     latencyMs: Date.now() - t0,
     strategyVersion,
     candidatesCount: allIds.size,
     matchedChannels,
   };
+}
+
+/**
+ * 异步检索入口：当显式启用并授权远程 OpenAI-compatible Embedding 时，先通过 embedQueryWithFallback
+ * 计算查询向量再注入 recall()；离线/异常/未启用时无缝回退本地 128D 内存向量矩阵。
+ */
+export async function recallAsync(
+  db: Db,
+  plan: QueryPlan,
+  ctx: RecallContext,
+  embedOptions?: EmbedQueryOptions
+): Promise<RecallResult> {
+  const cfg = ctx.cfg || DEFAULTS;
+  let queryVec = ctx.queryVec;
+  if (!queryVec && isRemoteEmbeddingEnabled(cfg)) {
+    const queryText = buildVectorQueryText(plan);
+    if (queryText) {
+      const embedded = await embedQueryWithFallback(queryText, cfg, embedOptions);
+      queryVec = embedded.vec;
+    }
+  }
+  return recall(db, plan, { ...ctx, queryVec });
 }

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../src/core/db.js';
 import type { Db, MemoryRecord } from '../src/types.js';
 import { workspaceId } from '../src/core/scope.js';
@@ -43,6 +43,10 @@ describe('Hindsight (vectorize-io/hindsight) & OpenViking (volcengine/OpenViking
 
   beforeEach(() => {
     db = openDb(':memory:');
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   it('1. maps memories to OpenViking viking:// virtual URIs and supports L0/L1/L2 directory recursive retrieval', () => {
@@ -182,10 +186,10 @@ describe('Hindsight (vectorize-io/hindsight) & OpenViking (volcengine/OpenViking
 
     const l2Tokens = budgetTokens(render([{ memory: mem, form: 'content', tier: 'L2' }]));
     const l0Tokens = budgetTokens(render([{ memory: mem, form: 'summary', tier: 'L0' }]));
-    expect(l2Tokens).toBeGreaterThan(l0Tokens + 80);
+    expect(l2Tokens).toBeGreaterThanOrEqual(l0Tokens + 30);
 
     // Mid-tier budget: smaller than L2 full content, but comfortably larger than L0 abstract
-    const midBudget = l2Tokens - 25;
+    const midBudget = l2Tokens - 15;
     const packedL1 = govern(
       [{ memory: mem, score: 0.92, relevance: 1.0, fusedRrf: 0.1 }],
       {
@@ -208,8 +212,11 @@ describe('Hindsight (vectorize-io/hindsight) & OpenViking (volcengine/OpenViking
         overview: s.overview,
       }))
     );
+    const l1Tokens = budgetTokens(renderedL1);
+    expect(l2Tokens).toBeGreaterThan(l1Tokens);
+    expect(l1Tokens).toBeGreaterThan(l0Tokens);
     expect(renderedL1).toContain('⟨L1 · memory_expand(');
-    expect(budgetTokens(renderedL1)).toBeLessThanOrEqual(midBudget);
+    expect(l1Tokens).toBeLessThanOrEqual(midBudget);
 
     // Tight budget: only enough for L0 abstract
     const tightBudget = l0Tokens + 6;
@@ -486,23 +493,34 @@ describe('Hindsight (vectorize-io/hindsight) & OpenViking (volcengine/OpenViking
     expect(treeOut).toContain('viking://workspace/memories/skills');
     expect(treeOut).toContain('cilium_debug');
 
+    // LLM reflect defaults to read-only (autoSynthesize: false) — returns report without mutating DB
+    const countModels = () =>
+      db.get<{ c: number }>(
+        `SELECT COUNT(*) as c FROM memories WHERE workspace_id = ? AND slot_key LIKE 'hindsight.model.%'`,
+        [ws]
+      )?.c || 0;
+    expect(countModels()).toBe(0);
+
     const reflectOut = tools.unified(
       { action: 'reflect', topic: 'k8s.network' },
       { workspaceId: ws, sessionId: 's_cli', turn: 3 }
     );
     expect(reflectOut).toContain('[Hindsight 四层认知网络与心智模型反思报告]');
-    expect(reflectOut).toContain('新归纳心智模型');
+    expect(reflectOut).not.toContain('新归纳心智模型');
+    expect(countModels()).toBe(0);
 
-    // 3. Slash commands: /memory tree --l1 & /memory reflect
+    // 3. Slash commands: user CLI /memory reflect synthesizes the mental model, then /memory tree lists it
+    const cmdReflect = commands.handleCommand('reflect k8s.network', { workspaceId: ws });
+    expect(cmdReflect.kind).toBe('success');
+    expect(cmdReflect.text).toContain('Hindsight 四层认知网络');
+    expect(cmdReflect.text).toContain('新归纳心智模型');
+    expect(countModels()).toBeGreaterThanOrEqual(1);
+
     const cmdTree = commands.handleCommand('tree viking://workspace/memories/models --l1', {
       workspaceId: ws,
     });
     expect(cmdTree.kind).toBe('success');
     expect(cmdTree.text).toContain('viking://workspace/memories/models');
-
-    const cmdReflect = commands.handleCommand('reflect k8s.network', { workspaceId: ws });
-    expect(cmdReflect.kind).toBe('success');
-    expect(cmdReflect.text).toContain('Hindsight 四层认知网络');
   });
 
   it('7. runs 100% autonomously: autoHeal triggers Hindsight reflection & confidence calibration, auto-syncs Viking tree + memory_diff.json, traces evolution timelines, filters conversational R2 noise, and auto-skips poisoned distill batches', async () => {

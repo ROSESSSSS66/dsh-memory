@@ -1,9 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import type { MemoryRecord } from '../../src/types.js';
 import type { ScoredCandidate } from '../../src/retrieval/fuse.js';
-import { govern, computeMmrMarginalScore } from '../../src/retrieval/governor.js';
+import {
+  govern,
+  governWithResult,
+  computeMmrMarginalScore,
+} from '../../src/retrieval/governor.js';
 import { render } from '../../src/retrieval/render.js';
 import { budgetTokens } from '../../src/core/tokens.js';
+import { openDb } from '../../src/core/db.js';
+import { workspaceId } from '../../src/core/scope.js';
 
 function createScored(mem: Partial<MemoryRecord>, score = 0.8): ScoredCandidate {
   const fullMem: MemoryRecord = {
@@ -268,5 +274,117 @@ describe('Token Governor (governor.ts)', () => {
     });
 
     expect(res.map((r) => r.memory.id)).toEqual(['m_mmr_anchor_001', 'm_mmr_ortho_0003']);
+  });
+
+  it('governWithResult returns renderedBlock, totalTokens, droppedReasons and bypasses slot collapse in temporalBrowse', () => {
+    const oldSlot = createScored(
+      {
+        id: 'm_tb_old_0000001',
+        status: 'superseded',
+        slot_key: 'project.database',
+        content: '旧版数据库使用 MySQL 8',
+        summary: '旧版 MySQL 8',
+        valid_from: 1000,
+        updated_at: 1000,
+      },
+      0.85
+    );
+    const newSlot = createScored(
+      {
+        id: 'm_tb_new_0000002',
+        status: 'active',
+        slot_key: 'project.database',
+        content: '新版数据库迁移至 PostgreSQL 16',
+        summary: '新版 PostgreSQL 16',
+        valid_from: 2000,
+        updated_at: 2000,
+      },
+      0.92
+    );
+
+    // Normal mode collapses slot -> drops oldSlot
+    const normalRes = governWithResult([oldSlot, newSlot], {
+      budget: 1000,
+      maxItems: 6,
+      alreadyInjected: new Set(),
+      temporalBrowse: false,
+    });
+    expect(normalRes.items).toHaveLength(1);
+    expect(normalRes.droppedReasons[oldSlot.memory.id]).toBe('slot_superseded');
+    expect(normalRes.renderedBlock).toContain('PostgreSQL 16');
+    expect(normalRes.totalTokens).toBe(budgetTokens(normalRes.renderedBlock));
+
+    // temporalBrowse mode preserves BOTH historical superseded and active records!
+    const browseRes = governWithResult([oldSlot, newSlot], {
+      budget: 1000,
+      maxItems: 6,
+      alreadyInjected: new Set(),
+      temporalBrowse: true,
+    });
+    expect(browseRes.items).toHaveLength(2);
+    expect(browseRes.renderedBlock).toContain('(history)');
+    expect(browseRes.renderedBlock).toContain('MySQL 8');
+    expect(browseRes.renderedBlock).toContain('PostgreSQL 16');
+  });
+
+  it('Step 6 downgrades L2 -> L1 -> L0 before popping when DB short-code expansion pushes block over budget', () => {
+    const db = openDb(':memory:');
+    const ws = workspaceId('ws-gov-step6');
+    // Insert colliding IDs sharing the first 12 chars so DB disambiguation expands m_coll -> m_coll11111111a
+    const idTarget = 'm_coll11111111aa';
+    const idOther = 'm_coll11111111bb';
+    const longContent =
+      '生产集群灰度发布操作规程：第一步核验 Prometheus 告警零触发与错误率低于 0.1%；第二步将 Canary 流量切换至 10% 并持续监控 P99 延迟十五分钟；第三步执行全链路自动化冒烟回归验证核心支付接口；第四步逐步放通全量流量并清理历史镜像。';
+    const shortSummary = '生产灰度发布四步规程';
+
+    db.run(
+      `INSERT INTO memories (
+        id, type, status, content, summary, slot_key, scope, workspace_id, origin_kinds, source_kind,
+        confidence, utility, use_count, success_count, fail_count, token_cost,
+        summary_cost, hash, version, content_rev, pinned, created_at, updated_at
+      ) VALUES
+        (?, 'procedural', 'active', ?, ?, 'ops.canary', 'workspace', ?, '["user"]', 'user', 0.95, 0.9, 1, 0, 0, 120, 20, 'h_t', 1, 1, 0, 1000, 1000),
+        (?, 'semantic', 'active', '干扰碰撞记录', '碰撞', NULL, 'workspace', ?, '["user"]', 'user', 0.5, 0.5, 1, 0, 0, 10, 10, 'h_o', 1, 1, 0, 1000, 1000)`,
+      [idTarget, longContent, shortSummary, ws, idOther, ws]
+    );
+
+    const cand = createScored(
+      {
+        id: idTarget,
+        type: 'procedural',
+        content: longContent,
+        summary: shortSummary,
+        slot_key: 'ops.canary',
+        workspace_id: ws,
+        token_cost: budgetTokens(longContent),
+        summary_cost: budgetTokens(shortSummary),
+      },
+      0.95
+    );
+
+    // Pick a budget that fits L2 with short 4-char code (m_coll) but overflows once DB expands to m_coll11111111a
+    const l2ShortBudget = budgetTokens(render([{ memory: cand.memory, form: 'content', tier: 'L2' }]));
+    const l2LongBudget = budgetTokens(
+      render([{ memory: cand.memory, form: 'content', tier: 'L2' }], {
+        db,
+        scopeCtx: { workspaceId: ws },
+      })
+    );
+    expect(l2LongBudget).toBeGreaterThan(l2ShortBudget);
+
+    const res = governWithResult([cand], {
+      budget: l2ShortBudget,
+      maxItems: 4,
+      alreadyInjected: new Set(),
+      db,
+      scopeCtx: { workspaceId: ws },
+    });
+
+    // Must downgrade to L1 or L0 instead of popping to empty!
+    expect(res.items).toHaveLength(1);
+    expect(res.items[0].form).toBe('summary');
+    expect(['L1', 'L0']).toContain(res.items[0].tier);
+    expect(res.totalTokens).toBeLessThanOrEqual(l2ShortBudget);
+    db.close();
   });
 });

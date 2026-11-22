@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
-import type { Db, StrategyConfig } from '../../src/types.js';
+import type { Db } from '../../src/types.js';
 import { DEFAULTS, type PluginConfig } from '../../src/config.js';
 import { DEFAULT_STRATEGY } from '../../src/retrieval/fuse.js';
 import {
@@ -9,14 +9,15 @@ import {
   listStrategies,
   rollbackStrategy,
   clearStrategyCache,
-  validateAndClampStrategy,
 } from '../../src/evolution/strategy.js';
 import {
   runStrategyEvolution,
   checkSentinelAndRollback,
+  loadLabEvalCases,
   mutateStrategy,
   harvestSample,
 } from '../../src/evolution/lab.js';
+import { generateDataset } from '../../src/eval/gen-dataset.js';
 import type { EvalCase } from '../../src/eval/types.js';
 
 describe('Strategy Evolution & Lab (§5.16, M5)', () => {
@@ -35,7 +36,8 @@ describe('Strategy Evolution & Lab (§5.16, M5)', () => {
   it('M5-T1: should initialize v1 default strategy and enforce config budget clamp', () => {
     const s1 = initDefaultStrategy(db);
     expect(s1.version).toBe(1);
-    expect(s1.config.rrfK).toBe(60);
+    expect(s1.config.rrfK).toBe(DEFAULT_STRATEGY.rrfK);
+    expect(s1.config.scoreWeights.importance).toBeCloseTo(0.05, 3);
 
     const active = getActiveStrategy(db);
     expect(active.version).toBe(1);
@@ -112,54 +114,7 @@ describe('Strategy Evolution & Lab (§5.16, M5)', () => {
   it('M5-T2 验收项 2: critical 用例回归时，即使 recall 总数增加，仍拒绝晋升', () => {
     initDefaultStrategy(db);
 
-    // 构造一个评测集包含 critical 用例
-    const testCases: EvalCase[] = [
-      {
-        id: 'crit-001',
-        suite: 'factual',
-        critical: true,
-        now: '2026-10-01T10:00:00+08:00',
-        workspace: '/ws/lab',
-        setup: [
-          {
-            type: 'semantic',
-            content: '项目主数据库必须是 PostgreSQL 16。',
-            at: '2026-09-01T10:00:00+08:00',
-            source_kind: 'user',
-            status: 'active',
-          },
-        ],
-        query: '项目主数据库是什么？',
-        expect: {
-          include: ['PostgreSQL'],
-          exclude: [],
-        },
-      },
-      {
-        id: 'crit-002',
-        suite: 'factual',
-        critical: true,
-        now: '2026-10-01T10:00:00+08:00',
-        workspace: '/ws/lab',
-        setup: [
-          {
-            type: 'semantic',
-            content: '项目本地监听端口为 8080 端口。',
-            at: '2026-09-01T10:00:00+08:00',
-            source_kind: 'user',
-            status: 'active',
-          },
-        ],
-        query: '本地监听端口是多少？',
-        expect: {
-          include: ['8080'],
-          exclude: [],
-        },
-      },
-    ];
-
-    // 基线通过后，若某个候选导致 critical 用例回归，必须被拦截
-    // 我们手动测试 mutateStrategy 产生候选并验证其参数合法性
+    // 验证 mutateStrategy 产生的候选参数均满足边界约束与权重归一化
     const rand = () => 0.5;
     const base = getActiveStrategy(db).config;
     const mutated = mutateStrategy(base, 0.2, rand, DEFAULTS);
@@ -186,25 +141,25 @@ describe('Strategy Evolution & Lab (§5.16, M5)', () => {
       [JSON.stringify(DEFAULT_STRATEGY), now - 3600000, now - 3600000]
     );
 
-    // 插入晋升前 parent (v1) 的正常表现数据 (纠正率低：2/20 = 10%)
-    for (let i = 0; i < 20; i++) {
+    // 插入晋升前 parent (v1) 的正常表现数据 (纠正率低：3/30 = 10%)
+    for (let i = 0; i < 30; i++) {
       db.run(
         `INSERT INTO turn_metrics (session_id, turn, correction, strategy_v, created_at)
          VALUES (?, ?, ?, 1, ?)`,
-        [`s_old_${i}`, i, i < 2 ? 1 : 0, now - 7200000 + i * 1000]
+        [`s_old_${i}`, i, i < 3 ? 1 : 0, now - 7200000 + i * 1000]
       );
     }
 
-    // 插入晋升后 (v2) 的恶化数据 (纠正率显著上升：8/20 = 40% > 10% + 5%)
-    for (let i = 0; i < 20; i++) {
+    // 插入晋升后 (v2) 的恶化数据 (纠正率显著上升：12/30 = 40% > 10% + 5%)
+    for (let i = 0; i < 30; i++) {
       db.run(
         `INSERT INTO turn_metrics (session_id, turn, correction, strategy_v, created_at)
          VALUES (?, ?, ?, 2, ?)`,
-        [`s_new_${i}`, i, i < 8 ? 1 : 0, now - 1800000 + i * 1000]
+        [`s_new_${i}`, i, i < 12 ? 1 : 0, now - 1800000 + i * 1000]
       );
     }
 
-    // 执行哨兵监控检查
+    // 执行哨兵监控检查（默认要求 cnt >= 30）
     const sentinelResult = checkSentinelAndRollback(db, 50, 0.05);
     expect(sentinelResult.rolledBack).toBe(true);
     expect(sentinelResult.fromVersion).toBe(2);
@@ -214,6 +169,93 @@ describe('Strategy Evolution & Lab (§5.16, M5)', () => {
     const strats = listStrategies(db);
     expect(strats.find((s) => s.version === 2)?.status).toBe('rejected');
     expect(strats.find((s) => s.version === 1)?.status).toBe('active');
+  });
+
+  it('loadLabEvalCases always includes generateDataset() even with >= 60 harvested cases, capped at +50 DB cases', () => {
+    const synthCount = generateDataset().length;
+    for (let i = 0; i < 60; i++) {
+      harvestSample(db, {
+        id: `harv-${String(i).padStart(3, '0')}`,
+        suite: 'harvested',
+        critical: false,
+        now: '2026-10-01T10:00:00+08:00',
+        workspace: '/ws/harvest',
+        setup: [
+          {
+            type: 'semantic',
+            content: `Harvested memory fact number ${i}.`,
+            at: '2026-09-01T10:00:00+08:00',
+            source_kind: 'user',
+            status: 'active',
+          },
+        ],
+        query: `Question about fact ${i}?`,
+        expect: { include: [`fact number ${i}`], exclude: [] },
+      });
+    }
+
+    const loaded = loadLabEvalCases(db, DEFAULTS);
+    expect(loaded.length).toBe(synthCount + 50);
+    // Verify synthetic dataset cases are ALL present
+    const loadedIds = new Set(loaded.map((c) => c.id));
+    for (const sc of generateDataset()) {
+      expect(loadedIds.has(sc.id)).toBe(true);
+    }
+  });
+
+  it('Sentinel requires >= 30 turns by default, honors minTurns override, blocks rollback to rejected, and prevents cascade rollbacks', () => {
+    initDefaultStrategy(db);
+    const now = Date.now();
+    // Promote v1 -> v2 -> v3
+    db.run("UPDATE strategies SET status = 'retired' WHERE version = 1");
+    db.run(
+      `INSERT INTO strategies (version, config, status, parent, eval_report, created_at, promoted_at)
+       VALUES (2, ?, 'retired', 1, '{}', ?, ?)`,
+      [JSON.stringify(DEFAULT_STRATEGY), now - 7200_000, now - 7200_000]
+    );
+    db.run(
+      `INSERT INTO strategies (version, config, status, parent, eval_report, created_at, promoted_at)
+       VALUES (3, ?, 'active', 2, '{}', ?, ?)`,
+      [JSON.stringify(DEFAULT_STRATEGY), now - 3600_000, now - 3600_000]
+    );
+
+    // Insert 12 turns for v1, v2, v3 (v2 worse than v1, v3 worse than v2)
+    for (let i = 0; i < 12; i++) {
+      db.run(`INSERT INTO turn_metrics (session_id, turn, correction, strategy_v, created_at) VALUES (?, ?, ?, 1, ?)`, [
+        `sv1_${i}`,
+        i,
+        0,
+        now - 10_000_000 + i * 1000,
+      ]);
+      db.run(`INSERT INTO turn_metrics (session_id, turn, correction, strategy_v, created_at) VALUES (?, ?, ?, 2, ?)`, [
+        `sv2_${i}`,
+        i,
+        i < 4 ? 1 : 0, // 33%
+        now - 6_000_000 + i * 1000,
+      ]);
+      db.run(`INSERT INTO turn_metrics (session_id, turn, correction, strategy_v, created_at) VALUES (?, ?, ?, 3, ?)`, [
+        `sv3_${i}`,
+        i,
+        i < 10 ? 1 : 0, // 83%
+        now - 1_000_000 + i * 1000,
+      ]);
+    }
+
+    // Default minTurns = 30 -> insufficient turns -> no rollback
+    expect(checkSentinelAndRollback(db, 50, 0.05).rolledBack).toBe(false);
+
+    // Override minTurns = 10 -> rolls back v3 -> v2
+    const rb1 = checkSentinelAndRollback(db, 50, 0.05, { minTurns: 10 });
+    expect(rb1).toMatchObject({ rolledBack: true, fromVersion: 3, toVersion: 2 });
+
+    // Immediate next check on restored v2 MUST NOT cascade-rollback v2 -> v1!
+    const rb2 = checkSentinelAndRollback(db, 50, 0.05, { minTurns: 10 });
+    expect(rb2.rolledBack).toBe(false);
+    expect(rb2.reason).toContain('restored');
+    expect(getActiveStrategy(db).version).toBe(2);
+
+    // Cannot manually rollback to rejected v3
+    expect(rollbackStrategy(db, 3)).toMatchObject({ ok: false });
   });
 
   it('M5-T3: 应该能采集收获用例保存至 eval_cases 表', () => {

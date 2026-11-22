@@ -41,16 +41,22 @@ git checkout -b feat/your-feature-name
 ```
 
 ### 步骤 2：本地开发与质量门禁验证
-在编码过程中或准备提交前，**必须**在本地依次通过三大质量门禁：
+在编码过程中或准备提交前，**必须**在本地依次通过全部质量门禁：
 ```bash
 # 1. 静态类型检查
 npm run typecheck
 
-# 2. 全量单元测试与验收测试
+# 2. 全量单元测试与验收测试（或运行 npm run test:coverage 查看覆盖率）
 npm test
 
 # 3. 完整构建打包验证
 npm run build
+
+# 4. Eval v2 (152 用例) 标准评测基准门禁验证
+npm run eval
+
+# 5. 发布包产物、截图清单与零运行时依赖校验
+npm run pack:check
 ```
 
 ### 步骤 3：提交代码 (Commit Convention)
@@ -77,7 +83,7 @@ git push -u origin feat/your-feature-name
    - 审核注意点
 
 ### 步骤 6：代码审核与 CI 验证 (Review & CI)
-1. **自动化门禁**：GitHub Actions（`CI & Quality Gate`）将自动运行全量 Typecheck、Vitest 验收套件与 Build 构建，确保所有测试全绿通过。
+1. **自动化门禁**：GitHub Actions（`CI & Quality Gate`）将在 `ubuntu-latest` / `windows-latest` / `macos-latest` 三平台自动运行全量 Typecheck、Vitest 测试套件、Build 构建、Eval v2（152 用例）门禁、`pack:check` 产物校验、产物冒烟加载与生产依赖审计，确保全部绿灯通过。
 2. **人工审查**：由团队负责人或 Reviewer 进行代码走查，提出修改意见。若有需修改项，在本地同一分支修改后直接 push，PR 将自动联动更新。
 
 ### 步骤 7：合并入主分支与清理分支
@@ -103,7 +109,7 @@ git push -u origin feat/your-feature-name
      - [x] *Require approvals* (建议设为 1，至少 1 人审核通过才可合入)
      - [x] *Dismiss stale pull request approvals when new commits are pushed* (有新代码推入时自动重置审核)
    - [x] **Require status checks to pass before merging**
-     - 勾选由 CI 工作流提供的状态门禁（如 `Typecheck, Test & Build`）
+     - 勾选由 CI 工作流提供的跨平台状态门禁（`Verify (ubuntu-latest)`、`Verify (windows-latest)`、`Verify (macos-latest)`）
      - [x] *Require branches to be up to date before merging* (合并前分支需与目标分支最新提交对齐)
    - [x] **Do not allow bypassing the above settings** (禁止管理员自身绕过规则，杜绝任何直推)
 5. 点击 **Create** / **Save changes** 保存规则。

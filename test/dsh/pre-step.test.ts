@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import type { Db } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
@@ -20,10 +20,12 @@ describe('Pre-Step Waterfall Injection (pre-step.ts)', () => {
     promptSections = new PromptSectionManager(db);
     visibility = visibilityHarness(db);
   });
-  afterEach(async () => { await visibility.close(); db.close(); });
+  afterEach(async () => {
+    await visibility.close();
+    db.close();
+  });
 
   it('在同一个会话里连续问 5 个与数据库相关的问题 → 同一条记忆只注入一次 (验收项 4)', async () => {
-    // 写入一条数据库记忆
     const insertRes = upsertCandidate(
       db,
       {
@@ -87,21 +89,23 @@ describe('Pre-Step Waterfall Injection (pre-step.ts)', () => {
 
       expect(decision.kind).toBe('enter');
       currentMessages = decision.messages;
-      for (const message of currentMessages.filter(m => m.source?.plugin === 'dsh-memory')) {
+      for (const message of currentMessages.filter((m) => m.source?.plugin === 'dsh-memory')) {
         await visibility.commitEvent(payload.agent.session, {
-          type: 'user/message', seq: turn * 10, data: message, surfaceOp: { op: 'append' },
+          type: 'user/message',
+          seq: turn * 10,
+          data: message,
+          surfaceOp: { op: 'append' },
         });
       }
     }
 
-    // 检查 injections 表：同一条记忆 memId 在该 session 中必须只被注入过 1 次
     const rows = db.all<{ memory_id: string; turn: number }>(
       'SELECT memory_id, turn FROM injections WHERE session_id = ? AND memory_id = ?',
       [sess1, memId]
     );
 
     expect(rows.length).toBe(1);
-    expect(rows[0].turn).toBe(1); // 仅在第 1 轮注入
+    expect(rows[0].turn).toBe(1);
   });
 
   it('实际提交消息 source.memoryRefs 包含完整 id/正文版本 (验收项 6)', async () => {
@@ -142,21 +146,23 @@ describe('Pre-Step Waterfall Injection (pre-step.ts)', () => {
       source: { kind: 'user' },
     };
 
-    const decision = await handlePreStep(payload, async () => ({
-      kind: 'enter',
-      messages: [userMsg],
-    }), {
-      db,
-      promptSections,
-    });
+    const decision = await handlePreStep(
+      payload,
+      async () => ({
+        kind: 'enter',
+        messages: [userMsg],
+      }),
+      {
+        db,
+        promptSections,
+      }
+    );
 
     expect(decision.messages.length).toBe(2);
     const injected = decision.messages[1];
     expect(injected.role).toBe('user');
     expect(injected.source.kind).toBe('dsh-memory');
     expect(injected.source.plugin).toBe('dsh-memory');
-
-    // 检查 memoryRefs 完整性
     expect(Array.isArray(injected.source.memoryRefs)).toBe(true);
     expect(injected.source.memoryRefs.length).toBe(1);
     expect(injected.source.memoryRefs[0]).toEqual({
@@ -165,8 +171,168 @@ describe('Pre-Step Waterfall Injection (pre-step.ts)', () => {
     });
   });
 
+  it('accumulates all real user messages, skips flushIngest/updateSection on tool-only steps, and does not fall back to process.cwd()', async () => {
+    upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: 'RabbitMQ exchange uses topic routing for billing events.',
+        summary: 'RabbitMQ billing routing',
+        scope: 'workspace',
+        workspaceId: ws1,
+        source_kind: 'user',
+        confidence: 0.95,
+        origin_kinds: ['user'],
+        sources: [{ session_id: sess1, seq: 1, kind: 'user' }],
+        actor: 'user',
+      },
+      fixedNow
+    );
+
+    // Seed a memory in process.cwd() to prove pre-step NEVER leaks process.cwd() when cwd is absent
+    upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: 'Host process cwd secret deployment key marker xyz987.',
+        summary: 'Host cwd secret marker xyz987',
+        scope: 'workspace',
+        workspaceId: workspaceId(process.cwd()),
+        source_kind: 'user',
+        confidence: 0.95,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 'other', seq: 1, kind: 'user' }],
+        actor: 'user',
+      },
+      fixedNow
+    );
+
+    // 1. Intermediate tool-only step (no real user message): must NOT call flushIngest or updateSection
+    const flushSpy = vi.fn(async () => 0);
+    const updateSpy = vi.spyOn(promptSections, 'updateSection');
+    const toolOnlyDec = await handlePreStep(
+      {
+        sessionId: sess1,
+        turn: 1,
+        agent: { id: 'a1', cwd: ws1, session: { id: sess1, cwd: ws1 } },
+      },
+      async () => ({
+        kind: 'enter',
+        messages: [{ id: 'tool-1', role: 'tool', toolName: 'read', content: 'ok' }],
+      }),
+      { db, promptSections, flushIngest: flushSpy }
+    );
+    expect(toolOnlyDec.messages).toHaveLength(1);
+    expect(flushSpy).not.toHaveBeenCalled();
+    expect(updateSpy).not.toHaveBeenCalled();
+
+    // 2. Multiple user messages in the same batch: BOTH earlier and later text must be included in query
+    const multiMsgDec = await handlePreStep(
+      {
+        sessionId: sess1,
+        turn: 1,
+        agent: { id: 'a1', cwd: ws1, session: { id: sess1, cwd: ws1 } },
+      },
+      async () => ({
+        kind: 'enter',
+        messages: [
+          {
+            id: 'u1',
+            role: 'user',
+            source: { kind: 'user' },
+            content: [{ type: 'text', text: 'Check RabbitMQ billing exchange routing' }],
+          },
+          {
+            id: 'u2',
+            role: 'user',
+            source: { kind: 'user' },
+            content: [{ type: 'text', text: 'Please summarize briefly' }],
+          },
+        ],
+      }),
+      { db, promptSections }
+    );
+    expect(multiMsgDec.messages).toHaveLength(3);
+    expect(multiMsgDec.messages[2].content[0].text).toContain('RabbitMQ');
+
+    // 3. Absent cwd without session_workspace_owners must NOT leak process.cwd() workspace memories
+    const noCwdDec = await handlePreStep(
+      {
+        sessionId: 'sess_no_cwd',
+        turn: 1,
+        agent: { id: 'a_nocwd', session: { id: 'sess_no_cwd' } },
+      },
+      async () => ({
+        kind: 'enter',
+        messages: [
+          {
+            id: 'u3',
+            role: 'user',
+            source: { kind: 'user' },
+            content: [{ type: 'text', text: 'Host process cwd secret marker xyz987' }],
+          },
+        ],
+      }),
+      { db, promptSections }
+    );
+    expect(noCwdDec.messages).toHaveLength(1);
+  });
+
+  it('defers 1-based prior turn evaluation asynchronously only when turn > 1', async () => {
+    const ins = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: 'Elasticsearch index uses daily rotation.',
+        summary: 'Elasticsearch daily rotation',
+        scope: 'workspace',
+        workspaceId: ws1,
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: sess1, seq: 1, kind: 'user' }],
+        actor: 'user',
+      },
+      fixedNow
+    );
+    const memId = (ins as any).id;
+
+    db.run(
+      `INSERT INTO injections (session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at)
+       VALUES (?, 1, ?, 1, 'dynamic', 1, 20, 'content', 1, ?)`,
+      [sess1, memId, fixedNow]
+    );
+
+    await handlePreStep(
+      {
+        sessionId: sess1,
+        turn: 2,
+        agent: { id: 'a_eval', cwd: ws1, session: { id: sess1, cwd: ws1 } },
+      },
+      async () => ({
+        kind: 'enter',
+        messages: [
+          {
+            id: 'u_turn2',
+            role: 'user',
+            source: { kind: 'user' },
+            content: [{ type: 'text', text: '完美，解决了！' }],
+          },
+        ],
+      }),
+      { db, promptSections }
+    );
+
+    // Flush microtask queue so deferred evaluateTurnOutcome completes
+    await new Promise((r) => setTimeout(r, 10));
+    const inj = db.get<{ outcome: number | null }>(
+      'SELECT outcome FROM injections WHERE session_id = ? AND turn = 1 AND memory_id = ?',
+      [sess1, memId]
+    );
+    expect(inj?.outcome).toBe(1);
+  });
+
   it('临时数据库异常时优雅降级，不阻断对话 (验收项 5)', async () => {
-    // 模拟破坏数据库对象导致查询抛错
     const brokenDb = {
       ...db,
       all: () => {
@@ -192,15 +358,18 @@ describe('Pre-Step Waterfall Injection (pre-step.ts)', () => {
       source: { kind: 'user' },
     };
 
-    const decision = await handlePreStep(payload, async () => ({
-      kind: 'enter',
-      messages: [userMsg],
-    }), {
-      db: brokenDb as any,
-      promptSections,
-    });
+    const decision = await handlePreStep(
+      payload,
+      async () => ({
+        kind: 'enter',
+        messages: [userMsg],
+      }),
+      {
+        db: brokenDb as any,
+        promptSections,
+      }
+    );
 
-    // 下游 decision 仍然顺利放行，未抛出任何阻断异常
     expect(decision.kind).toBe('enter');
     expect(decision.messages).toEqual([userMsg]);
   });

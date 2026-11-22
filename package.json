@@ -1,8 +1,8 @@
 {
   "name": "dsh-memory",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "icon": "assets/icon.svg",
-  "description": "Local-first long-term memory plugin for DeepSeek Desktop (DSH): auto-distills preferences and lessons from sessions, recalls the most relevant in ~1ms, and self-corrects over time.",
+  "description": "Zero-dependency local-first long-term memory plugin for DeepSeek Desktop (DSH): full in-memory vector matrix + SQLite FTS5 hybrid recall (10k p95 < 10ms), Hindsight & OpenViking insights, 4 lean model tools, optional OpenAI-compatible embeddings, and autonomous background self-evolution.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -32,17 +32,20 @@
   "type": "module",
   "engines": {
     "node": ">=24.0.0",
-    "dsh": ">=0.2.0-rc.1 || ^0.2.1-rc.0 || ^0.2.2-rc.0 || ^0.2.3-rc.0 || ^0.2.4-rc.0 || ^0.2.5-rc.0 || >=0.3.0-rc.0"
+    "dsh": ">=0.2.0-rc.1 <1.0.0 || ^0.2.1-rc.0 || ^0.2.2-rc.0 || ^0.2.3-rc.0 || ^0.2.4-rc.0 || ^0.2.5-rc.0 || >=0.3.0-rc.0 <1.0.0"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist",
+    "dist/index.js",
+    "dist/index.d.ts",
+    "dist/client.js",
     "src/core/migrations",
     "scripts/postinstall.mjs",
     "locale",
     "assets/icon.svg",
     "assets/icon.png",
+    "assets/screenshot-*.png",
     "screenshots.json",
     "README.md",
     "cordis.patch.yml",
@@ -77,17 +80,17 @@
     "build:client": "node scripts/build-client.mjs",
     "init": "node scripts/postinstall.mjs --force",
     "typecheck": "tsc --noEmit",
+    "lint": "biome check src scripts",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "check": "npm run typecheck && npm run test",
-    "eval": "node dist/eval-cli.js"
-  },
-  "dependencies": {
-    "fzstd": "^0.1.1",
-    "zod": "^4.6.7"
+    "eval": "node scripts/run-eval.mjs",
+    "pack:check": "node scripts/verify-pack.mjs",
+    "prepublishOnly": "npm run check && npm run build && npm run eval"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1 <5.0.0",
-    "@deepseek-ai/dsh": "^0.1.0-rc.7 || >=0.2.0-rc.1 || ^0.2.1-rc.0 || ^0.2.2-rc.0 || ^0.2.3-rc.0 || ^0.2.4-rc.0 || ^0.2.5-rc.0 || >=0.3.0-rc.0",
+    "@deepseek-ai/dsh": ">=0.2.0-rc.1 <1.0.0 || ^0.2.1-rc.0 || ^0.2.2-rc.0 || ^0.2.3-rc.0 || ^0.2.4-rc.0 || ^0.2.5-rc.0 || >=0.3.0-rc.0 <1.0.0",
     "@deepseek-ai/schemastery": ">=3.18.0 <4.0.0"
   },
   "peerDependenciesMeta": {
@@ -102,12 +105,18 @@
     }
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.6.8",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "esbuild": "^0.27.7",
+    "fzstd": "^0.1.1",
+    "happy-dom": "^21.0.4",
     "react": "^19.3.1",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "zod": "^4.6.7"
   }
 }

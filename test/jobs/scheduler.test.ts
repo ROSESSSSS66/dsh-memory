@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import { DEFAULTS } from '../../src/config.js';
 import {
@@ -7,10 +7,10 @@ import {
   JobScheduler,
 } from '../../src/jobs/scheduler.js';
 import {
+  JobRunner,
   registerJobHandler,
   unregisterJobHandler,
   runNextJob,
-  getNextDayStartMs,
 } from '../../src/jobs/runner.js';
 import { reserve } from '../../src/evolution/ledger.js';
 import type { Db } from '../../src/types.js';
@@ -27,6 +27,7 @@ describe('Job Scheduler & Runner (M3-T2)', () => {
     unregisterJobHandler('test_distill');
     unregisterJobHandler('test_timeout');
     unregisterJobHandler('test_fail');
+    db.close();
   });
 
   it('ensures kind+key is idempotent (kind+key 幂等)', () => {
@@ -110,10 +111,14 @@ describe('Job Scheduler & Runner (M3-T2)', () => {
   });
 
   it('recovers running jobs and unknown ledger consistently on startup (running恢复和unknown账本保守一致)', () => {
-    // 模拟奔溃前 running 的 job
+    // 模拟奔溃前遗留的陈旧 running job (> 5 分钟) 与另一进程正在运行的 fresh running job
     db.run(
       `INSERT INTO jobs (kind, key, status, attempts, created_at, started_at)
        VALUES ('distill', 'crash_job', 'running', 1, 1000, 1050)`
+    );
+    db.run(
+      `INSERT INTO jobs (kind, key, status, attempts, created_at, started_at)
+       VALUES ('distill', 'sibling_live_job', 'running', 1, 395000, 395000)`
     );
 
     // 模拟奔溃前 reserved 的 ledger 记录
@@ -129,14 +134,22 @@ describe('Job Scheduler & Runner (M3-T2)', () => {
     );
     expect(r.reserved).toBe(true);
 
-    // 启动恢复
-    const recovery = recoverJobsOnStartup(db, 2000);
+    // 启动恢复：仅回收超过 300_000ms 陈旧阈值的 running 任务，不误杀兄弟进程正在运行的任务
+    const recovery = recoverJobsOnStartup(db, 400_000);
     expect(recovery.recoveredJobs).toBe(1);
     expect(recovery.recoveredLedger).toBe(1);
 
     const job = db.get<JobRecord>('SELECT * FROM jobs WHERE key = ?', ['crash_job']);
     expect(job?.status).toBe('failed');
     expect(job?.error).toBe('recovered_from_running_on_restart');
+
+    const liveSibling = db.get<JobRecord>('SELECT * FROM jobs WHERE key = ?', ['sibling_live_job']);
+    expect(liveSibling?.status).toBe('running');
+
+    // 显式 recoverAll: true 时才回收全部 running 任务
+    const forced = recoverJobsOnStartup(db, 400_000, { recoverAll: true });
+    expect(forced.recoveredJobs).toBe(1);
+    expect(db.get<JobRecord>('SELECT * FROM jobs WHERE key = ?', ['sibling_live_job'])?.status).toBe('failed');
 
     const ledger = db.get<{ status: string; note: string }>(
       'SELECT status, note FROM llm_ledger WHERE id = ?',
@@ -195,5 +208,79 @@ describe('Job Scheduler & Runner (M3-T2)', () => {
     // 确认不会被重试（status 是 failed，不是 queued）
     const ranAgain = await runNextJob(db, DEFAULTS);
     expect(ranAgain).toBe(false);
+  });
+
+  it('self-heals after schedulePending DB errors with 5s retry and wakes via notifyPending()', async () => {
+    vi.useFakeTimers();
+    try {
+      const runner = new JobRunner();
+      const ranKeys: string[] = [];
+      runner.registerHandler('heal_kind', async (job) => {
+        ranKeys.push(job.key);
+        return { action: 'done' };
+      });
+
+      const originalGet = db.get.bind(db);
+      let failOnce = true;
+      const getSpy = vi.spyOn(db, 'get').mockImplementation((sql, params) => {
+        if (failOnce && sql.includes('MIN(next_eligible_at)')) {
+          failOnce = false;
+          throw new Error('SQLITE_BUSY: simulated transient read error');
+        }
+        return originalGet(sql, params);
+      });
+
+      enqueueJob(db, { kind: 'heal_kind', key: 'k_heal' });
+      const scheduler = new JobScheduler(db, DEFAULTS, { runner, idleMs: 0 });
+      // Initial schedulePending threw -> scheduled 5s self-heal retry
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(ranKeys).toEqual([]);
+
+      // At 5000ms self-heal retry queries DB and schedules immediate busy-floor 1s wakeup
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(ranKeys).toEqual(['k_heal']);
+
+      // External producer inserts directly + calls notifyPending()
+      enqueueJob(db, { kind: 'heal_kind', key: 'k_ext' });
+      scheduler.notifyPending();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(ranKeys).toEqual(['k_heal', 'k_ext']);
+
+      getSpy.mockRestore();
+      await scheduler.stopAndWait();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stopAndWait passes shutdown reason so interrupted jobs revert to queued instead of failed', async () => {
+    const runner = new JobRunner();
+    let startedResolve!: () => void;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+
+    runner.registerHandler('graceful_kind', async (_job, signal) => {
+      startedResolve();
+      return new Promise((resolve) => {
+        signal.addEventListener('abort', () => {
+          resolve({ action: 'failed', error: 'aborted' });
+        });
+      });
+    });
+
+    const scheduler = new JobScheduler(db, DEFAULTS, { runner, idleMs: 0 });
+    scheduler.enqueue('graceful_kind', 'shutdown_requeue');
+    const cyclePromise = scheduler.triggerNow();
+    await started;
+
+    await scheduler.stopAndWait(2_000);
+    await cyclePromise;
+
+    const row = db.get<JobRecord>("SELECT * FROM jobs WHERE key = 'shutdown_requeue'");
+    expect(row?.status).toBe('queued');
+    expect(row?.attempts).toBe(0);
+    expect(row?.started_at).toBeNull();
+    expect(row?.next_eligible_at).toBe(0);
   });
 });

@@ -8,7 +8,8 @@ import { workspaceId } from '../../src/core/scope.js';
 import { upsertCandidate } from '../../src/core/writer.js';
 import { DEFAULTS, type PluginConfig } from '../../src/config.js';
 import { enqueueJob } from '../../src/jobs/scheduler.js';
-import { runNextJob } from '../../src/jobs/runner.js';
+import { JobRunner } from '../../src/jobs/runner.js';
+import { registerPluginJobHandlers } from '../../src/dsh/job-handlers.js';
 import { memoryVisibilityProjection } from '../../src/dsh/memory-visibility.js';
 import type { Db } from '../../src/types.js';
 
@@ -268,13 +269,19 @@ describe('DSH live smoke regressions (strict Cordis inject & real session shape)
       },
     });
     emitSessionEvent({
-      type: 'tool/result',
+      type: 'tool/call',
       seq: 7,
       time: 2006,
+      data: { turn: 2, callId: 'call_read_2', name: 'read', arguments: '{"path":"b.ts"}' },
+    });
+    emitSessionEvent({
+      type: 'tool/result',
+      seq: 8,
+      time: 2007,
       data: {
         turn: 2,
         isError: false,
-        toolCallId: 'call_read_1',
+        toolCallId: 'call_read_2',
         message: { content: [{ type: 'text', text: 'file content ok' }] },
       },
     });
@@ -321,7 +328,7 @@ describe('DSH live smoke regressions (strict Cordis inject & real session shape)
       'SELECT seq, workspace_id, origin_kind, text FROM raw_events WHERE session_id = ? ORDER BY seq ASC',
       [sessId]
     );
-    expect(storedEvents.map(e => e.seq)).toEqual([4, 5, 6, 7]);
+    expect(storedEvents.map(e => e.seq)).toEqual([4, 5, 6, 7, 8]);
     expect(storedEvents.every(e => e.workspace_id === projectWsId)).toBe(true);
     expect(
       db.get<{ workspace_id: string }>(
@@ -340,11 +347,12 @@ describe('DSH live smoke regressions (strict Cordis inject & real session shape)
     expect(r5Job).toBeDefined();
     expect(JSON.parse(r5Job!.payload).workspaceId).toBe(projectWsId);
 
-    // 3. 在严格 Proxy 下运行 fixpair distill / curate / maintain，确认不再抛出 cannot get property "agent" without inject
+    // 3. 在严格 Proxy 下通过实例隔离的 JobRunner + registerPluginJobHandlers 运行 fixpair distill / curate / maintain，确认不再抛出 cannot get property "agent" without inject
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const parsedBody = init?.body ? JSON.parse(String(init.body)) : {};
       const systemText = String(parsedBody?.messages?.[0]?.content || '');
-      const content = systemText.includes('CURATOR') || systemText.includes('审阅')
+      const isCurator = /curator/i.test(systemText) || systemText.includes('审阅');
+      const content = isCurator
         ? JSON.stringify({ discard_ids: [], updates: [] })
         : JSON.stringify({ items: [] });
       return new Response(
@@ -361,29 +369,40 @@ describe('DSH live smoke regressions (strict Cordis inject & real session shape)
       ...cfgOverride,
     } as PluginConfig;
 
-    expect(await runNextJob(db, fullCfg)).toBe(true);
-    const finishedDistill = db.get<{ status: string; error: string | null }>(
-      'SELECT status, error FROM jobs WHERE key = ?',
-      [`fixpair:${sessId}:2`]
-    );
-    expect(finishedDistill).toEqual({ status: 'done', error: null });
+    const localJobRunner = new JobRunner();
+    const unregisterJobHandlers = registerPluginJobHandlers(localJobRunner, {
+      db,
+      ctx: strictCordisCtx,
+      getLiveCfg: () => fullCfg,
+      dbPath,
+    });
+    try {
+      expect(await localJobRunner.runNextJob(db, fullCfg)).toBe(true);
+      const finishedDistill = db.get<{ status: string; error: string | null }>(
+        'SELECT status, error FROM jobs WHERE key = ?',
+        [`fixpair:${sessId}:2`]
+      );
+      expect(finishedDistill).toEqual({ status: 'done', error: null });
 
-    enqueueJob(db, { kind: 'maintain', key: 'smoke-maintain', payload: { auto: true } });
-    expect(await runNextJob(db, fullCfg)).toBe(true);
-    const finishedMaintain = db.get<{ status: string; error: string | null }>(
-      'SELECT status, error FROM jobs WHERE key = ?',
-      ['smoke-maintain']
-    );
-    expect(finishedMaintain).toEqual({ status: 'done', error: null });
+      enqueueJob(db, { kind: 'maintain', key: 'smoke-maintain', payload: { auto: true } });
+      expect(await localJobRunner.runNextJob(db, fullCfg)).toBe(true);
+      const finishedMaintain = db.get<{ status: string; error: string | null }>(
+        'SELECT status, error FROM jobs WHERE key = ?',
+        ['smoke-maintain']
+      );
+      expect(finishedMaintain).toEqual({ status: 'done', error: null });
 
-    enqueueJob(db, { kind: 'curate', key: 'smoke-curate', payload: { sessionId: sessId } });
-    expect(await runNextJob(db, fullCfg)).toBe(true);
-    const finishedCurate = db.get<{ status: string; error: string | null }>(
-      'SELECT status, error FROM jobs WHERE key = ?',
-      ['smoke-curate']
-    );
-    expect(finishedCurate).toEqual({ status: 'done', error: null });
-    expect(fetchSpy).toHaveBeenCalled();
+      enqueueJob(db, { kind: 'curate', key: 'smoke-curate', payload: { sessionId: sessId } });
+      expect(await localJobRunner.runNextJob(db, fullCfg)).toBe(true);
+      const finishedCurate = db.get<{ status: string; error: string | null }>(
+        'SELECT status, error FROM jobs WHERE key = ?',
+        ['smoke-curate']
+      );
+      expect(finishedCurate).toEqual({ status: 'done', error: null });
+      expect(fetchSpy).toHaveBeenCalled();
+    } finally {
+      unregisterJobHandlers();
+    }
 
     // 4. 触发 memory/context-pressure 与 agent/turn-stopping：不能抛 ctx.agent 错
     rawCtx.emit('memory/context-pressure', {
@@ -408,7 +427,19 @@ describe('DSH live smoke regressions (strict Cordis inject & real session shape)
       cwd: projectCwd,
     });
 
-    // 5. 测试全部 8 个已注册工具在无 agent.cwd 及无 exec.agent 下均不访问 ctx.agent 且命中真实 workspace
+    // 5. Option A 精简工具面断言：仅注册 4 个精简 LLM 工具，不暴露高危/聚合遗留工具
+    expect(Array.from(registeredTools.keys()).sort()).toEqual([
+      'memory_expand',
+      'memory_feedback',
+      'memory_note',
+      'memory_search',
+    ]);
+    expect(registeredTools.has('memory_confirm')).toBe(false);
+    expect(registeredTools.has('memory_merge')).toBe(false);
+    expect(registeredTools.has('memory_core')).toBe(false);
+    expect(registeredTools.has('memory')).toBe(false);
+
+    // 测试全部 4 个已注册工具在无 agent.cwd 及无 exec.agent 下均不访问 ctx.agent 且命中真实 workspace
     const minimalExec = { session: { id: sessId } };
     const agentHeaderExec = { agent: liveAgent };
 
@@ -429,36 +460,23 @@ describe('DSH live smoke regressions (strict Cordis inject & real session shape)
 
     const noteOut = await registeredTools
       .get('memory_note')
-      .execute({ content: 'fwq 测试备注：本地冒烟验证已通过。', kind: 'fact' }, agentHeaderExec);
+      .execute({ content: 'fwq 测试备注：本地冒烟验证已通过。', type: 'semantic' }, agentHeaderExec);
     expect(noteOut).not.toContain('Error:');
 
-    const confirmOut = await registeredTools
-      .get('memory_confirm')
-      .execute({ id: seedMemId }, minimalExec);
-    expect(confirmOut).not.toContain('Error:');
-
-    const mergeOut = await registeredTools
-      .get('memory_merge')
-      .execute({ sourceId: mergeSrcId, targetId: seedMemId, reason: '整合端口配置' }, agentHeaderExec);
-    expect(mergeOut).not.toContain('Error:');
-
-    const unifiedOut = await registeredTools
-      .get('memory')
-      .execute({ action: 'search', query: '8080' }, minimalExec);
-    expect(unifiedOut).toContain('8080');
-
-    const coreOut = await registeredTools
-      .get('memory_core')
-      .execute({ action: 'read', block: 'project' }, minimalExec);
-    expect(coreOut).not.toContain('without inject');
-
-    // 6. 测试 /memory 命令使用 agent.session.header.cwd
+    // 6. 测试 /memory 用户命令（含 stats 与受控 merge 操作）使用 agent.session.header.cwd
     const cmdRes = registeredCommands.get('memory').handler({
       agent: liveAgent,
       rawInput: 'stats',
     });
     expect(cmdRes.kind).toBe('success');
     expect(cmdRes.text).toContain('记忆总数');
+
+    const mergeCmdRes = registeredCommands.get('memory').handler({
+      agent: liveAgent,
+      rawInput: `merge ${mergeSrcId} ${seedMemId}`,
+    });
+    expect(mergeCmdRes.kind).toBe('success');
+    expect(mergeCmdRes.text).toContain('Successfully merged');
     expect(webHandler).toBeDefined();
   });
 });

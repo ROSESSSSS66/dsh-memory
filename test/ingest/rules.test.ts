@@ -4,7 +4,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { openDb } from '../../src/core/db.js';
 import type { Db, RawEvent } from '../../src/types.js';
-import { runRules, normalizeErrorText } from '../../src/ingest/rules.js';
+import {
+  runRules,
+  normalizeErrorText,
+  resolveFixedSlot,
+  isCorrectionMessage,
+  CORRECTION_REGEX,
+} from '../../src/ingest/rules.js';
 import { list } from '../../src/core/store.js';
 
 describe('M2-T1: rules.ts tests', () => {
@@ -300,5 +306,270 @@ describe('M2-T1: rules.ts tests', () => {
     runRules(db, event, undefined, 1000);
     const mems = list(db);
     expect(mems).toHaveLength(0);
+  });
+
+  it('R2 P0: enforces word boundaries, normative framing, skips questions/code/stack traces, and handles English workspace cues', () => {
+    let seq = 100;
+    const fire = (text: string) =>
+      runRules(
+        db,
+        {
+          session_id: 's_r2_p0',
+          seq: ++seq,
+          workspace_id: 'ws_r2',
+          type: 'user/message',
+          time: 1000 + seq,
+          turn: 1,
+          role: 'user',
+          origin_kind: 'user',
+          is_error: 0,
+          text,
+          processed: 0,
+        },
+        undefined,
+        1000 + seq
+      );
+
+    // Substring traps must NEVER trigger
+    fire('Nevertheless, we should use pnpm for this.');
+    fire('Whenever I run tests, the cache warms up.');
+    fire('Nevermind, keep the old config.');
+
+    // Factual bug reports without normative framing must NEVER trigger
+    fire('The build always fails on CI');
+    fire('这个函数总是返回 undefined');
+
+    // Questions (including non-?), multiline blockquotes, fenced code, stack traces must be SKIPPED (not candidate!)
+    fire('does this always retry on 503');
+    fire('是不是总是这样');
+    fire('说明如下：\n> 以后总是使用 pnpm');
+    fire('```ts\n// always use const\n```');
+    fire('TypeError: always fails\n    at main (index.ts:10:5)');
+
+    expect(list(db)).toHaveLength(0);
+
+    // Valid non-fixed-slot English preference with workspace scope cue -> candidate + workspace scope
+    const res = fire('From now on, always use pnpm in this repo');
+    expect(res.memoriesCreated).toBe(1);
+    const mems = list(db);
+    expect(mems).toHaveLength(1);
+    expect(mems[0].status).toBe('candidate');
+    expect(mems[0].scope).toBe('workspace');
+  });
+
+  it('R1 P1: validates directive syntax, downgrades code/quotes, truncates long directives, and runs R3 on combined messages', () => {
+    let seq = 200;
+    const mkUser = (text: string, turn = 2): RawEvent => ({
+      session_id: 's_r1_p1',
+      seq: ++seq,
+      workspace_id: 'ws_r1',
+      type: 'user/message',
+      time: 2000 + seq,
+      turn,
+      role: 'user',
+      origin_kind: 'user',
+      is_error: 0,
+      text,
+      processed: 0,
+    });
+
+    // Non-directive remember questions/clauses must be ignored
+    runRules(db, mkUser('Remember when we migrated the server?'), undefined, 2001);
+    runRules(db, mkUser('Remember how the cache invalidates'), undefined, 2002);
+    runRules(db, mkUser('Remember why this failed'), undefined, 2003);
+    runRules(db, mkUser('Remember if you restarted nginx'), undefined, 2004);
+    runRules(db, mkUser('Remember whether the flag is on'), undefined, 2005);
+    runRules(db, mkUser('记住明天开会吗？'), undefined, 2006);
+    expect(list(db)).toHaveLength(0);
+
+    // English directive with slot resolution
+    const r1En = runRules(db, mkUser('Remember that our database is Postgres'), undefined, 2010);
+    expect(r1En.memoriesCreated).toBe(1);
+    expect(list(db)[0]).toMatchObject({
+      slot_key: 'project.database',
+      status: 'active',
+      scope: 'workspace',
+    });
+
+    // Pasted code block in R1 downgraded to candidate
+    runRules(db, mkUser('Remember:\n```bash\npnpm run build\n```'), undefined, 2011);
+    const codeMems = list(db, { status: 'candidate' });
+    expect(codeMems).toHaveLength(1);
+
+    // >400-char directive truncated cleanly to token budget instead of dropped
+    const longText = 'Remember: ' + 'deploy service alpha using zero-downtime blue-green strategy '.repeat(45);
+    expect(longText.length).toBeGreaterThan(2000);
+    const longRes = runRules(db, mkUser(longText), undefined, 2012);
+    expect(longRes.memoriesCreated).toBe(1);
+
+    // Combined R1 + R3: both creates R1 memory AND triggers R3 reflect job with correctionMessage
+    db.run(
+      'INSERT INTO turn_metrics (session_id, turn, query_tokens, candidates, injected, inject_tokens, latency_ms, correction, strategy_v, created_at) VALUES (?, 1, 10, 1, 1, 20, 5.0, 0, 1, 1000)',
+      ['s_r1_p1']
+    );
+    let notified = 0;
+    const comboRes = runRules(
+      db,
+      mkUser('记住：之前搞错了，测试服务端口改为 9090', 2),
+      undefined,
+      2020,
+      { onJobEnqueued: () => { notified++; } }
+    );
+    expect(comboRes.memoriesCreated).toBe(1);
+    expect(comboRes.jobsEnqueued).toBe(1);
+    expect(notified).toBe(1);
+
+    const reflectJob = db.get<{ payload: string }>(
+      "SELECT payload FROM jobs WHERE key = 'reflect:s_r1_p1:1'"
+    );
+    expect(reflectJob).toBeDefined();
+    expect(JSON.parse(reflectJob!.payload).correctionMessage).toContain('搞错了');
+  });
+
+  it('Shared isCorrectionMessage & CORRECTION_REGEX handle word boundaries, questions, and conditionals', () => {
+    expect(CORRECTION_REGEX.test('wrongdoing')).toBe(false);
+    expect(CORRECTION_REGEX.test('incorrectly')).toBe(false);
+    expect(isCorrectionMessage('actually no, use port 8080')).toBe(true);
+    expect(isCorrectionMessage("that didn't work at all")).toBe(true);
+    expect(isCorrectionMessage('不对，为什么这样改？')).toBe(true);
+    expect(isCorrectionMessage('这样改是不是不对？')).toBe(false);
+    expect(isCorrectionMessage('nothing is wrong here')).toBe(false);
+    expect(isCorrectionMessage('如果不行就回退到上一版本')).toBe(false);
+    expect(isCorrectionMessage("if it doesn't work, revert the PR")).toBe(false);
+  });
+
+  it('R4 & R5: normalizes UUID/ISO/forward-slash paths, caps sig/content, omits null turn, gates jobs, and ignores tool/call in R5', () => {
+    const norm = normalizeErrorText(
+      'Fail at 2026-11-22T18:44:46.123Z req 550e8400-e29b-41d4-a716-446655440000 in C:/Users/dev/app.ts'
+    );
+    expect(norm).toBe('Fail at <TIME> req <UUID> in <PATH>');
+
+    // Long error text: sig <= 256 chars, candidate content <= 600 chars, turn omitted when null
+    const hugeErr = 'ERR_DETAIL_' + 'segment_alpha_beta_gamma '.repeat(50);
+    runRules(
+      db,
+      {
+        session_id: 's_r4_a',
+        seq: 1,
+        workspace_id: 'ws_r4',
+        type: 'tool/result',
+        time: 1000,
+        turn: null,
+        role: 'tool',
+        origin_kind: 'tool',
+        tool_name: 'run_cmd',
+        is_error: 1,
+        text: hugeErr,
+        processed: 0,
+      },
+      undefined,
+      1000
+    );
+    const res2 = runRules(
+      db,
+      {
+        session_id: 's_r4_b',
+        seq: 2,
+        workspace_id: 'ws_r4',
+        type: 'tool/result',
+        time: 2000,
+        turn: null,
+        role: 'tool',
+        origin_kind: 'tool',
+        tool_name: 'run_cmd',
+        is_error: 1,
+        text: hugeErr,
+        processed: 0,
+      },
+      undefined,
+      2000
+    );
+    expect(res2.memoriesCreated).toBe(1);
+    expect(res2.jobsEnqueued).toBe(1);
+
+    const sigRow = db.get<{ sig: string }>('SELECT sig FROM failure_sigs WHERE workspace_id = ?', ['ws_r4']);
+    expect(sigRow!.sig.length).toBeLessThanOrEqual(256);
+
+    const failMem = list(db, { status: 'candidate' })[0];
+    expect(failMem.content.length).toBeLessThanOrEqual(600);
+
+    const r4Job = db.get<{ payload: string }>("SELECT payload FROM jobs WHERE key LIKE 'reflect:failure_sig:%'");
+    const r4Payload = JSON.parse(r4Job!.payload);
+    expect(r4Payload.triggerSeq).toBe(2);
+    expect('turn' in r4Payload).toBe(false);
+
+    // R5 must NOT trigger on tool/call with is_error=0
+    db.run(
+      'INSERT INTO raw_events (session_id, seq, workspace_id, type, time, turn, role, origin_kind, tool_name, is_error, text, processed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
+      ['s_r5_call', 1, 'ws_r5', 'tool/result', 1000, 1, 'tool', 'tool', 'bash', 1, 'failed']
+    );
+    const callRes = runRules(
+      db,
+      {
+        session_id: 's_r5_call',
+        seq: 2,
+        workspace_id: 'ws_r5',
+        type: 'tool/call',
+        time: 1001,
+        turn: 1,
+        role: 'tool',
+        origin_kind: 'tool',
+        tool_name: 'bash',
+        is_error: 0,
+        text: '{"cmd":"ls"}',
+        processed: 0,
+      },
+      undefined,
+      1001
+    );
+    expect(callRes.jobsEnqueued).toBe(0);
+    expect(db.get("SELECT * FROM jobs WHERE key = 'fixpair:s_r5_call:1'")).toBeUndefined();
+
+    // Respects enqueueOfflineJobs: false
+    const gatedRes = runRules(
+      db,
+      {
+        session_id: 's_r5_call',
+        seq: 3,
+        workspace_id: 'ws_r5',
+        type: 'tool/result',
+        time: 1002,
+        turn: 1,
+        role: 'tool',
+        origin_kind: 'tool',
+        tool_name: 'bash',
+        is_error: 0,
+        text: 'ok',
+        processed: 0,
+      },
+      undefined,
+      1002,
+      { enqueueOfflineJobs: false }
+    );
+    expect(gatedRes.jobsEnqueued).toBe(0);
+    expect(db.get("SELECT * FROM jobs WHERE key = 'fixpair:s_r5_call:1'")).toBeUndefined();
+  });
+
+  it('resolveFixedSlot excludes symptom/interrogative contexts and supports English patterns', () => {
+    expect(resolveFixedSlot('回复中文会乱码').slotKey).toBeNull();
+    expect(resolveFixedSlot('数据库使用 CPU 过高').slotKey).toBeNull();
+    expect(resolveFixedSlot('our database is down').slotKey).toBeNull();
+    expect(resolveFixedSlot('why does our database use Postgres?').slotKey).toBeNull();
+
+    expect(resolveFixedSlot('our database is Postgres')).toEqual({
+      slotKey: 'project.database',
+      scope: 'workspace',
+      type: 'semantic',
+    });
+    expect(resolveFixedSlot('Always reply in English')).toEqual({
+      slotKey: 'user.pref.reply_language',
+      scope: 'user',
+      type: 'preference',
+    });
+    expect(resolveFixedSlot('Never use momentjs in this project')).toEqual({
+      slotKey: 'project.pref.avoid.momentjs',
+      scope: 'workspace',
+      type: 'preference',
+    });
   });
 });

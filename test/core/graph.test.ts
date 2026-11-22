@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import type { Db } from '../../src/types.js';
 import { upsertCandidate, mergeMemories, addRelation } from '../../src/core/writer.js';
@@ -13,6 +13,10 @@ describe('Knowledge Graph & Topology Visualization (汲取自 qwert702/dsh-memor
 
   beforeEach(() => {
     db = openDb(':memory:');
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   it('should generate graph nodes and relation links accurately', () => {
@@ -136,5 +140,111 @@ describe('Knowledge Graph & Topology Visualization (汲取自 qwert702/dsh-memor
     // Both linked memories should be tagged with the 'graph' channel in matchedChannels
     expect(recRes.matchedChannels?.[seedId] || []).toContain('graph');
     expect(recRes.matchedChannels?.[neighborId] || []).toContain('graph');
+  });
+
+  it('enforces scopeFilterSQL in getGraphData/getSubgraph (no cross-session leak) and generates collision-free entity node IDs', () => {
+    const ws = workspaceId('ws_graph_scope');
+    const centerRes = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: '共享节点同时提及 foo/bar 与 foo-bar 模块',
+        summary: '共享中心节点',
+        scope: 'workspace',
+        workspaceId: ws,
+        entities: ['foo/bar', 'foo-bar'],
+        source_kind: 'user',
+        confidence: 0.95,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 1, kind: 'user' }],
+        actor: 'user',
+      },
+      now
+    );
+    const ownSessRes = upsertCandidate(
+      db,
+      {
+        type: 'episodic',
+        content: '当前会话 s1 的调试笔记',
+        summary: 's1 私有记忆',
+        scope: 'session',
+        workspaceId: ws,
+        sessionId: 's1',
+        entities: ['foo/bar'],
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 2, kind: 'user' }],
+        actor: 'user',
+      },
+      now + 10
+    );
+    const otherSessRes = upsertCandidate(
+      db,
+      {
+        type: 'episodic',
+        content: '其他会话 s2 的绝密草稿',
+        summary: 's2 私有记忆',
+        scope: 'session',
+        workspaceId: ws,
+        sessionId: 's2',
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's2', seq: 1, kind: 'user' }],
+        actor: 'user',
+      },
+      now + 20
+    );
+    const hop2BehindOther = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: '只能经由 s2 私有节点到达的二跳工作区节点',
+        summary: '二跳可达节点',
+        scope: 'workspace',
+        workspaceId: ws,
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's2', seq: 2, kind: 'user' }],
+        actor: 'user',
+      },
+      now + 30
+    );
+
+    const centerId = (centerRes as any).id;
+    const ownSessId = (ownSessRes as any).id;
+    const otherSessId = (otherSessRes as any).id;
+    const hop2Id = (hop2BehindOther as any).id;
+
+    addRelation(db, centerId, ownSessId, 'related', now + 100);
+    addRelation(db, centerId, otherSessId, 'related', now + 101);
+    addRelation(db, otherSessId, hop2Id, 'related', now + 102);
+
+    // 1. getGraphData without sessionId excludes both s1 and s2 session rows
+    const graphNoSess = getGraphData(db, { workspaceId: ws });
+    const gIds = graphNoSess.nodes.map((n) => n.id);
+    expect(gIds).toContain(centerId);
+    expect(gIds).not.toContain(ownSessId);
+    expect(gIds).not.toContain(otherSessId);
+
+    // 2. Collision-free FNV-1a entity IDs: foo/bar and foo-bar must produce distinct node IDs
+    const entNodes = graphNoSess.nodes.filter((n) => n.type === 'entity');
+    const fooSlash = entNodes.find((n) => n.label === '@foo/bar');
+    const fooDash = entNodes.find((n) => n.label === '@foo-bar');
+    expect(fooSlash).toBeDefined();
+    expect(fooDash).toBeDefined();
+    expect(fooSlash!.id).not.toBe(fooDash!.id);
+    expect(fooSlash!.id).toMatch(/^ent_[0-9a-z]+$/);
+    expect(fooDash!.id).toMatch(/^ent_[0-9a-z]+$/);
+
+    // 3. getSubgraph with sessionId='s1' & hops=2 includes ownSessId, excludes otherSessId AND hop2Id behind otherSessId
+    const subS1 = getSubgraph(db, centerId, { workspaceId: ws, sessionId: 's1', hops: 2 });
+    const subS1Ids = subS1.nodes.map((n) => n.id);
+    expect(subS1Ids).toContain(centerId);
+    expect(subS1Ids).toContain(ownSessId);
+    expect(subS1Ids).not.toContain(otherSessId);
+    expect(subS1Ids).not.toContain(hop2Id);
   });
 });

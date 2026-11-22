@@ -10,10 +10,14 @@ import {
   autoPinMemories,
   backupDatabase,
   checkAndRepairFts,
+  cleanOldTelemetry,
+  curateMemoriesWithLLM,
   exportDatabaseFile,
   importDatabaseFile,
+  pruneInvalidMemories,
 } from '../../src/evolution/maintenance.js';
-import { upsertCandidate } from '../../src/core/writer.js';
+import { upsertCandidate, freeze } from '../../src/core/writer.js';
+import { saveConfigToDb } from '../../src/config.js';
 import type { Db, MemoryRecord } from '../../src/types.js';
 
 describe('Maintenance (M3-T5)', () => {
@@ -335,5 +339,326 @@ describe('Maintenance (M3-T5)', () => {
     expect(impCorrupt.success).toBe(false);
 
     newDb.close();
+  });
+
+  it('strips plaintext API keys from backups, prunes all 10 telemetry tables, sets valid_to/invalidated_at on cold archive, and rejects bound expired repair candidates', () => {
+    const now = 2_000_000_000_000;
+    const day = 86_400_000;
+
+    // 1. Backup must strip meta.config_override (plaintext API keys)
+    saveConfigToDb(db, {
+      offlineLLM: {
+        ...DEFAULTS.offlineLLM,
+        apiKey: 'sk-backup-plaintext-secret-1234567890',
+      },
+      embedding: {
+        ...DEFAULTS.embedding,
+        apiKey: 'sk-embed-plaintext-secret-1234567890',
+      },
+    });
+    const backupFile = backupDatabase(db, ':memory:', tempBackupDir, now);
+    const bakDb = openDb(backupFile, { readOnly: true });
+    try {
+      expect(bakDb.get("SELECT value FROM meta WHERE key = 'config_override'")).toBeUndefined();
+    } finally {
+      bakDb.close();
+    }
+
+    // 2. archiveColdMemories sets valid_to and invalidated_at
+    const coldRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '冷数据测试记忆。',
+      scope: 'workspace',
+      workspaceId: 'ws1',
+      source_kind: 'user',
+      confidence: 1.0,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's_cold', seq: 1, kind: 'user' }],
+      actor: 'user',
+    });
+    const coldId = (coldRes as any).id;
+    db.run(
+      'UPDATE memories SET utility = 0.2, created_at = ?, last_used_at = ? WHERE id = ?',
+      [now - 70 * day, now - 70 * day, coldId]
+    );
+    expect(archiveColdMemories(db, cfg, now)).toBe(1);
+    const coldRow = db.get<MemoryRecord>('SELECT status, valid_to, invalidated_at FROM memories WHERE id = ?', [
+      coldId,
+    ]);
+    expect(coldRow).toEqual({ status: 'archived', valid_to: now, invalidated_at: now });
+
+    // 3. expireCandidates rejects candidates bound to expired repair_proposals even if < 30 days old
+    const boundCand = upsertCandidate(db, {
+      type: 'semantic',
+      content: '绑定在过期修复提案上的较新候选。',
+      scope: 'workspace',
+      workspaceId: 'ws1',
+      source_kind: 'llm_extract',
+      confidence: 0.7,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 's_rep', seq: 1, kind: 'assistant' }],
+      actor: 'llm',
+    }, now - 2 * day);
+    const boundCandId = (boundCand as any).id;
+    db.run(
+      `INSERT INTO repair_proposals (job_id, memory_id, content_rev, action, candidate_ids, reason, status, created_at, expires_at)
+       VALUES (501, 'm_orig', 1, 'revise', ?, 'expired prop', 'candidate', ?, ?)`,
+      [JSON.stringify([boundCandId]), now - 31 * day, now - 1000]
+    );
+    const expRes = expireCandidates(db, now);
+    expect(expRes.expiredProposals).toBe(1);
+    expect(expRes.expiredCandidates).toBeGreaterThanOrEqual(1);
+    expect(db.get<MemoryRecord>('SELECT status FROM memories WHERE id = ?', [boundCandId])?.status).toBe('rejected');
+
+    // 4. 10-table cleanOldTelemetry retention
+    db.run(
+      `INSERT INTO raw_events (session_id, seq, workspace_id, type, time, origin_kind, processed)
+       VALUES ('s_old_proc', 1, 'ws1', 'user', ?, 'user', 2), ('s_old_unproc', 2, 'ws1', 'user', ?, 'user', 0)`,
+      [now - 35 * day, now - 65 * day]
+    );
+    db.run(
+      `INSERT INTO turn_metrics (session_id, turn, strategy_v, created_at) VALUES ('s_tm', 1, 1, ?)`,
+      [now - 95 * day]
+    );
+    db.run(
+      `INSERT INTO jobs (kind, key, status, created_at, finished_at) VALUES ('distill', 'old_job', 'done', ?, ?)`,
+      [now - 20 * day, now - 16 * day]
+    );
+    db.run(
+      `INSERT INTO llm_ledger (day, job_kind, model, prompt_version, reserved_tokens, status, ok, created_at)
+       VALUES ('2025-01-01', 'distill', 'm', 'v2', 100, 'succeeded', 1, ?)`,
+      [now - 95 * day]
+    );
+    db.run(
+      `INSERT INTO injections (session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at)
+       VALUES ('s_inj', 1, 'm_x', 1, 'dynamic', 1, 10, 'content', 1, ?)`,
+      [now - 95 * day]
+    );
+    db.run(
+      `INSERT INTO repair_proposals (job_id, memory_id, content_rev, action, candidate_ids, reason, status, created_at, expires_at, approved_at)
+       VALUES (502, 'm_orig', 1, 'invalidate', '[]', 'old', 'approved', ?, ?, ?)`,
+      [now - 40 * day, now - 10 * day, now - 35 * day]
+    );
+    db.run(
+      `INSERT INTO failure_sigs (sig, workspace_id, count, sessions, updated_at)
+       VALUES ('bash:old', 'ws1', 1, '["s1"]', ?)`,
+      [now - 95 * day]
+    );
+    for (let i = 0; i < 105; i++) {
+      db.run(
+        `INSERT INTO eval_cases (id, suite, payload, critical, created_at) VALUES (?, 'harvested', '{}', 0, ?)`,
+        [`harv_${i}`, now - (200 - i) * 1000]
+      );
+    }
+    for (let v = 1; v <= 25; v++) {
+      db.run(
+        `INSERT INTO memory_versions (memory_id, version, snapshot, reason, actor, created_at)
+         VALUES ('m_ver_test', ?, '{}', 'edit', 'user', ?)`,
+        [v, now - (30 - v) * 1000]
+      );
+    }
+    db.run(
+      `INSERT INTO meta (key, value) VALUES ('distill:s_stale', ?), ('job_skip_count:99999', '3')`,
+      [JSON.stringify({ lastSeq: 1, updatedAt: now - 35 * day })]
+    );
+
+    const cleanRes = cleanOldTelemetry(db, now, { ...cfg, privacy: { offlineConsent: false, allowedOfflineEndpoints: [] } });
+    expect(cleanRes.deletedEvents).toBe(2);
+    expect(cleanRes.deletedMetrics).toBe(1);
+    expect(cleanRes.deletedJobs).toBe(1);
+    expect(cleanRes.deletedLedger).toBe(1);
+    expect(cleanRes.deletedInjections).toBe(1);
+    // Proposal 501 (expired/rejected >30d) + proposal 502 (approved >30d)
+    expect(cleanRes.deletedProposals).toBe(2);
+    expect(cleanRes.deletedFailureSigs).toBe(1);
+    expect(cleanRes.deletedEvalCases).toBe(5);
+    expect(cleanRes.deletedVersions).toBe(5);
+    expect(cleanRes.deletedMeta).toBe(2);
+  });
+
+  it('scopes pruneInvalidMemories slot map by session_id, honors frozen slot holders, validates import schema_version & preserves local frozen records', () => {
+    const now = Date.now();
+    // 1. Session-scoped candidate in session A must NOT be pruned by active slot in session B
+    upsertCandidate(db, {
+      type: 'semantic',
+      content: 'Session B active slot value.',
+      slot_key: 'session.mode',
+      scope: 'session',
+      workspaceId: 'ws_s',
+      sessionId: 'sess_B',
+      source_kind: 'user',
+      confidence: 1.0,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 'sess_B', seq: 1, kind: 'user' }],
+      actor: 'user',
+    }, now);
+    const sessACand = upsertCandidate(db, {
+      type: 'semantic',
+      content: 'Session A candidate slot value.',
+      slot_key: 'session.mode',
+      scope: 'session',
+      workspaceId: 'ws_s',
+      sessionId: 'sess_A',
+      source_kind: 'llm_extract',
+      confidence: 0.7,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 'sess_A', seq: 1, kind: 'assistant' }],
+      actor: 'llm',
+    }, now - 1000);
+    const sessACandId = (sessACand as any).id;
+
+    // 2. Candidate shadowed by a FROZEN slot holder in same workspace MUST be pruned
+    const frozenHolder = upsertCandidate(db, {
+      type: 'semantic',
+      content: 'Frozen database engine setting.',
+      slot_key: 'project.db',
+      scope: 'workspace',
+      workspaceId: 'ws_s',
+      source_kind: 'user',
+      confidence: 1.0,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's1', seq: 1, kind: 'user' }],
+      actor: 'user',
+    }, now - 5000);
+    const frozenId = (frozenHolder as any).id;
+    freeze(db, frozenId, 'user', now - 4000);
+    const shadowedCand = upsertCandidate(db, {
+      type: 'semantic',
+      content: 'Candidate database engine setting.',
+      slot_key: 'project.db',
+      scope: 'workspace',
+      workspaceId: 'ws_s',
+      source_kind: 'llm_extract',
+      confidence: 0.7,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 's2', seq: 1, kind: 'assistant' }],
+      actor: 'llm',
+    }, now);
+    const shadowedId = (shadowedCand as any).id;
+
+    const pruneRes = pruneInvalidMemories(db, { workspaceId: 'ws_s', now });
+    expect(pruneRes.prunedIds).toContain(shadowedId);
+    expect(pruneRes.prunedIds).not.toContain(sessACandId);
+    expect(db.get<MemoryRecord>('SELECT status FROM memories WHERE id = ?', [frozenId])?.status).toBe('frozen');
+
+    // 3. importDatabaseFile rejects future schema_version and protects local frozen record on ID collision
+    const exportPath = path.join(tempBackupDir, 'future.db');
+    expect(exportDatabaseFile(db, ':memory:', exportPath).success).toBe(true);
+    const futureDb = openDb(exportPath);
+    futureDb.run("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '999')");
+    futureDb.close();
+    const targetDb = openDb(':memory:');
+    try {
+      const impFuture = importDatabaseFile(targetDb, ':memory:', exportPath);
+      expect(impFuture.success).toBe(false);
+    } finally {
+      targetDb.close();
+    }
+
+    // Local frozen protection on import
+    const srcPath = path.join(tempBackupDir, 'collision.db');
+    expect(exportDatabaseFile(db, ':memory:', srcPath).success).toBe(true);
+    const localDb = openDb(':memory:');
+    try {
+      // Import once, then freeze frozenId with custom content, then modify srcPath and re-import
+      expect(importDatabaseFile(localDb, ':memory:', srcPath).success).toBe(true);
+      localDb.run("UPDATE memories SET content = 'LOCAL_FROZEN_CONTENT', status = 'frozen' WHERE id = ?", [frozenId]);
+      const impAgain = importDatabaseFile(localDb, ':memory:', srcPath);
+      expect(impAgain.success).toBe(true);
+      expect(localDb.get<MemoryRecord>('SELECT content, status FROM memories WHERE id = ?', [frozenId])).toEqual({
+        content: 'LOCAL_FROZEN_CONTENT',
+        status: 'frozen',
+      });
+    } finally {
+      localDb.close();
+    }
+  });
+
+  it('persists curate:last only after parse success, deduplicates absorb_ids from discard_ids, and advances rotating cursor', async () => {
+    const curateCfg: PluginConfig = {
+      ...DEFAULTS,
+      privacy: { offlineConsent: true, allowedOfflineEndpoints: ['https://api.deepseek.com'] },
+      offlineLLM: {
+        useDshLlm: false,
+        baseURL: 'https://api.deepseek.com/v1',
+        model: 'deepseek-chat',
+        apiKeyEnv: '',
+      },
+    };
+    const c1 = upsertCandidate(db, {
+      type: 'semantic',
+      content: '候选记忆条目一：项目构建输出在 dist 目录。',
+      scope: 'workspace',
+      workspaceId: 'ws_curate',
+      source_kind: 'llm_extract',
+      confidence: 0.7,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 'sc1', seq: 1, kind: 'assistant' }],
+      actor: 'llm',
+    });
+    const c2 = upsertCandidate(db, {
+      type: 'semantic',
+      content: '候选记忆条目二：项目构建输出位于 dist/。',
+      scope: 'workspace',
+      workspaceId: 'ws_curate',
+      source_kind: 'llm_extract',
+      confidence: 0.7,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 'sc2', seq: 2, kind: 'assistant' }],
+      actor: 'llm',
+    });
+    const id1 = (c1 as any).id;
+    const id2 = (c2 as any).id;
+
+    // 1. Parse failure must NOT persist curate:last fingerprint
+    const badRes = await curateMemoriesWithLLM(db, curateCfg, {
+      workspaceId: 'ws_curate',
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"unrelated": true}' } }],
+            usage: { prompt_tokens: 50, completion_tokens: 10 },
+          }),
+          { status: 200 }
+        ),
+    });
+    expect(badRes.ok).toBe(false);
+    expect(db.get("SELECT value FROM meta WHERE key LIKE 'curate:last:%'")).toBeUndefined();
+
+    // 2. Subsequent valid call succeeds, deduplicates id2 from discard_ids so id1 absorbs id2's source!
+    const okRes = await curateMemoriesWithLLM(db, curateCfg, {
+      workspaceId: 'ws_curate',
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    discard_ids: [id2],
+                    updates: [
+                      {
+                        target_id: id1,
+                        absorb_ids: [id2],
+                        type: 'semantic',
+                        text: '项目构建产物统一输出在 dist 目录中。',
+                        confidence: 0.85,
+                      },
+                    ],
+                  }),
+                },
+              },
+            ],
+            usage: { prompt_tokens: 80, completion_tokens: 40 },
+          }),
+          { status: 200 }
+        ),
+    });
+    expect(okRes.ok).toBe(true);
+    expect(okRes.llmDiscarded).toBe(0);
+    expect(okRes.llmUpdated).toBe(1);
+    expect(db.get<MemoryRecord>('SELECT status FROM memories WHERE id = ?', [id2])?.status).toBe('superseded');
+    expect(db.get("SELECT value FROM meta WHERE key LIKE 'curate:last:%'")).toBeDefined();
+    expect(db.get("SELECT value FROM meta WHERE key LIKE 'curate:cursor:%'")).toBeDefined();
   });
 });

@@ -4,7 +4,9 @@ import { budgetTokens, estimateTokens } from '../core/tokens.js';
 import { tokenSet, jaccard } from '../core/text.js';
 import { cosineSimilarity, getOrComputeEmbedding } from '../core/vector.js';
 import { buildInlineL1Overview } from '../core/viking.js';
-import { render, type RenderItem } from './render.js';
+import { render, renderLine, wrapRenderedLines, type RenderLineOptions } from './render.js';
+
+const TARGET_L1_MAX_CHARS = 220;
 
 /**
  * 混合词法-语义重叠算子 (Hybrid Lexical-Vector Overlap)
@@ -50,6 +52,9 @@ export interface GovernOptions {
   layer?: 'dynamic' | 'stable';
   db?: Db;
   scopeCtx?: { workspaceId: string; sessionId?: string };
+  temporalBrowse?: boolean;
+  contradictionsSet?: Set<string>;
+  now?: number;
 }
 
 export interface SelectedItem {
@@ -61,15 +66,67 @@ export interface SelectedItem {
   tokens: number;
 }
 
+export interface GovernResult {
+  items: SelectedItem[];
+  renderedBlock: string;
+  totalTokens: number;
+  droppedReasons: Record<string, string>;
+}
+
+interface CandidatePackState {
+  cand: ScoredCandidate;
+  vpt: number;
+  tokens: Set<string>;
+  vec: Float32Array | null;
+  approxCode: string;
+  l2Line?: string;
+  l2Tokens?: number;
+  l1Overview?: string | null;
+  l1Line?: string;
+  l1Tokens?: number;
+  l0Line?: string;
+  l0Tokens?: number;
+}
+
+function buildL1CandidateOverview(m: MemoryRecord): string | null {
+  const sumLen = (m.summary || '').length;
+  if (m.content.length <= sumLen + 40) return null;
+  const targetL1Chars = Math.min(
+    TARGET_L1_MAX_CHARS,
+    Math.max(sumLen + 24, Math.floor(m.content.length * 0.58))
+  );
+  const overview = buildInlineL1Overview(m, targetL1Chars);
+  if (overview.length < m.content.length - 15 && overview.length > sumLen + 12) {
+    return overview;
+  }
+  return null;
+}
+
+function approxShortCode(id: string): string {
+  const rawPart = id.startsWith('m_') ? id.slice(2) : id;
+  return 'm_' + rawPart.slice(0, 4);
+}
+
 /**
- * Token 预算装箱 (§5.7)
+ * Token 预算装箱并返回最终渲染块与丢弃原因 (§5.7)
+ * - 复用 ScoredCandidate 预计算的 docTokens，避免重复分词
+ * - 懒缓存单候选 L2/L1/L0 渲染行与 budgetTokens，将 MMR 循环内的 O(K²) 全量渲染优化为 O(K) 增量追踪
+ * - Step 6 严格复核实测渲染块，先原地 L2 -> L1 -> L0 渐进降级，仍超限再弹出
  */
-export function govern(
+export function governWithResult(
   cands: ScoredCandidate[],
   opts: GovernOptions
-): SelectedItem[] {
+): GovernResult {
+  const droppedReasons: Record<string, string> = {};
+
   if (!cands || cands.length === 0 || opts.budget <= 0 || opts.maxItems <= 0) {
-    return [];
+    if (cands) {
+      const reason = opts.budget <= 0 ? 'budget_zero' : 'max_items_zero';
+      for (const c of cands) {
+        droppedReasons[c.memory.id] = reason;
+      }
+    }
+    return { items: [], renderedBlock: '', totalTokens: 0, droppedReasons };
   }
 
   const strategyVersion = opts.strategyVersion ?? 1;
@@ -79,101 +136,184 @@ export function govern(
   const filtered: ScoredCandidate[] = [];
   for (const c of cands) {
     const key = `${c.memory.id}@${c.memory.content_rev}`;
-    if (!opts.alreadyInjected.has(key)) {
+    if (opts.alreadyInjected.has(key)) {
+      droppedReasons[c.memory.id] = 'already_injected';
+    } else {
       filtered.push(c);
     }
   }
 
   if (filtered.length === 0) {
-    return [];
+    return { items: [], renderedBlock: '', totalTokens: 0, droppedReasons };
   }
 
-  // 2. 槽位冲突去重：同一个 (scope, slot_key) 只保留最新记录
-  const slotMap = new Map<string, ScoredCandidate>();
-  const noSlotList: ScoredCandidate[] = [];
+  // 2. 槽位冲突去重：同一个 (scope, slot_key) 只保留最新记录（temporalBrowse 历史浏览模式下跳过折叠，保留历史 superseded 记录）
+  let deSlotted: ScoredCandidate[];
+  if (opts.temporalBrowse) {
+    deSlotted = filtered;
+  } else {
+    const slotMap = new Map<string, ScoredCandidate>();
+    const noSlotList: ScoredCandidate[] = [];
 
-  for (const c of filtered) {
-    const m = c.memory;
-    if (m.slot_key) {
-      const slotScopeKey = `${m.scope}:${m.workspace_id || ''}:${m.session_id || ''}:${m.slot_key}`;
-      const existing = slotMap.get(slotScopeKey);
-      if (!existing) {
-        slotMap.set(slotScopeKey, c);
-      } else {
-        const existingTime = existing.memory.valid_from ?? existing.memory.updated_at;
-        const curTime = m.valid_from ?? m.updated_at;
-        if (
-          curTime > existingTime ||
-          (curTime === existingTime && m.updated_at > existing.memory.updated_at) ||
-          (curTime === existingTime && m.updated_at === existing.memory.updated_at && m.id > existing.memory.id)
-        ) {
+    for (const c of filtered) {
+      const m = c.memory;
+      if (m.slot_key) {
+        const slotScopeKey = `${m.scope}:${m.workspace_id || ''}:${m.session_id || ''}:${m.slot_key}`;
+        const existing = slotMap.get(slotScopeKey);
+        if (!existing) {
           slotMap.set(slotScopeKey, c);
+        } else {
+          const existingTime = existing.memory.valid_from ?? existing.memory.updated_at;
+          const curTime = m.valid_from ?? m.updated_at;
+          const isNewer =
+            curTime > existingTime ||
+            (curTime === existingTime && m.updated_at > existing.memory.updated_at) ||
+            (curTime === existingTime &&
+              m.updated_at === existing.memory.updated_at &&
+              m.id > existing.memory.id);
+          if (isNewer) {
+            droppedReasons[existing.memory.id] = 'slot_superseded';
+            slotMap.set(slotScopeKey, c);
+          } else {
+            droppedReasons[m.id] = 'slot_superseded';
+          }
         }
+      } else {
+        noSlotList.push(c);
       }
-    } else {
-      noSlotList.push(c);
     }
-  }
 
-  const deSlotted = [...slotMap.values(), ...noSlotList];
+    deSlotted = [...slotMap.values(), ...noSlotList];
+  }
 
   // 3. 正文哈希去重：hash 相同只保留最高分一条
   const hashMap = new Map<string, ScoredCandidate>();
   for (const c of deSlotted) {
     const h = c.memory.hash;
     const existing = hashMap.get(h);
-    if (!existing || c.score > existing.score) {
+    if (!existing) {
       hashMap.set(h, c);
+    } else if ((c.rawScore ?? c.score) > (existing.rawScore ?? existing.score)) {
+      droppedReasons[existing.memory.id] = 'duplicate_hash';
+      hashMap.set(h, c);
+    } else {
+      droppedReasons[c.memory.id] = 'duplicate_hash';
     }
   }
 
   const candidates = Array.from(hashMap.values());
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) {
+    return { items: [], renderedBlock: '', totalTokens: 0, droppedReasons };
+  }
 
-  // 4. 计算 VPT (Value Per Token) 与混合词法/128D向量特征 (用于 LightMem Hybrid Submodular MMR 边际去重)
-  const withVpt = candidates.map((c) => ({
+  // 4. 计算 VPT 与混合词法/向量特征（直接复用 fuse.ts 预计算的 docTokens；仅在多候选 MMR 时读取向量）
+  const needVectors = candidates.length > 1;
+  const withVpt: CandidatePackState[] = candidates.map((c) => ({
     cand: c,
     vpt: c.score / Math.max(c.memory.token_cost, 30),
-    tokens: tokenSet(`${c.memory.content} ${c.memory.summary}`),
-    vec: getOrComputeEmbedding(c.memory),
+    tokens: c.docTokens ?? tokenSet(`${c.memory.content} ${c.memory.summary}`),
+    vec: needVectors ? getOrComputeEmbedding(c.memory, opts.db) : null,
+    approxCode: approxShortCode(c.memory.id),
   }));
 
-  // 按 score 降序找最高分的第一条锚点记忆
-  withVpt.sort((a, b) => b.cand.score - a.cand.score);
+  // 按未截断 rawScore 降序找最高分的第一条锚点记忆
+  withVpt.sort(
+    (a, b) =>
+      (b.cand.rawScore ?? b.cand.score) - (a.cand.rawScore ?? a.cand.score) ||
+      a.cand.memory.id.localeCompare(b.cand.memory.id)
+  );
   const first = withVpt[0];
   const remaining = withVpt.slice(1);
 
   const selected: SelectedItem[] = [];
+  const selectedLines: string[] = [];
   const selectedFeatures: Array<{ tokens: Set<string>; vec: Float32Array | null; type: string }> = [];
 
-  function testBudget(items: RenderItem[]): number {
-    // 候选迭代评估阶段无需逐次走完整数据库短码范围查询；短码长度微小变化 (至多2字节)
-    // 对 token 预算计数影响极小，且在第 6 步收尾阶段会携带 opts.db 进行最终严格复核
-    const text = render(items, {
-      strategyVersion,
-      layer,
-    });
-    return budgetTokens(text);
+  // 预计算空包裹层预算开销，结合行级懒缓存实现 O(K) 增量预算评估
+  const wrapperBudget = budgetTokens(wrapRenderedLines([''], strategyVersion, layer));
+  let runningLineTokens = 0;
+
+  function getLineOpts(memId: string): RenderLineOptions {
+    return {
+      disputed: opts.contradictionsSet?.has(memId),
+      now: opts.now,
+    };
   }
 
-  function tryPackCandidate(item: (typeof withVpt)[0]): boolean {
-    if (selected.length >= opts.maxItems) return false;
+  function getL2LineAndTokens(item: CandidatePackState): { line: string; tokens: number } {
+    if (item.l2Line === undefined || item.l2Tokens === undefined) {
+      const m = item.cand.memory;
+      item.l2Line = renderLine(
+        { memory: m, form: 'content', tier: 'L2' },
+        item.approxCode,
+        getLineOpts(m.id)
+      );
+      item.l2Tokens = budgetTokens(item.l2Line);
+    }
+    return { line: item.l2Line, tokens: item.l2Tokens };
+  }
+
+  function getL1LineAndTokens(
+    item: CandidatePackState
+  ): { overview: string; line: string; tokens: number } | null {
+    if (item.l1Overview === undefined) {
+      item.l1Overview = buildL1CandidateOverview(item.cand.memory);
+    }
+    if (!item.l1Overview) return null;
+    if (item.l1Line === undefined || item.l1Tokens === undefined) {
+      const m = item.cand.memory;
+      item.l1Line = renderLine(
+        { memory: m, form: 'summary', tier: 'L1', overview: item.l1Overview },
+        item.approxCode,
+        getLineOpts(m.id)
+      );
+      item.l1Tokens = budgetTokens(item.l1Line);
+    }
+    return { overview: item.l1Overview, line: item.l1Line, tokens: item.l1Tokens };
+  }
+
+  function getL0LineAndTokens(item: CandidatePackState): { line: string; tokens: number } {
+    if (item.l0Line === undefined || item.l0Tokens === undefined) {
+      const m = item.cand.memory;
+      item.l0Line = renderLine(
+        { memory: m, form: 'summary', tier: 'L0' },
+        item.approxCode,
+        getLineOpts(m.id)
+      );
+      item.l0Tokens = budgetTokens(item.l0Line);
+    }
+    return { line: item.l0Line, tokens: item.l0Tokens };
+  }
+
+  /**
+   * 增量预算判断：
+   * - 快速放行：wrapperBudget + runningLineTokens + lineTokens <= budget（数学上严格保证拼接后 <= budget）
+   * - 快速拒绝：超出保守上界且超出边界松弛余量，O(1) 直接拒绝
+   * - 窄边界精确复核：仅在临界区间拼接已缓存行字符串校验精确 budgetTokens，零重复 renderLine/redact
+   */
+  function canFitCandidateLine(line: string, lineTokens: number): boolean {
+    const conservativeTotal = wrapperBudget + runningLineTokens + lineTokens;
+    if (conservativeTotal <= opts.budget) {
+      return true;
+    }
+    const slackBound = (selectedLines.length + 2) * 4;
+    if (conservativeTotal > opts.budget + slackBound) {
+      return false;
+    }
+    const candidateBlock = wrapRenderedLines([...selectedLines, line], strategyVersion, layer);
+    return budgetTokens(candidateBlock) <= opts.budget;
+  }
+
+  function tryPackCandidate(item: CandidatePackState): boolean {
+    if (selected.length >= opts.maxItems) {
+      droppedReasons[item.cand.memory.id] = 'max_items';
+      return false;
+    }
     const m = item.cand.memory;
-    const baseItems: RenderItem[] = selected.map((s) => ({
-      memory: s.memory,
-      form: s.form,
-      tier: s.tier,
-      overview: s.overview,
-    }));
 
     // 1. 先尝试 OpenViking L2 (完整 content)
-    const tryContentItems: RenderItem[] = [
-      ...baseItems,
-      { memory: m, form: 'content', tier: 'L2' },
-    ];
-    const tokensWithContent = testBudget(tryContentItems);
-
-    if (tokensWithContent <= opts.budget) {
+    const l2 = getL2LineAndTokens(item);
+    if (canFitCandidateLine(l2.line, l2.tokens)) {
       selected.push({
         memory: m,
         form: 'content',
@@ -181,50 +321,32 @@ export function govern(
         score: item.cand.score,
         tokens: m.token_cost,
       });
+      selectedLines.push(l2.line);
+      runningLineTokens += l2.tokens;
       selectedFeatures.push({ tokens: item.tokens, vec: item.vec, type: m.type });
       return true;
     }
 
-    // 2. 再尝试 OpenViking L1 (中层结构化 Overview：当长正文无法完整装入，但预算足以容纳比一句话 L0 更丰富的关键槽位/步骤概览时)
-    const sumLen = (m.summary || '').length;
-    if (m.content.length > sumLen + 40) {
-      const targetL1Chars = Math.min(
-        140,
-        Math.max(sumLen + 24, Math.floor(m.content.length * 0.58))
-      );
-      const l1Overview = buildInlineL1Overview(m, targetL1Chars);
-      if (
-        l1Overview.length < m.content.length - 15 &&
-        l1Overview.length > sumLen + 12
-      ) {
-        const tryL1Items: RenderItem[] = [
-          ...baseItems,
-          { memory: m, form: 'summary', tier: 'L1', overview: l1Overview },
-        ];
-        const tokensWithL1 = testBudget(tryL1Items);
-        if (tokensWithL1 <= opts.budget) {
-          selected.push({
-            memory: m,
-            form: 'summary',
-            tier: 'L1',
-            overview: l1Overview,
-            score: item.cand.score,
-            tokens: Math.max(m.summary_cost, estimateTokens(l1Overview)),
-          });
-          selectedFeatures.push({ tokens: item.tokens, vec: item.vec, type: m.type });
-          return true;
-        }
-      }
+    // 2. 再尝试 OpenViking L1 (中层结构化 Overview，上限 220 字符)
+    const l1 = getL1LineAndTokens(item);
+    if (l1 && canFitCandidateLine(l1.line, l1.tokens)) {
+      selected.push({
+        memory: m,
+        form: 'summary',
+        tier: 'L1',
+        overview: l1.overview,
+        score: item.cand.score,
+        tokens: Math.max(m.summary_cost, estimateTokens(l1.overview)),
+      });
+      selectedLines.push(l1.line);
+      runningLineTokens += l1.tokens;
+      selectedFeatures.push({ tokens: item.tokens, vec: item.vec, type: m.type });
+      return true;
     }
 
     // 3. 回退至 OpenViking L0 (一句话超简 Abstract / summary)
-    const trySummaryItems: RenderItem[] = [
-      ...baseItems,
-      { memory: m, form: 'summary', tier: 'L0' },
-    ];
-    const tokensWithSummary = testBudget(trySummaryItems);
-
-    if (tokensWithSummary <= opts.budget) {
+    const l0 = getL0LineAndTokens(item);
+    if (canFitCandidateLine(l0.line, l0.tokens)) {
       selected.push({
         memory: m,
         form: 'summary',
@@ -232,9 +354,13 @@ export function govern(
         score: item.cand.score,
         tokens: m.summary_cost,
       });
+      selectedLines.push(l0.line);
+      runningLineTokens += l0.tokens;
       selectedFeatures.push({ tokens: item.tokens, vec: item.vec, type: m.type });
       return true;
     }
+
+    droppedReasons[m.id] = 'budget_exceeded';
     return false;
   }
 
@@ -272,34 +398,84 @@ export function govern(
     tryPackCandidate(nextItem);
   }
 
-  // 6. 最终验证与削减：确保完整实际渲染块严格 <= budget
+  for (const leftover of remaining) {
+    droppedReasons[leftover.cand.memory.id] = 'max_items';
+  }
+
+  // 6. 最终验证与削减：携带真实 opts.db 渲染一次复核，超限时严格按 L2 -> L1 -> L0 降级后再 pop()
+  let renderedBlock = '';
+  let totalTokens = 0;
+
   while (selected.length > 0) {
-    // 携带 db 渲染：短码发生前缀碰撞时会变长，必须按最终实际输出复核
-    const actualTokens = budgetTokens(
-      render(
-        selected.map((s) => ({
-          memory: s.memory,
-          form: s.form,
-          tier: s.tier,
-          overview: s.overview,
-        })),
-        { strategyVersion, layer, db: opts.db, scopeCtx: opts.scopeCtx }
-      )
+    renderedBlock = render(
+      selected.map((s) => ({
+        memory: s.memory,
+        form: s.form,
+        tier: s.tier,
+        overview: s.overview,
+      })),
+      {
+        strategyVersion,
+        layer,
+        db: opts.db,
+        scopeCtx: opts.scopeCtx,
+        contradictionsSet: opts.contradictionsSet,
+        now: opts.now,
+      }
     );
-    if (actualTokens <= opts.budget) {
+    totalTokens = budgetTokens(renderedBlock);
+    if (totalTokens <= opts.budget) {
       break;
     }
-    // 若最后一项为 L1，先尝试将其原地降级为 L0 summary，仍超限再弹出
+
     const last = selected[selected.length - 1];
-    if (last.tier === 'L1') {
+    if (last.tier === 'L2' || (last.form === 'content' && !last.tier)) {
+      const l1Overview = buildL1CandidateOverview(last.memory);
+      if (l1Overview) {
+        last.form = 'summary';
+        last.tier = 'L1';
+        last.overview = l1Overview;
+        last.tokens = Math.max(last.memory.summary_cost, estimateTokens(l1Overview));
+        continue;
+      }
+      last.form = 'summary';
       last.tier = 'L0';
       last.overview = undefined;
       last.tokens = last.memory.summary_cost;
       continue;
     }
-    // 移除最后一项 (最低价值项)
-    selected.pop();
+
+    if (last.tier === 'L1') {
+      last.form = 'summary';
+      last.tier = 'L0';
+      last.overview = undefined;
+      last.tokens = last.memory.summary_cost;
+      continue;
+    }
+
+    const popped = selected.pop()!;
+    droppedReasons[popped.memory.id] = 'budget_exceeded';
   }
 
-  return selected;
+  if (selected.length === 0) {
+    renderedBlock = '';
+    totalTokens = 0;
+  }
+
+  return {
+    items: selected,
+    renderedBlock,
+    totalTokens,
+    droppedReasons,
+  };
+}
+
+/**
+ * Token 预算装箱 (§5.7) — 保留既有返回 SelectedItem[] 签名以完全兼容既有调用方
+ */
+export function govern(
+  cands: ScoredCandidate[],
+  opts: GovernOptions
+): SelectedItem[] {
+  return governWithResult(cands, opts).items;
 }

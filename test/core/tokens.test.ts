@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { estimateTokens, budgetTokens } from '../../src/core/tokens.js';
+import { estimateTokens, budgetTokens, utf8ByteLength } from '../../src/core/tokens.js';
 
 describe('M1-T2: tokens.ts tests', () => {
   it('estimateTokens returns 0 for empty or whitespace string', () => {
@@ -8,9 +8,6 @@ describe('M1-T2: tokens.ts tests', () => {
   });
 
   it('estimateTokens calculates CJK and non-CJK mixed text according to formula', () => {
-    // "项目" (2 CJK), "PostgreSQL" (10 rest)
-    // cjk = 2, rest = 10
-    // Math.ceil(2 * 0.75 + 10 / 3.2) + 1 = Math.ceil(1.5 + 3.125) + 1 = Math.ceil(4.625) + 1 = 5 + 1 = 6
     const est = estimateTokens('项目 PostgreSQL');
     expect(est).toBe(6);
   });
@@ -21,9 +18,18 @@ describe('M1-T2: tokens.ts tests', () => {
     expect(estimateTokens(longText)).toBeGreaterThan(estimateTokens(shortText));
   });
 
-  it('budgetTokens returns exact UTF-8 byte length', () => {
+  it('budgetTokens returns calibrated token upper bound (no 3.94x CJK UTF-8 penalty)', () => {
     expect(budgetTokens('')).toBe(0);
-    expect(budgetTokens('abc')).toBe(3);
-    expect(budgetTokens('中文')).toBe(6); // 2 * 3 bytes
+    expect(budgetTokens('abc')).toBeGreaterThanOrEqual(estimateTokens('abc'));
+    expect(budgetTokens('中文')).toBe(Math.ceil(estimateTokens('中文') * 1.2));
+    const zhSentence = '本项目后端服务统一运行在端口 8080，数据库采用 PostgreSQL 16 且禁用原生 C++ 依赖';
+    expect(budgetTokens(zhSentence)).toBeLessThan(utf8ByteLength(zhSentence));
+    expect(budgetTokens(zhSentence)).toBeGreaterThanOrEqual(estimateTokens(zhSentence));
+  });
+
+  it('utf8ByteLength returns exact UTF-8 byte length', () => {
+    expect(utf8ByteLength('')).toBe(0);
+    expect(utf8ByteLength('abc')).toBe(3);
+    expect(utf8ByteLength('中文')).toBe(6);
   });
 });

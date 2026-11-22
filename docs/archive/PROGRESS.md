@@ -1,3 +1,9 @@
+> **[Archived Historical Baseline Document]**
+> `PROGRESS.md` is preserved in `docs/archive/` as a historical engineering baseline record from earlier development milestones.
+> For current architecture, configuration, tooling, and verification gates, refer to [README.md](../../README.md) and [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
+---
+
 # 实施进度 (PROGRESS.md)
 
 | 任务号 | 描述 | 新增/修改文件 | 测试状态 | 完成时间 |

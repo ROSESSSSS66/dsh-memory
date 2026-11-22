@@ -1,37 +1,14 @@
 import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import type { JobRecord, JobHandler, JobHandlerResult } from './types.js';
+import type { JobKind, JobRecord, JobHandler, JobHandlerResult } from './types.js';
 import { redactSecrets } from '../core/privacy.js';
 
-const jobHandlers = new Map<string, JobHandler>();
-let isJobRunning = false;
-let activeJobController: AbortController | null = null;
-let activeJobPromise: Promise<boolean> | null = null;
+export type AbortReason = 'timeout' | 'shutdown';
 
-export function abortRunningJob(): void {
-  if (activeJobController) {
-    try { activeJobController.abort(); } catch {}
-  }
-}
-
-export async function abortAndAwaitRunningJob(): Promise<void> {
-  abortRunningJob();
-  if (activeJobPromise) {
-    try { await activeJobPromise; } catch {}
-  }
-}
-
-export function registerJobHandler(kind: string, handler: JobHandler): void {
-  jobHandlers.set(kind, handler);
-}
-
-export function unregisterJobHandler(kind: string): void {
-  jobHandlers.delete(kind);
-}
-
-export function isRunnerBusy(): boolean {
-  return isJobRunning;
-}
+const MAX_JOB_ATTEMPTS = 3;
+const MAX_SKIP_DEFERRALS = 14;
+const MIN_STALE_RUNNING_MS = 300_000;
+const SKIP_COUNT_META_PREFIX = 'job_skip_count:';
 
 export function getNextDayStartMs(now: number = Date.now()): number {
   const d = new Date(now);
@@ -45,123 +22,325 @@ export function getBackoffMs(attempts: number): number {
   return 600_000; // 10 分钟
 }
 
+function readSkipCount(db: Db, jobId: number): number {
+  try {
+    const row = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [
+      `${SKIP_COUNT_META_PREFIX}${jobId}`,
+    ]);
+    const parsed = row ? parseInt(row.value, 10) : 0;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeSkipCount(db: Db, jobId: number, count: number): void {
+  try {
+    db.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
+      `${SKIP_COUNT_META_PREFIX}${jobId}`,
+      String(count),
+    ]);
+  } catch {}
+}
+
+function clearSkipCount(db: Db, jobId: number): void {
+  try {
+    db.run('DELETE FROM meta WHERE key = ?', [`${SKIP_COUNT_META_PREFIX}${jobId}`]);
+  } catch {}
+}
+
+type ClaimOutcome =
+  | { kind: 'none' }
+  | { kind: 'no_handler' }
+  | { kind: 'claimed'; job: JobRecord; handler: JobHandler; newAttempts: number };
+
 /**
- * 运行单个就绪任务
- * 严格保证：全局互斥、超时中止且等待收敛、预算不足跳过次日恢复、非瞬时错误不重试
+ * 实例隔离的离线任务执行器：支持多插件实例/多测试完全隔离，
+ * 具备原子抢占、僵尸 running 回收、超时/优雅关闭区分、硬关闭看门狗及跳过次数上限控制。
  */
-export async function runNextJob(
-  db: Db,
-  cfg: PluginConfig,
-  now: number = Date.now()
-): Promise<boolean> {
-  // 全局互斥锁检查：同一时刻只运行 1 个离线任务
-  if (isJobRunning) {
-    return false;
+export class JobRunner {
+  private handlers = new Map<JobKind, JobHandler>();
+  private isRunning = false;
+  private activeController: AbortController | null = null;
+  private activePromise: Promise<boolean> | null = null;
+  private abortReason: AbortReason | null = null;
+
+  public registerHandler(kind: JobKind, handler: JobHandler): void {
+    this.handlers.set(kind, handler);
   }
 
-  isJobRunning = true;
-  const runInternal = async (): Promise<boolean> => {
-  try {
-    // 查找下一个就绪任务 (queued 且 next_eligible_at <= now，或 skipped 且到了次日恢复时间)
-    const job = db.get<JobRecord>(
-      `SELECT * FROM jobs
-       WHERE (status = 'queued' AND next_eligible_at <= ?)
-          OR (status = 'skipped' AND next_eligible_at <= ?)
-       ORDER BY created_at ASC
-       LIMIT 1`,
-      [now, now]
-    );
+  public unregisterHandler(kind: JobKind): void {
+    this.handlers.delete(kind);
+  }
 
-    if (!job) {
+  public clearHandlers(): void {
+    this.handlers.clear();
+  }
+
+  public isBusy(): boolean {
+    return this.isRunning;
+  }
+
+  private getAbortReason(): AbortReason | null {
+    return this.abortReason;
+  }
+
+  public abortRunningJob(reason: AbortReason = 'shutdown'): void {
+    if (!this.isRunning) return;
+    if (!this.abortReason) {
+      this.abortReason = reason;
+    }
+    if (this.activeController && !this.activeController.signal.aborted) {
+      try {
+        this.activeController.abort(reason);
+      } catch {}
+    }
+  }
+
+  public async abortAndAwaitRunningJob(
+    graceMs: number = 10_000,
+    reason: AbortReason = 'shutdown'
+  ): Promise<void> {
+    this.abortRunningJob(reason);
+    const pending = this.activePromise;
+    if (!pending) return;
+
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        pending.catch(() => {}),
+        new Promise<void>((resolve) => {
+          watchdog = setTimeout(resolve, Math.max(0, graceMs));
+          watchdog.unref?.();
+        }),
+      ]);
+    } finally {
+      if (watchdog !== undefined) {
+        clearTimeout(watchdog);
+      }
+    }
+  }
+
+  /**
+   * 运行单个就绪任务
+   * 严格保证：实例内互斥、事务内原子抢占、超时中止且等待收敛、
+   * 优雅关闭放回 queued、预算不足跳过不消耗失败重试次数、非瞬时错误不重试。
+   */
+  public runNextJob(db: Db, cfg: PluginConfig, customNow?: number): Promise<boolean> {
+    if (this.isRunning) {
+      return Promise.resolve(false);
+    }
+
+    this.isRunning = true;
+    this.abortReason = null;
+
+    // 经由 Promise.resolve().then(...) 确保 activePromise 赋值永远先于 executeNextJob 与 finally 执行
+    const tracked: Promise<boolean> = Promise.resolve()
+      .then(() => this.executeNextJob(db, cfg, customNow))
+      .finally(() => {
+        if (this.activePromise === tracked) {
+          this.activePromise = null;
+          this.isRunning = false;
+          this.abortReason = null;
+        }
+      });
+
+    this.activePromise = tracked;
+    return tracked;
+  }
+
+  private async executeNextJob(
+    db: Db,
+    cfg: PluginConfig,
+    customNow?: number
+  ): Promise<boolean> {
+    if (this.abortReason === 'shutdown') {
       return false;
     }
 
-    const handler = jobHandlers.get(job.kind);
-    if (!handler) {
-      // 找不到 handler，标记为 failed
+    const hasCustomNow = customNow !== undefined;
+    const now = customNow ?? Date.now();
+    const timeoutMs = cfg.jobTimeoutMs || 120_000;
+    const staleThresholdMs = Math.max(timeoutMs * 2, MIN_STALE_RUNNING_MS);
+
+    // 1. 事务内回收僵尸 running 任务并原子抢占下一条就绪任务
+    const claimed: ClaimOutcome = db.transaction(() => {
+      const staleCutoff = now - staleThresholdMs;
+
       db.run(
-        `UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`,
-        [`no_handler_registered_for_kind_${job.kind}`, now, job.id]
+        `UPDATE jobs
+         SET status = 'queued', started_at = NULL, next_eligible_at = 0, error = 'reclaimed_stale_running'
+         WHERE status = 'running' AND started_at IS NOT NULL AND started_at < ? AND attempts < ?`,
+        [staleCutoff, MAX_JOB_ATTEMPTS]
       );
+      db.run(
+        `UPDATE jobs
+         SET status = 'failed', finished_at = ?, error = 'stale_running_max_attempts'
+         WHERE status = 'running' AND started_at IS NOT NULL AND started_at < ? AND attempts >= ?`,
+        [now, staleCutoff, MAX_JOB_ATTEMPTS]
+      );
+
+      const job = db.get<JobRecord>(
+        `SELECT * FROM jobs
+         WHERE (status = 'queued' AND next_eligible_at <= ?)
+            OR (status = 'skipped' AND next_eligible_at <= ?)
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1`,
+        [now, now]
+      );
+
+      if (!job) {
+        return { kind: 'none' };
+      }
+
+      const handler = this.handlers.get(job.kind);
+      if (!handler) {
+        db.run(
+          `UPDATE jobs
+           SET status = 'failed', error = ?, finished_at = ?
+           WHERE id = ? AND status IN ('queued', 'skipped')`,
+          [`no_handler_registered_for_kind_${job.kind}`, now, job.id]
+        );
+        clearSkipCount(db, job.id);
+        return { kind: 'no_handler' };
+      }
+
+      const claimRes = db.run(
+        `UPDATE jobs
+         SET status = 'running', started_at = ?, attempts = attempts + 1
+         WHERE id = ? AND status IN ('queued', 'skipped')`,
+        [now, job.id]
+      );
+
+      if (Number(claimRes.changes) !== 1) {
+        return { kind: 'none' };
+      }
+
+      return {
+        kind: 'claimed',
+        job,
+        handler,
+        newAttempts: job.attempts + 1,
+      };
+    });
+
+    if (claimed.kind === 'none') {
+      return false;
+    }
+    if (claimed.kind === 'no_handler') {
       return true;
     }
 
-    // 标记为 running 并递增 attempts
-    const newAttempts = job.attempts + 1;
-    db.run(
-      `UPDATE jobs SET status = 'running', started_at = ?, attempts = ? WHERE id = ?`,
-      [now, newAttempts, job.id]
-    );
+    const { job, handler, newAttempts } = claimed;
 
-    // 设置执行超时 (默认 120s)
-    const timeoutMs = cfg.jobTimeoutMs || 120_000;
+    // 2. 设置执行超时 (默认 120s)，并传递绝对 deadline 给 handler
+    const jobDeadline = now + timeoutMs;
     const controller = new AbortController();
-    activeJobController = controller;
+    this.activeController = controller;
     let isTimedOut = false;
+
     const timer = setTimeout(() => {
       isTimedOut = true;
-      controller.abort();
+      if (!this.abortReason) {
+        this.abortReason = 'timeout';
+      }
+      try {
+        controller.abort('timeout');
+      } catch {}
     }, timeoutMs);
+    timer.unref?.();
 
-    let result: JobHandlerResult;
+    let result: JobHandlerResult = { action: 'failed', error: 'unknown_handler_error' };
     try {
-      // 执行任务并等待其完全收敛
-      result = await handler(job, controller.signal);
+      result = await handler(job, controller.signal, jobDeadline);
     } catch (err: any) {
       const errMsg = err?.message || 'unknown_handler_error';
-      if (isTimedOut || controller.signal.aborted) {
+      const abortReason = this.getAbortReason();
+      if (abortReason === 'shutdown' && !isTimedOut) {
+        // 优雅关闭在下方统一将任务放回 queued
+      } else if (isTimedOut || abortReason === 'timeout' || controller.signal.aborted) {
         result = { action: 'failed', error: 'job_timeout_aborted', nonRetryable: true };
       } else {
-        // 判断是否为不可重试的解析/schema错误
+        const lowerErr = errMsg.toLowerCase();
         const isNonRetryable =
-          errMsg.includes('parse') ||
-          errMsg.includes('schema') ||
-          errMsg.includes('invalid') ||
-          errMsg.includes('quote');
+          err instanceof SyntaxError ||
+          lowerErr.includes('parse') ||
+          lowerErr.includes('schema') ||
+          lowerErr.includes('invalid') ||
+          lowerErr.includes('quote');
         result = { action: 'failed', error: errMsg, nonRetryable: isNonRetryable };
       }
     } finally {
       clearTimeout(timer);
-      if (activeJobController === controller) activeJobController = null;
+      if (this.activeController === controller) {
+        this.activeController = null;
+      }
     }
 
-    if (isTimedOut || controller.signal.aborted) {
+    // 3. 优雅关闭中断：放回 queued 且恢复 attempts，不将任务误判为永久失败
+    const finalAbortReason = this.getAbortReason();
+    if (finalAbortReason === 'shutdown' && !isTimedOut) {
+      try {
+        db.run(
+          `UPDATE jobs
+           SET status = 'queued', attempts = ?, started_at = NULL, next_eligible_at = 0
+           WHERE id = ? AND status = 'running'`,
+          [job.attempts, job.id]
+        );
+      } catch {}
+      return true;
+    }
+
+    if (isTimedOut || finalAbortReason === 'timeout' || controller.signal.aborted) {
       result = { action: 'failed', error: 'job_timeout_aborted', nonRetryable: true };
     }
 
-    const finishedTime = Date.now();
+    // 4. 时钟一致性：若调用方显式注入 now 则沿用注入时钟，否则取单调不倒退的当前时钟
+    const finishedTime = hasCustomNow ? now : Math.max(now, Date.now());
 
-    // 根据执行结果更新 job 状态
+    // 5. 根据执行结果更新 job 状态
     if (result.action === 'done') {
       db.run(
         `UPDATE jobs SET status = 'done', error = NULL, finished_at = ? WHERE id = ?`,
         [finishedTime, job.id]
       );
+      clearSkipCount(db, job.id);
     } else if (result.action === 'skipped') {
       const cleanErr = redactSecrets(result.reason).text;
       if (result.nonRetryable) {
-        // 终态跳过：保留原因备查并收尾，否则会每天被重新取出执行且没有次数上限
+        // 终态跳过：保留原因备查并收尾，不消耗失败重试计数
         db.run(
-          `UPDATE jobs SET status = 'done', error = ?, finished_at = ? WHERE id = ?`,
-          [cleanErr, finishedTime, job.id]
+          `UPDATE jobs SET status = 'done', attempts = ?, error = ?, finished_at = ? WHERE id = ?`,
+          [job.attempts, cleanErr, finishedTime, job.id]
         );
+        clearSkipCount(db, job.id);
       } else {
-        const nextEligible = result.nextEligibleAt ?? getNextDayStartMs(finishedTime);
-        db.run(
-          `UPDATE jobs SET status = 'skipped', next_eligible_at = ?, error = ?, finished_at = ? WHERE id = ?`,
-          [nextEligible, cleanErr, finishedTime, job.id]
-        );
+        const deferrals = readSkipCount(db, job.id) + 1;
+        if (deferrals >= MAX_SKIP_DEFERRALS) {
+          db.run(
+            `UPDATE jobs SET status = 'failed', attempts = ?, error = ?, finished_at = ? WHERE id = ?`,
+            [job.attempts, `max_deferrals_exceeded:${cleanErr}`, finishedTime, job.id]
+          );
+          clearSkipCount(db, job.id);
+        } else {
+          const nextEligible = result.nextEligibleAt ?? getNextDayStartMs(finishedTime);
+          // 跳过（如每日预算耗尽）还原 attempts，避免连续数日跳过耗尽 3 次真实失败重试额度
+          db.run(
+            `UPDATE jobs SET status = 'skipped', attempts = ?, next_eligible_at = ?, error = ?, finished_at = ? WHERE id = ?`,
+            [job.attempts, nextEligible, cleanErr, finishedTime, job.id]
+          );
+          writeSkipCount(db, job.id, deferrals);
+        }
       }
     } else if (result.action === 'failed') {
       const cleanErr = redactSecrets(result.error).text;
-      // 如果不可重试或已达到最大尝试次数 (最多 3 次)
-      if (result.nonRetryable || newAttempts >= 3) {
+      if (result.nonRetryable || newAttempts >= MAX_JOB_ATTEMPTS) {
         db.run(
           `UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`,
           [cleanErr, finishedTime, job.id]
         );
+        clearSkipCount(db, job.id);
       } else {
-        // 退避并重新排队
         const backoff = getBackoffMs(newAttempts);
         db.run(
           `UPDATE jobs SET status = 'queued', next_eligible_at = ?, error = ?, finished_at = ? WHERE id = ?`,
@@ -170,11 +349,12 @@ export async function runNextJob(
       }
     } else if (result.action === 'retry') {
       const cleanErr = redactSecrets(result.error).text;
-      if (newAttempts >= 3) {
+      if (newAttempts >= MAX_JOB_ATTEMPTS) {
         db.run(
           `UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`,
           [cleanErr, finishedTime, job.id]
         );
+        clearSkipCount(db, job.id);
       } else {
         const backoff = getBackoffMs(newAttempts);
         db.run(
@@ -185,11 +365,42 @@ export async function runNextJob(
     }
 
     return true;
-  } finally {
-    isJobRunning = false;
-    activeJobPromise = null;
   }
-  };
-  activeJobPromise = runInternal();
-  return activeJobPromise;
+}
+
+export const defaultJobRunner = new JobRunner();
+
+export function registerJobHandler(kind: JobKind, handler: JobHandler): void {
+  defaultJobRunner.registerHandler(kind, handler);
+}
+
+export function unregisterJobHandler(kind: JobKind): void {
+  defaultJobRunner.unregisterHandler(kind);
+}
+
+export function clearJobHandlers(): void {
+  defaultJobRunner.clearHandlers();
+}
+
+export function isRunnerBusy(): boolean {
+  return defaultJobRunner.isBusy();
+}
+
+export function abortRunningJob(reason: AbortReason = 'shutdown'): void {
+  defaultJobRunner.abortRunningJob(reason);
+}
+
+export async function abortAndAwaitRunningJob(
+  graceMs: number = 10_000,
+  reason: AbortReason = 'shutdown'
+): Promise<void> {
+  return defaultJobRunner.abortAndAwaitRunningJob(graceMs, reason);
+}
+
+export async function runNextJob(
+  db: Db,
+  cfg: PluginConfig,
+  now?: number
+): Promise<boolean> {
+  return defaultJobRunner.runNextJob(db, cfg, now);
 }

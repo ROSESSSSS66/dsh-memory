@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import { DEFAULTS, type PluginConfig } from '../../src/config.js';
 import { runReflectJob } from '../../src/evolution/reflector.js';
@@ -26,6 +26,10 @@ describe('Reflector Job (M3-T4)', () => {
         apiKeyEnv: '',
       },
     };
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   it('runs reflect job and produces failure candidate according to Appendix B-2', async () => {
@@ -290,5 +294,72 @@ describe('Reflector Job (M3-T4)', () => {
     const res = await runReflectJob(db, excludedCfg, job, undefined, mockFetch);
     expect(res).toMatchObject({ action: 'failed', error: 'workspace_excluded' });
     expect(fetched).toBe(false);
+  });
+
+  it('uses triggerSeq when turn is omitted (without synthesizing turn=0 pulling turn 1) and scopes failure_sigs by workspace_id', async () => {
+    // Turn 1 unrelated event (seq=1), 20 intervening events (seq=2..21), and later failure at seq=50 (turn IS NULL)
+    db.run(
+      `INSERT INTO raw_events (session_id, seq, workspace_id, type, time, turn, role, origin_kind, tool_name, is_error, text, processed)
+       VALUES ('s_trig', 1, 'ws_a', 'user/message', 1000, 1, 'user', 'user', NULL, 0, 'UNRELATED_TURN_1_NOISE', 0)`
+    );
+    for (let s = 2; s <= 21; s++) {
+      db.run(
+        `INSERT INTO raw_events (session_id, seq, workspace_id, type, time, turn, role, origin_kind, tool_name, is_error, text, processed)
+         VALUES ('s_trig', ?, 'ws_a', 'assistant/message', ?, NULL, 'assistant', 'assistant', NULL, 0, ?, 0)`,
+        [s, 1000 + s * 10, `intermediate step ${s}`]
+      );
+    }
+    db.run(
+      `INSERT INTO raw_events (session_id, seq, workspace_id, type, time, turn, role, origin_kind, tool_name, is_error, text, processed)
+       VALUES ('s_trig', 50, 'ws_a', 'tool/result', 5000, NULL, 'tool', 'tool', 'bash', 1, 'Error: EACCES permission denied /opt/app', 0)`
+    );
+
+    // Same sig in two workspaces: ws_a (allowed) and ws_excluded (excluded)
+    db.run(
+      `INSERT INTO failure_sigs (sig, workspace_id, count, sessions, last_seq_ref, updated_at)
+       VALUES
+       ('bash:EACCES', 'ws_a', 2, '["s_trig"]', 's_trig:50', 5000),
+       ('bash:EACCES', 'ws_excluded', 5, '["s_priv"]', 's_priv:10', 9000)`
+    );
+
+    let sentUserPrompt = '';
+    const mockFetch: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      sentUserPrompt = String(body.messages?.[1]?.content || '');
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ items: [] }) } }],
+          usage: { prompt_tokens: 100, completion_tokens: 10 },
+        }),
+        { status: 200 }
+      );
+    };
+
+    const scopedCfg: PluginConfig = {
+      ...cfg,
+      excludeWorkspaces: ['ws_excluded'],
+    };
+
+    const job: JobRecord = {
+      id: 5,
+      kind: 'reflect',
+      key: 'reflect:failure_sig:test',
+      payload: JSON.stringify({
+        sig: 'bash:EACCES',
+        workspaceId: 'ws_a',
+      }),
+      status: 'running',
+      attempts: 1,
+      error: null,
+      created_at: 5000,
+      started_at: 5010,
+      finished_at: null,
+      next_eligible_at: 0,
+    };
+
+    const res = await runReflectJob(db, scopedCfg, job, undefined, mockFetch);
+    expect(res.action).toBe('done');
+    expect(sentUserPrompt).toContain('EACCES permission denied');
+    expect(sentUserPrompt).not.toContain('UNRELATED_TURN_1_NOISE');
   });
 });

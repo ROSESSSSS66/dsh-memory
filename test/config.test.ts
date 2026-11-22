@@ -57,42 +57,46 @@ describe('Plugin entry exports', () => {
     expect(inject).toContain('systemPrompt');
     expect(inject).toContain('sessionProjections');
     expect(inject).toContain('tools');
-    expect(inject).toContain('commands');
+    expect(inject).not.toContain('commands');
     expect(typeof apply).toBe('function');
     expect(Config).toBeDefined();
   });
 
-  it('should gracefully handle disabled plugin in apply', () => {
+  it('should gracefully handle disabled plugin in apply', async () => {
     let called = false;
-    apply({} as any, { enabled: false });
+    await apply({ on: () => { called = true; } } as any, { enabled: false });
     expect(called).toBe(false);
   });
 
   it('should persist and load config override from meta table', () => {
     const db = openDb(':memory:');
-    const initial = loadConfigFromDb(db, DEFAULTS);
-    expect(initial.offlineLLM.model).toBe(DEFAULTS.offlineLLM.model);
+    try {
+      const initial = loadConfigFromDb(db, DEFAULTS);
+      expect(initial.offlineLLM.model).toBe(DEFAULTS.offlineLLM.model);
 
-    // Save partial patch
-    const saved = saveConfigToDb(db, {
-      offlineLLM: {
-        useDshLlm: false,
-        baseURL: 'https://api.deepseek.com/v1',
-        model: 'deepseek-chat',
-        apiKeyEnv: 'DEEPSEEK_API_KEY',
-        apiKey: 'sk-123456',
-      },
-      dailyLLMCalls: 80,
-    });
-    expect(saved.offlineLLM.baseURL).toBe('https://api.deepseek.com/v1');
-    expect(saved.offlineLLM.apiKey).toBe('sk-123456');
-    expect(saved.dailyLLMCalls).toBe(80);
+      // Save partial patch
+      const saved = saveConfigToDb(db, {
+        offlineLLM: {
+          useDshLlm: false,
+          baseURL: 'https://api.deepseek.com/v1',
+          model: 'deepseek-chat',
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+          apiKey: 'sk-123456',
+        },
+        dailyLLMCalls: 80,
+      });
+      expect(saved.offlineLLM.baseURL).toBe('https://api.deepseek.com/v1');
+      expect(saved.offlineLLM.apiKey).toBe('sk-123456');
+      expect(saved.dailyLLMCalls).toBe(80);
 
-    // Load in fresh call
-    const loaded = loadConfigFromDb(db, DEFAULTS);
-    expect(loaded.offlineLLM.baseURL).toBe('https://api.deepseek.com/v1');
-    expect(loaded.offlineLLM.apiKey).toBe('sk-123456');
-    expect(loaded.dailyLLMCalls).toBe(80);
-    expect(loaded.hardBudgetTokens).toBe(DEFAULTS.hardBudgetTokens);
+      // Load in fresh call
+      const loaded = loadConfigFromDb(db, DEFAULTS);
+      expect(loaded.offlineLLM.baseURL).toBe('https://api.deepseek.com/v1');
+      expect(loaded.offlineLLM.apiKey).toBe('sk-123456');
+      expect(loaded.dailyLLMCalls).toBe(80);
+      expect(loaded.hardBudgetTokens).toBe(DEFAULTS.hardBudgetTokens);
+    } finally {
+      db.close();
+    }
   });
 });

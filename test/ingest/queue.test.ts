@@ -253,4 +253,111 @@ describe('M2-T1: queue.ts & session-listener.ts tests', () => {
 
     await queue.close();
   });
+
+  it('IngestQueue updates last_used_at monotonically and counts CommittedInjection items cleanly', async () => {
+    db.run(
+      `INSERT INTO memories (
+        id, type, status, content, summary, scope, origin_kinds, source_kind,
+        confidence, utility, token_cost, summary_cost, hash, created_at, updated_at, last_used_at
+      ) VALUES ('m_inj_test_0001', 'semantic', 'active', 'test mem', 'test', 'user', '["user"]', 'user',
+        0.9, 0.5, 10, 5, 'hash_inj_001', 1000, 1000, 5000)`
+    );
+    db.run(
+      `INSERT INTO turn_metrics (session_id, turn, query_tokens, candidates, injected, inject_tokens, latency_ms, correction, strategy_v, created_at)
+       VALUES ('s_inj', 1, 10, 1, 0, 0, 1.0, 0, 1, 1000)`
+    );
+
+    const queue = new IngestQueue(db, DEFAULTS, { batchSize: 100, flushIntervalMs: 10000 });
+    // Push an out-of-order older timestamp (3000 < existing 5000)
+    queue.push({
+      sessionId: 's_inj',
+      turn: 1,
+      time: 3000,
+      strategyVersion: 1,
+      items: [{ ref: { id: 'm_inj_test_0001', contentRev: 1 }, rank: 1, tokens: 12, form: 'content' }],
+    });
+
+    const count1 = await queue.flush();
+    expect(count1).toBe(1);
+
+    const mem1 = db.get<{ use_count: number; last_used_at: number }>(
+      'SELECT use_count, last_used_at FROM memories WHERE id = ?',
+      ['m_inj_test_0001']
+    );
+    expect(mem1?.use_count).toBe(1);
+    expect(mem1?.last_used_at).toBe(5000); // never moves backwards
+
+    // Push a newer timestamp on turn 2
+    queue.push({
+      sessionId: 's_inj',
+      turn: 2,
+      time: 9000,
+      strategyVersion: 1,
+      items: [{ ref: { id: 'm_inj_test_0001', contentRev: 1 }, rank: 1, tokens: 12, form: 'content' }],
+    });
+    const count2 = await queue.flush();
+    expect(count2).toBe(1);
+
+    const mem2 = db.get<{ use_count: number; last_used_at: number }>(
+      'SELECT use_count, last_used_at FROM memories WHERE id = ?',
+      ['m_inj_test_0001']
+    );
+    expect(mem2?.use_count).toBe(2);
+    expect(mem2?.last_used_at).toBe(9000);
+
+    await queue.close();
+  });
+
+  it('IngestQueue triggers onJobEnqueued after commit when rules enqueue jobs and schedules threshold flush asynchronously', async () => {
+    let wakeups = 0;
+    const queue = new IngestQueue(db, DEFAULTS, {
+      batchSize: 2,
+      flushIntervalMs: 60000,
+      onJobEnqueued: () => {
+        wakeups++;
+      },
+    });
+
+    queue.push({
+      session_id: 's_wake',
+      seq: 1,
+      workspace_id: 'ws_wake',
+      type: 'user/message',
+      time: 1000,
+      turn: 1,
+      role: 'user',
+      origin_kind: 'user',
+      is_error: 0,
+      text: 'Hello',
+      processed: 0,
+    });
+    queue.push({
+      session_id: 's_wake',
+      seq: 2,
+      workspace_id: 'ws_wake',
+      type: 'user/message',
+      time: 2000,
+      turn: 2,
+      role: 'user',
+      origin_kind: 'user',
+      is_error: 0,
+      text: '不对，搞错了，重来',
+      processed: 0,
+    });
+
+    // Threshold hit (batchSize=2) must NOT synchronously block push()
+    expect(queue.size()).toBe(2);
+    expect(wakeups).toBe(0);
+
+    // Microtask runs threshold flush asynchronously
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(queue.size()).toBe(0);
+    expect(wakeups).toBe(1);
+    const job = db.get<{ kind: string; key: string }>("SELECT kind, key FROM jobs WHERE kind = 'reflect'");
+    expect(job?.key).toBe('reflect:s_wake:1');
+
+    await queue.close();
+  });
 });

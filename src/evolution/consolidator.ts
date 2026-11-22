@@ -1,17 +1,18 @@
-import type { Db, MemoryRecord } from '../types.js';
+import { createHash } from 'node:crypto';
+import { hydrateMemoryRow, type Db, type MemoryRecord, type MemoryRow } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import type { EvidenceLedger } from './types.js';
 import { tokenSet, jaccard, extractEntities } from '../core/text.js';
 import { redactSecrets, memoryWorkspaceIds, canSendMemoriesOffline } from '../core/privacy.js';
-import { PROMPT_CONSOLIDATE } from './prompts.js';
+import { workspaceId as normalizeWsId, resolveWorkspaceCwd } from '../core/scope.js';
+import { sourceKindToOriginKind } from '../core/trust.js';
+import { PROMPT_CONSOLIDATE, packPromptWithinBudget } from './prompts.js';
 import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
 import { upsertCandidate } from '../core/writer.js';
 
-import { workspaceId as normalizeWsId } from '../core/scope.js';
-import { createHash } from 'node:crypto';
-
 const MAX_CLUSTER_RECORDS = 500;
+const MAX_SINGLE_CLUSTER_SIZE = 10;
 
 export interface SourceSnapshot {
   id: string;
@@ -32,8 +33,8 @@ export interface MemoryCluster {
 }
 
 /**
- * 在 workspace 内对 active episodic/failure 记忆聚类并计算连通分量
- * 聚类条件：共享 >= 1 个实体 且 Jaccard >= 0.35
+ * 在 workspace 内对 active 且非负效用的 episodic/failure 记忆聚类并计算有界连通分量
+ * 聚类条件：utility >= 0.5、共享 >= 1 个实体 且 Jaccard >= 0.35；单聚类上限 10 条防止无界单链。
  */
 export function findConsolidationClusters(
   db: Db,
@@ -41,17 +42,21 @@ export function findConsolidationClusters(
   cfg: PluginConfig
 ): MemoryCluster[] {
   const wsId = normalizeWsId(workspaceId);
-  // 只聚类最近的 MAX_CLUSTER_RECORDS 条，保证单次计算有界
-  const records = db.all<MemoryRecord>(
-    `SELECT * FROM (
-       SELECT * FROM memories
-       WHERE scope = 'workspace' AND workspace_id = ?
-         AND status = 'active' AND type IN ('episodic', 'failure')
-       ORDER BY created_at DESC
-       LIMIT ${MAX_CLUSTER_RECORDS}
-     ) ORDER BY created_at ASC`,
-    [wsId]
-  );
+  // 只聚类最近的 MAX_CLUSTER_RECORDS 条非负效用记录，保证单次计算有界
+  const records = db
+    .all<MemoryRow>(
+      `SELECT * FROM (
+         SELECT * FROM memories
+         WHERE scope = 'workspace' AND workspace_id = ?
+           AND status = 'active'
+           AND type IN ('episodic', 'failure')
+           AND utility >= 0.5
+         ORDER BY created_at DESC
+         LIMIT ${MAX_CLUSTER_RECORDS}
+       ) ORDER BY created_at ASC`,
+      [wsId]
+    )
+    .map((r) => hydrateMemoryRow(r));
 
   if (records.length < 3) {
     return [];
@@ -66,7 +71,7 @@ export function findConsolidationClusters(
     recordEntities.set(m.id, extractEntities(m.content));
   }
 
-  // 2. 建图并寻找连通分量 (BFS)
+  // 2. 建图并寻找有界连通分量 (BFS，单聚类上限 MAX_SINGLE_CLUSTER_SIZE = 10)
   const adj = new Map<string, string[]>();
   const recordById = new Map<string, MemoryRecord>();
   for (const m of records) {
@@ -104,24 +109,28 @@ export function findConsolidationClusters(
     }
   }
 
-  const visited = new Set<string>();
+  const assigned = new Set<string>();
   const rawClusters: MemoryRecord[][] = [];
 
   for (const m of records) {
-    if (visited.has(m.id)) continue;
+    if (assigned.has(m.id)) continue;
 
     const component: MemoryRecord[] = [];
     const queue: string[] = [m.id];
-    visited.add(m.id);
+    const inQueue = new Set<string>([m.id]);
 
-    while (queue.length > 0) {
+    while (queue.length > 0 && component.length < MAX_SINGLE_CLUSTER_SIZE) {
       const currId = queue.shift()!;
+      if (assigned.has(currId)) continue;
+      assigned.add(currId);
       const currMem = recordById.get(currId)!;
       component.push(currMem);
 
+      if (component.length >= MAX_SINGLE_CLUSTER_SIZE) break;
+
       for (const neighborId of adj.get(currId) || []) {
-        if (!visited.has(neighborId)) {
-          visited.add(neighborId);
+        if (!assigned.has(neighborId) && !inQueue.has(neighborId)) {
+          inQueue.add(neighborId);
           queue.push(neighborId);
         }
       }
@@ -139,7 +148,7 @@ export function findConsolidationClusters(
     if (result.length >= maxClusters) break;
 
     // 检查在 injections 中是否存在 >= 3 个不同 session 的 used=1 AND outcome > 0.5 成功证据
-    const memIds = comp.map(r => r.id);
+    const memIds = comp.map((r) => r.id);
     const placeholders = memIds.map(() => '?').join(',');
     const sessionRows = db.all<{ session_id: string }>(
       `SELECT DISTINCT session_id FROM injections
@@ -148,18 +157,22 @@ export function findConsolidationClusters(
       memIds
     );
 
-    const distinctSessions = sessionRows.map(r => r.session_id);
+    const distinctSessions = sessionRows.map((r) => r.session_id);
 
     // 必须满足至少 3 个独立 session
     if (distinctSessions.length < 3) {
       continue;
     }
 
-    // 检查该组记忆是否已全部整合生成过衍生记忆，避免重复整合同一聚类
+    // 仅统计存活的非 Hindsight 启发式模型衍生关系，防止 hindsight.model.* 饿死 LLM 规程整合
     const alreadyDerived = db.get<{ cnt: number }>(
-      `SELECT COUNT(DISTINCT to_id) as cnt
-       FROM memory_relations
-       WHERE rel = 'derived_from' AND to_id IN (${placeholders})`,
+      `SELECT COUNT(DISTINCT r.to_id) as cnt
+       FROM memory_relations r
+       JOIN memories p ON p.id = r.from_id
+       WHERE r.rel = 'derived_from'
+         AND r.to_id IN (${placeholders})
+         AND p.status IN ('active', 'candidate', 'frozen')
+         AND COALESCE(p.slot_key, '') NOT LIKE 'hindsight.model.%'`,
       memIds
     );
     if ((alreadyDerived?.cnt ?? 0) >= memIds.length) {
@@ -167,7 +180,7 @@ export function findConsolidationClusters(
     }
 
     // 冻结源记录快照
-    const snapshots: SourceSnapshot[] = comp.map(r => ({
+    const snapshots: SourceSnapshot[] = comp.map((r) => ({
       id: r.id,
       content_rev: r.content_rev,
       hash: r.hash,
@@ -178,7 +191,8 @@ export function findConsolidationClusters(
     }));
 
     const sortedIds = [...memIds].sort();
-    const clusterKey = `cluster:${wsId}:${sortedIds.join(',')}`;
+    const idsHash = createHash('sha256').update(sortedIds.join(',')).digest('hex').slice(0, 16);
+    const clusterKey = `cluster:${wsId}:${idsHash}`;
 
     result.push({
       clusterKey,
@@ -224,6 +238,19 @@ export interface ConsolidateClusterResult {
   error?: string;
 }
 
+interface ConsolidateUnit {
+  memory: MemoryRecord;
+  snapshot: SourceSnapshot;
+  renderedItem: string;
+  sources: Array<{
+    session_id: string;
+    seq: number;
+    kind: string;
+    excerpt: string;
+    created_at: number;
+  }>;
+}
+
 /**
  * 整合单组记忆分量为一条程序性记忆 (procedural candidate)
  */
@@ -247,27 +274,21 @@ export async function consolidateCluster(
     };
   }
 
-  // 2. 组装输入与证据
-  const evidenceLedger: EvidenceLedger = new Map();
-  let currentSeq = 1;
-  const itemBlocks: string[] = [];
-  const evidenceLines: string[] = [];
-
-  // 获取各记忆的 sources 实际 excerpt
+  // 2. 收集各记忆块及其脱敏证据，按统一输入预算打包
+  const units: ConsolidateUnit[] = [];
   for (let i = 0; i < cluster.memories.length; i++) {
     const m = cluster.memories[i];
-    itemBlocks.push(
-      `--- item ${i + 1} ---
-id: ${m.id}
-type: ${m.type}
-confidence: ${m.confidence}
-utility: ${m.utility}
-created: ${new Date(m.created_at).toISOString()}
-valid_from: ${m.valid_from ? new Date(m.valid_from).toISOString() : 'none'}
-text: ${m.content}`
-    );
+    const snap = cluster.snapshots[i] ?? {
+      id: m.id,
+      content_rev: m.content_rev,
+      hash: m.hash,
+      content: m.content,
+      summary: m.summary,
+      status: m.status,
+      valid_from: m.valid_from ?? null,
+    };
 
-    const sources = db.all<{
+    const srcRows = db.all<{
       session_id: string;
       seq: number;
       kind: string;
@@ -280,32 +301,91 @@ text: ${m.content}`
       [m.id, m.content_rev]
     );
 
-    for (const src of sources) {
+    const sanitizedSources = srcRows.map((src) => {
       const rawExcerpt = src.excerpt || m.summary || m.content.slice(0, 80);
-      const excerpt = redactSecrets(rawExcerpt).text;
-      const originKind =
-        src.kind === 'tool_result' || src.kind === 'tool'
-          ? 'tool'
-          : src.kind === 'web'
-            ? 'web'
-            : src.kind === 'assistant_msg' || src.kind === 'assistant'
-              ? 'assistant'
-              : src.kind === 'system_msg' || src.kind === 'system'
-                ? 'system'
-                : 'user';
-      evidenceLines.push(`[E#${currentSeq}] (${src.session_id}#${src.seq}) ${excerpt}`);
-      evidenceLedger.set(currentSeq, {
-        seq: currentSeq,
+      return {
         session_id: src.session_id,
-        original_seq: src.seq,
+        seq: src.seq,
         kind: src.kind,
-        redacted_text: excerpt,
-        origin_kinds: [originKind],
-        time: src.created_at,
-      });
-      currentSeq++;
-    }
+        excerpt: redactSecrets(rawExcerpt).text,
+        created_at: src.created_at,
+      };
+    });
+
+    units.push({
+      memory: m,
+      snapshot: snap,
+      renderedItem: `--- item ${i + 1} ---
+id: ${m.id}
+type: ${m.type}
+confidence: ${m.confidence}
+utility: ${m.utility}
+created: ${new Date(m.created_at).toISOString()}
+valid_from: ${m.valid_from ? new Date(m.valid_from).toISOString() : 'none'}
+text: ${m.content}`,
+      sources: sanitizedSources,
+    });
   }
+
+  const verifiedSuccessSummary = `${cluster.distinctSuccessfulSessions.length} independent successful sessions: ${cluster.distinctSuccessfulSessions.slice(0, 5).join(', ')}`;
+
+  const renderUnits = (
+    selectedUnits: ConsolidateUnit[],
+    ledgerOut?: EvidenceLedger
+  ): { renderedItems: string; evidenceTranscript: string } => {
+    const itemBlocks: string[] = [];
+    const evidenceLines: string[] = [];
+    let currentSeq = 1;
+
+    for (const u of selectedUnits) {
+      itemBlocks.push(u.renderedItem);
+      for (const src of u.sources) {
+        const line = `[E#${currentSeq}] (${src.session_id}#${src.seq}) ${src.excerpt}`;
+        evidenceLines.push(line);
+        if (ledgerOut) {
+          ledgerOut.set(currentSeq, {
+            seq: currentSeq,
+            session_id: src.session_id,
+            original_seq: src.seq,
+            kind: src.kind,
+            redacted_text: src.excerpt,
+            rendered_line: line,
+            origin_kinds: [sourceKindToOriginKind(src.kind)],
+            time: src.created_at,
+          });
+        }
+        currentSeq++;
+      }
+    }
+
+    return {
+      renderedItems: itemBlocks.join('\n\n'),
+      evidenceTranscript: evidenceLines.join('\n'),
+    };
+  };
+
+  const maxInputTokens = cfg.distillMaxInputTokens || 6000;
+  const packed = packPromptWithinBudget(
+    PROMPT_CONSOLIDATE.system,
+    (selectedUnits) => {
+      const rendered = renderUnits(selectedUnits);
+      return PROMPT_CONSOLIDATE.buildUser({
+        cwd: cluster.workspaceId,
+        clusterKey: cluster.clusterKey,
+        n: selectedUnits.length,
+        verifiedSuccessSummary,
+        renderedItems: rendered.renderedItems,
+        evidenceTranscript: rendered.evidenceTranscript,
+      });
+    },
+    units,
+    maxInputTokens,
+    250
+  );
+
+  const selectedUnits = packed.selected;
+  const evidenceLedger: EvidenceLedger = new Map();
+  const finalRendered = renderUnits(selectedUnits, evidenceLedger);
 
   if (evidenceLedger.size === 0) {
     return {
@@ -318,20 +398,28 @@ text: ${m.content}`
   const userPrompt = PROMPT_CONSOLIDATE.buildUser({
     cwd: cluster.workspaceId,
     clusterKey: cluster.clusterKey,
-    n: cluster.memories.length,
-    verifiedSuccessSummary: `${cluster.distinctSuccessfulSessions.length} independent successful sessions: ${cluster.distinctSuccessfulSessions.slice(0, 5).join(', ')}`,
-    renderedItems: itemBlocks.join('\n\n'),
-    evidenceTranscript: evidenceLines.join('\n'),
+    n: selectedUnits.length,
+    verifiedSuccessSummary,
+    renderedItems: finalRendered.renderedItems,
+    evidenceTranscript: finalRendered.evidenceTranscript,
   });
 
-  // 模型对同一聚类给出过「无可提炼」的结论且输入未变时不再重发，否则每个时间桶都会重复消耗配额
+  // 使用不含随机 XML nonce 的规范输入计算去重指纹，确保 noop 缓存稳定命中
   const noopKey = `consolidate:noop:${createHash('sha256').update(cluster.clusterKey).digest('hex').slice(0, 32)}`;
-  const fingerprint = createHash('sha256').update(`${PROMPT_CONSOLIDATE.version}\n${userPrompt}`).digest('hex');
+  const fingerprint = createHash('sha256')
+    .update(
+      `${PROMPT_CONSOLIDATE.version}\n${cluster.clusterKey}\n${finalRendered.renderedItems}\n${finalRendered.evidenceTranscript}`
+    )
+    .digest('hex');
   if (db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [noopKey])?.value === fingerprint) {
     return { success: true, clusterKey: cluster.clusterKey };
   }
 
-  // 3. 调用离线 LLM
+  // 3. 调用离线 LLM（通过 resolveWorkspaceCwd 获取真实路径用于脱敏）
+  const realCwd = resolveWorkspaceCwd(db, cluster.workspaceId) || '';
+  const selectedMemories = selectedUnits.map((u) => u.memory);
+  const selectedSnapshots = selectedUnits.map((u) => u.snapshot);
+
   const llmRes = await callOfflineLLM(
     db,
     {
@@ -340,9 +428,9 @@ text: ${m.content}`
       systemPrompt: PROMPT_CONSOLIDATE.system,
       userPrompt,
       maxOutputTokens: PROMPT_CONSOLIDATE.maxOutputTokens,
-      cwd: cluster.workspaceId,
+      cwd: realCwd,
       workspaceId: cluster.workspaceId,
-      dataWorkspaceIds: memoryWorkspaceIds(db, cluster.memories),
+      dataWorkspaceIds: memoryWorkspaceIds(db, selectedMemories),
       signal: options.signal,
       fetchFn: options.fetchFn,
     },
@@ -383,20 +471,17 @@ text: ${m.content}`
     };
   }
 
-  // 5. 提交前再次严格校验快照未发生变化
-  if (!verifySnapshots(db, cluster.snapshots)) {
-    return {
-      success: false,
-      clusterKey: cluster.clusterKey,
-      error: 'snapshots_changed_before_commit',
-    };
-  }
-
-  // 6. 事务内写入 candidate 与 derived_from 关系
+  // 5. 在同一写事务内原子校验源快照并写入 candidate 与 derived_from 关系，消除 TOCTOU 窗口
   let candidateId: string | undefined;
+  let snapshotsChanged = false;
 
   try {
     db.transaction(() => {
+      if (!verifySnapshots(db, selectedSnapshots)) {
+        snapshotsChanged = true;
+        return;
+      }
+
       const candidateItem = parseRes.items[0];
       const upsertRes = upsertCandidate(db, candidateItem, now);
       if (!('id' in upsertRes)) {
@@ -406,14 +491,14 @@ text: ${m.content}`
 
       // 为每个源记录建立指向 candidate 的 derived_from 关系
       const snapshotMetadata = JSON.stringify({
-        sources: cluster.snapshots.map(s => ({
+        sources: selectedSnapshots.map((s) => ({
           memory_id: s.id,
           content_rev: s.content_rev,
           hash: s.hash,
         })),
       });
 
-      for (const s of cluster.snapshots) {
+      for (const s of selectedSnapshots) {
         db.run(
           `INSERT OR IGNORE INTO memory_relations (from_id, to_id, rel, metadata, created_at)
            VALUES (?, ?, 'derived_from', ?, ?)`,
@@ -426,6 +511,14 @@ text: ${m.content}`
       success: false,
       clusterKey: cluster.clusterKey,
       error: `transaction_failed: ${err?.message || err}`,
+    };
+  }
+
+  if (snapshotsChanged) {
+    return {
+      success: false,
+      clusterKey: cluster.clusterKey,
+      error: 'snapshots_changed_before_commit',
     };
   }
 

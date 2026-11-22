@@ -1,3 +1,9 @@
+> **[Archived Historical Baseline Document]**
+> `APPENDIX-B-prompts.md` is preserved in `docs/archive/` as a historical engineering baseline record from earlier development milestones.
+> For current architecture, configuration, tooling, and verification gates, refer to [README.md](../../README.md) and [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
+---
+
 # 附录 B · 离线 LLM 提示词全文与输出 Schema v2
 
 > 这是**可直接复制粘贴**进 `src/evolution/prompts.ts` 的 v2 提示词与解析合同。触发、预算、写入权限以 PLAN 为准；提示词不是安全边界。改动措辞或输入渲染格式时必须升版本号。

@@ -8,7 +8,8 @@ import type { Db } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
 import { renderStableLayer, PromptSectionManager } from '../../src/dsh/prompt-section.js';
 import plugin from '../../src/dsh/plugin.js';
-import { upsertCandidate } from '../../src/core/writer.js';
+import { REGISTERED_MEMORY_TOOL_NAMES } from '../../src/dsh/tool-registry.js';
+import { upsertCandidate, unpin } from '../../src/core/writer.js';
 import { budgetTokens } from '../../src/core/tokens.js';
 import { DEFAULTS } from '../../src/config.js';
 
@@ -71,8 +72,7 @@ describe('Prompt Section (prompt-section.ts)', () => {
     manager.disposeAll();
   });
 
-  it('should only render pinned=1 and active/frozen records in scope ordered by id ASC', () => {
-    // 插入两条 pinned 记录与一条未 pinned 记录
+  it('should only render pinned=1 and active/frozen records in scope ordered by id ASC and reflect active strategy version', () => {
     upsertCandidate(
       db,
       {
@@ -107,7 +107,6 @@ describe('Prompt Section (prompt-section.ts)', () => {
     );
     db.run(`UPDATE memories SET pinned = 1 WHERE content LIKE '%2 空格%'`);
 
-    // 未 pinned 的记录
     upsertCandidate(
       db,
       {
@@ -139,7 +138,6 @@ describe('Prompt Section (prompt-section.ts)', () => {
   });
 
   it('should prune lowest utility items when exceeding stableBudgetTokens', () => {
-    // 插入多条长记录，使得总 token 超过 300 预算
     for (let i = 1; i <= 6; i++) {
       const content = `重要置顶规则 ${i}：在当前工作区中详细阐述长期系统架构准则与高可用配置约束第 ${i} 项。`;
       upsertCandidate(
@@ -157,7 +155,6 @@ describe('Prompt Section (prompt-section.ts)', () => {
         },
         fixedNow + i
       );
-      // 分配递增 utility
       db.run(
         `UPDATE memories SET pinned = 1, utility = ? WHERE content LIKE ?`,
         [0.2 + i * 0.1, `%规则 ${i}%`]
@@ -167,18 +164,16 @@ describe('Prompt Section (prompt-section.ts)', () => {
     const { text, stableTokens } = renderStableLayer(
       db,
       { workspaceId: ws1, sessionId: sess1 },
-      { ...({} as any), stableBudgetTokens: 300 }
+      { ...DEFAULTS, stableBudgetTokens: 300 }
     );
 
     expect(budgetTokens(text)).toBeLessThanOrEqual(300);
     expect(stableTokens).toBeLessThanOrEqual(300);
-    // 高 utility 的规则 6 应该被保留，低 utility 的规则 1 应该最先被剔除
     expect(text).toContain('规则 6');
   });
 
-  it('PromptSectionManager should isolate different workspaces for subagents (验收项 7)', () => {
-    // ws1 有置顶记忆
-    upsertCandidate(
+  it('PromptSectionManager isolates workspaces, skips registering empty section, populates assembly-only state, and caches renders by SQL fingerprint', () => {
+    const ins = upsertCandidate(
       db,
       {
         type: 'semantic',
@@ -193,38 +188,37 @@ describe('Prompt Section (prompt-section.ts)', () => {
       },
       fixedNow
     );
-    db.run(`UPDATE memories SET pinned = 1 WHERE content LIKE '%工作区 1%'`);
+    const memId = (ins as any).id;
+    db.run(`UPDATE memories SET pinned = 1 WHERE id = ?`, [memId]);
 
     const mgr = new PromptSectionManager(db);
 
-    // Mock parent agent in ws1
     let parentSectionContent = '';
+    const parentDisposeSpy = vi.fn(() => {
+      parentSectionContent = '';
+    });
+    const parentSectionSpy = vi.fn((opts: any) => {
+      parentSectionContent = opts.text;
+      expect(opts.interpolate).toBe(false);
+      return parentDisposeSpy;
+    });
     const parentAgent = {
       id: 'agent_parent_ws1',
       cwd: ws1,
       ctx: {
         systemPrompt: {
-          section: (opts: any) => {
-            parentSectionContent = opts.text;
-            expect(opts.interpolate).toBe(false); // 必须为 false
-            return () => { parentSectionContent = ''; };
-          },
+          section: parentSectionSpy,
         },
       },
     };
 
-    // Mock subagent in ws2 (子代理运行在不同 workspace)
-    let subagentSectionContent = 'initial';
+    const subSectionSpy = vi.fn(() => () => {});
     const subAgent = {
       id: 'agent_sub_ws2',
       cwd: ws2,
       ctx: {
         systemPrompt: {
-          section: (opts: any) => {
-            subagentSectionContent = opts.text;
-            expect(opts.interpolate).toBe(false);
-            return () => { subagentSectionContent = ''; };
-          },
+          section: subSectionSpy,
         },
       },
     };
@@ -232,26 +226,44 @@ describe('Prompt Section (prompt-section.ts)', () => {
     mgr.updateSection(parentAgent, { workspaceId: ws1, sessionId: sess1 });
     mgr.updateSection(subAgent, { workspaceId: ws2, sessionId: 'sess_sub' });
 
-    // 父 agent 包含 ws1 专属记忆
     expect(parentSectionContent).toContain('工作区 1 的私有专属记忆');
-    // 子 agent 在 ws2，绝对不能继承或泄漏 ws1 的记忆
-    expect(subagentSectionContent).toBe('');
+    // Empty stable layer must NOT register a memory-stable section
+    expect(subSectionSpy).not.toHaveBeenCalled();
     expect(mgr.getVisibleRefs(subAgent.id).size).toBe(0);
 
-    // 清理
-    mgr.disposeAll();
+    // Fingerprint cache hit: consecutive calls reuse cached render result without re-scanning all pinned rows
+    const allSpy = vi.spyOn(db, 'all');
+    const cachedResult = mgr.buildStableSection({ workspaceId: ws1, sessionId: sess1 });
+    expect(cachedResult.text).toContain('工作区 1 的私有专属记忆');
+    expect(allSpy).not.toHaveBeenCalled();
+
+    // Assembly-only path (no agent.ctx.systemPrompt.section) populates visibleRefs, stableTokens, estimatedTokens, lastHash
+    const assemblyAgent = { id: 'agent_assembly_only', cwd: ws1 };
+    const assemblyState = mgr.updateSection(assemblyAgent, { workspaceId: ws1, sessionId: sess1 });
+    expect(assemblyState.visibleRefs.has(`${memId}@1`)).toBe(true);
+    expect(assemblyState.stableTokens).toBeGreaterThan(0);
+    expect(assemblyState.estimatedTokens).toBeGreaterThan(0);
+    expect(assemblyState.lastHash).toBeTruthy();
+
+    // Unpinning all memories invalidates cache and disposes existing memory-stable section
+    unpin(db, memId, 'user', fixedNow + 1000);
+    mgr.updateSection(parentAgent, { workspaceId: ws1, sessionId: sess1 });
+    expect(parentDisposeSpy).toHaveBeenCalled();
     expect(parentSectionContent).toBe('');
+    expect(parentSectionSpy).toHaveBeenCalledTimes(1);
+
+    mgr.disposeAll();
   });
 
-  it('syncs memory-stable on startup agents, agent/created, and system-prompt/assemble without requiring webServer upfront', async () => {
-    expect(plugin.inject).toEqual(['agents', 'sessionProjections', 'systemPrompt', 'tools', 'commands']);
+  it('syncs memory-stable on startup agents, agent/created, and system-prompt/assemble with lazy commands/webServer and 4 lean tools', async () => {
+    // P0 fix: top-level inject does NOT include 'commands'
+    expect(plugin.inject).toEqual(['agents', 'sessionProjections', 'systemPrompt', 'tools']);
 
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-plugin-prompt-'));
     const dbPath = path.join(tmpDir, 'mem.db');
     const wsPath = path.join(tmpDir, 'ws');
     fs.mkdirSync(wsPath, { recursive: true });
 
-    // Seed a pinned memory before plugin startup
     const seedDb = openDb(dbPath);
     upsertCandidate(
       seedDb,
@@ -274,6 +286,7 @@ describe('Prompt Section (prompt-section.ts)', () => {
     const listeners = new Map<string, Function[]>();
     const injectCallbacks: Array<{ deps: string[]; cb: Function }> = [];
     const registeredCommands: any[] = [];
+    const registeredTools: string[] = [];
     const registeredWebRoutes: any[] = [];
     const registeredSections = new Map<string, string>();
 
@@ -307,17 +320,14 @@ describe('Prompt Section (prompt-section.ts)', () => {
       },
       sessionProjections: {
         register: () => () => {},
-        stateOf: () => ({ visibleInjections: [] }),
+        stateOf: () => ({ visibleInjections: [], invalidReferenceEvents: 0 }),
       },
       systemPrompt: {
         section: () => () => {},
       },
       tools: {
-        register: () => () => {},
-      },
-      commands: {
-        register: (cmd: any) => {
-          registeredCommands.push(cmd);
+        register: (tool: any) => {
+          registeredTools.push(tool.name);
           return () => {};
         },
       },
@@ -340,6 +350,9 @@ describe('Prompt Section (prompt-section.ts)', () => {
 
     try {
       await plugin.apply(mockCtx, { dbPath, autoBootstrap: false });
+
+      // 0. Only the 4 lean tools are registered
+      expect(registeredTools).toEqual([...REGISTERED_MEMORY_TOOL_NAMES]);
 
       // 1. Existing agent receives memory-stable at startup
       expect(registeredSections.get('agent_startup:memory-stable')).toContain(
@@ -379,10 +392,19 @@ describe('Prompt Section (prompt-section.ts)', () => {
         'Pinned workspace fact for system-prompt/assemble verification.'
       );
 
-      // 4. Required commands registered directly & deferred optional webServer registered via ctx.inject
-      expect(registeredCommands.some((c) => c.name === 'memory')).toBe(true);
-      expect(injectCallbacks.map((i) => i.deps)).toEqual([['webServer']]);
+      // 4. Both commands and webServer are lazily injected via ctx.inject
+      expect(injectCallbacks.map((i) => i.deps)).toEqual([['commands'], ['webServer']]);
       for (const entry of injectCallbacks) {
+        if (entry.deps[0] === 'commands') {
+          entry.cb({
+            commands: {
+              register: (cmd: any) => {
+                registeredCommands.push(cmd);
+                return () => {};
+              },
+            },
+          });
+        }
         if (entry.deps[0] === 'webServer') {
           entry.cb({
             webServer: {
@@ -394,6 +416,7 @@ describe('Prompt Section (prompt-section.ts)', () => {
           });
         }
       }
+      expect(registeredCommands.some((c) => c.name === 'memory')).toBe(true);
       expect(registeredWebRoutes.some((r) => r.path === '/api/dsh-memory')).toBe(true);
 
       // Dispose plugin cleanly

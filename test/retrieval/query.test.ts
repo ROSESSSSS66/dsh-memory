@@ -81,11 +81,16 @@ describe('Query Analysis (query.ts)', () => {
         'how to deploy this service',
         '安装依赖失败怎么办',
         '部署生产环境流程',
+        'please fix this build error',
+        'the test failed during setup',
+        'debug memory leak',
       ];
       const negatives = [
         '今天吃什么',
         '这是昨天发生的事情',
         '作者的名字叫张三',
+        'what is the key prefix and suffix',
+        'update the test fixture data',
       ];
 
       it('should match all positive cases', () => {
@@ -111,11 +116,20 @@ describe('Query Analysis (query.ts)', () => {
         'I prefer dark theme style',
         '养成写测试的习惯',
         '别再输出多余的解释',
+        '请别使用 var 声明变量',
+        '切勿把密钥提交到仓库',
+        '尽量别用全局状态',
+        '别用默认导出',
       ];
       const negatives = [
         '这个函数返回一个数字',
         '为什么服务器挂了',
         '查询数据库中的所有表',
+        '这两个版本有什么区别',
+        '这个问题特别复杂',
+        '分别启动前端和后端服务',
+        '图像识别和日志级别与错误类别',
+        'get user information from api',
       ];
 
       it('should match all positive cases', () => {
@@ -188,10 +202,60 @@ describe('Query Analysis (query.ts)', () => {
       expect(res).toBeDefined();
     });
 
-    it('should parse 上周 / last week', () => {
+    it('should parse 上周 / last week using calendar Monday through Sunday', () => {
+      // 2026-11-04 is Wednesday -> previous calendar week is Mon 2026-10-26 00:00:00.000 to Sun 2026-11-01 23:59:59.999
       const res = parseTimeRange('上周有什么进展', fixedNow);
       expect(res).toBeDefined();
-      expect(res!.to).toBe(fixedNow - 7 * 86400000);
+      const fromDate = new Date(res!.from);
+      const toDate = new Date(res!.to);
+      expect(fromDate.getFullYear()).toBe(2026);
+      expect(fromDate.getMonth()).toBe(9); // October
+      expect(fromDate.getDate()).toBe(26);
+      expect(fromDate.getDay()).toBe(1); // Monday
+      expect(toDate.getFullYear()).toBe(2026);
+      expect(toDate.getMonth()).toBe(10); // November
+      expect(toDate.getDate()).toBe(1);
+      expect(toDate.getDay()).toBe(0); // Sunday
+      expect(toDate.getHours()).toBe(23);
+      expect(toDate.getMinutes()).toBe(59);
+    });
+
+    it('should parse 上个月 / last month using calendar 1st through last day including year rollover', () => {
+      const res = parseTimeRange('上个月的变更记录', fixedNow);
+      expect(res).toBeDefined();
+      const fromDate = new Date(res!.from);
+      const toDate = new Date(res!.to);
+      expect(fromDate.getFullYear()).toBe(2026);
+      expect(fromDate.getMonth()).toBe(9); // October
+      expect(fromDate.getDate()).toBe(1);
+      expect(toDate.getFullYear()).toBe(2026);
+      expect(toDate.getMonth()).toBe(9);
+      expect(toDate.getDate()).toBe(31);
+
+      const janNow = new Date('2026-01-15T12:00:00Z').getTime();
+      const decRes = parseTimeRange('last month summary', janNow);
+      expect(decRes).toBeDefined();
+      const decFrom = new Date(decRes!.from);
+      const decTo = new Date(decRes!.to);
+      expect(decFrom.getFullYear()).toBe(2025);
+      expect(decFrom.getMonth()).toBe(11);
+      expect(decFrom.getDate()).toBe(1);
+      expect(decTo.getFullYear()).toBe(2025);
+      expect(decTo.getMonth()).toBe(11);
+      expect(decTo.getDate()).toBe(31);
+    });
+
+    it('should reject invalid calendar overflow dates like 2026-02-30 or 2026-04-31', () => {
+      expect(parseTimeRange('查看 2026-02-30 的日志', fixedNow)).toBeUndefined();
+      expect(parseTimeRange('查看 2026-04-31 的记录', fixedNow)).toBeUndefined();
+      expect(parseTimeRange('查看 2025-02-29 的变更', fixedNow)).toBeUndefined();
+      expect(parseTimeRange('查看 2月30日 的日志', fixedNow)).toBeUndefined();
+
+      // Leap day 2024-02-29 IS valid
+      const leap = parseTimeRange('查看 2024-02-29 的变更', fixedNow);
+      expect(leap).toBeDefined();
+      expect(new Date(leap!.from).getMonth()).toBe(1);
+      expect(new Date(leap!.from).getDate()).toBe(29);
     });
 
     it('should parse 最近 / recently', () => {
@@ -233,6 +297,21 @@ describe('Query Analysis (query.ts)', () => {
       const longText = 'a'.repeat(3000);
       const plan = buildQueryPlan({ userText: longText });
       expect(plan.text.length).toBeLessThanOrEqual(2000);
+    });
+
+    it('should yield clean contentTokens for natural English queries', () => {
+      const plan = buildQueryPlan({
+        userText: 'Can you please help me remember what port our backend listens on?',
+      });
+      expect(plan.contentTokens).toEqual(['port', 'backend', 'listens']);
+    });
+
+    it('should preserve trailing keywords on long 70+ char CJK queries', () => {
+      const longQuery =
+        '前面有一大段关于研发团队协作规范、日常评审流程、文档维护机制与测试环境准备工作的背景描述，最后核心想确认后端网关实际监听的端口号是不是 7890？';
+      const plan = buildQueryPlan({ userText: longQuery });
+      expect(plan.contentTokens).toContain('7890');
+      expect(plan.contentTokens).toContain('端口');
     });
   });
 });

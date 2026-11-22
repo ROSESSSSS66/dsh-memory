@@ -1,3 +1,5 @@
+export type JobKind = string;
+
 export interface JobRecord {
   id: number;
   kind: string;
@@ -19,15 +21,23 @@ export type JobHandlerResult =
   | { action: 'retry'; error: string }
   | { action: 'failed'; error: string; nonRetryable?: boolean };
 
-export type JobHandler = (job: JobRecord, signal: AbortSignal) => Promise<JobHandlerResult>;
+export type JobRunResult = JobHandlerResult;
+
+export type JobHandler = (
+  job: JobRecord,
+  signal: AbortSignal,
+  deadline?: number
+) => Promise<JobRunResult> | JobRunResult;
 
 /** Preserve budget deferral and retry only errors that can recover without new input. */
 export function jobFailure(error: string): JobHandlerResult {
   if (/^daily_(?:tokens|calls|limit)_exceeded$/.test(error)) {
     return { action: 'skipped', reason: error };
   }
-  if (/^(?:network_error|timeout|http_429|http_5\d\d)$/.test(error) ||
-      /^transaction_failed:/.test(error)) {
+  if (
+    /^(?:network_error|timeout|http_408|http_429|http_5\d\d)$/.test(error) ||
+    /^transaction_failed:/.test(error)
+  ) {
     return { action: 'retry', error };
   }
   return { action: 'failed', error, nonRetryable: true };

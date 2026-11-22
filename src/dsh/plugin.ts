@@ -9,94 +9,45 @@ import { PromptSectionManager } from './prompt-section.js';
 import { registerPreStep } from './pre-step.js';
 import { registerMemoryVisibility, type MemoryVisibilityReader } from './memory-visibility.js';
 import { MemoryTools } from './tools.js';
-import { MemoryCommands } from './commands.js';
-import { workspaceId } from '../core/scope.js';
-import { isWorkspaceExcluded } from '../core/privacy.js';
+import { registerMemoryTools } from './tool-registry.js';
+import { MemoryCommands, getMemoryCommandHint } from './commands.js';
+import { registerPluginJobHandlers } from './job-handlers.js';
+import {
+  extractAgentCwd,
+  isResolvedScopeExcluded,
+  isWorkspaceOrMappedExcluded,
+  observeWorkspacePath,
+  resolveRuntimeScope,
+  resolveSessionWorkspaceId,
+} from './scope-resolver.js';
+import { JobRunner } from '../jobs/runner.js';
 import { JobScheduler, recoverJobsOnStartup } from '../jobs/scheduler.js';
-import { registerJobHandler, unregisterJobHandler } from '../jobs/runner.js';
-import { jobFailure } from '../jobs/types.js';
-import {
-  distillSession,
-  findEligibleDistillSession,
-} from '../evolution/extractor.js';
-import { runReflectJob } from '../evolution/reflector.js';
-import {
-  findConsolidationClusters,
-  consolidateCluster,
-} from '../evolution/consolidator.js';
-import { executeRepair } from '../evolution/repair.js';
-import { runStrategyEvolution, checkSentinelAndRollback } from '../evolution/lab.js';
-import {
-  archiveColdMemories,
-  expireCandidates,
-  autoPinMemories,
-  checkAndRepairFts,
-  cleanOldTelemetry,
-  pruneInvalidMemories,
-  curateMemoriesWithLLM,
-  backupDatabase,
-  getBackupTimestamp,
-} from '../evolution/maintenance.js';
+import { findEligibleDistillSession } from '../evolution/extractor.js';
 import { registerWebRoutes } from './web.js';
-import { backfillMissingEmbeddings } from '../core/vector.js';
-import { weaveZettelkastenLinks, autoHealMemoryHealth } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
-import { runHindsightReflect } from '../core/hindsight.js';
-import { syncAutonomousVikingTree } from '../core/viking.js';
 import type { Db } from '../types.js';
 
 export const name = 'dsh-memory';
-export const inject = ['agents', 'sessionProjections', 'systemPrompt', 'tools', 'commands'];
+// P0 修复：移除 top-level 'commands' 强依赖，使 headless / CLI / ACP 宿主可通过延迟 ctx.inject(['commands'], ...) 正常加载插件
+export const inject = ['agents', 'sessionProjections', 'systemPrompt', 'tools'];
 
-function extractSessionCwd(session: any): string {
-  if (!session || typeof session !== 'object') return '';
-  const direct = typeof session.cwd === 'string' ? session.cwd.trim() : '';
-  if (direct) return direct;
-  const headerCwd = typeof session.header?.cwd === 'string' ? session.header.cwd.trim() : '';
-  if (headerCwd) return headerCwd;
-  const ws = typeof session.workspaceId === 'string' ? session.workspaceId.trim() : '';
-  return ws;
-}
+const LIVE_CONFIG_CACHE_TTL_MS = 2000;
+const DEFERRED_STARTUP_DELAY_MS = 1500;
 
-function extractAgentCwd(agent: any): string {
-  if (!agent || typeof agent !== 'object') return '';
-  const direct = typeof agent.cwd === 'string' ? agent.cwd.trim() : '';
-  if (direct) return direct;
-  return extractSessionCwd(agent.session);
-}
+type WebRouteOptions = {
+  scheduler?: JobScheduler;
+  initialCfg?: PluginConfig;
+  getLiveCfg?: () => PluginConfig;
+  onConfigUpdated?: (nextCfg: PluginConfig) => void;
+  activeWorkspaces?: () => string[];
+};
 
-function resolveCtxAgentCwd(ctx: any, sessionId?: string): string {
-  try {
-    const list = typeof ctx?.agents?.list === 'function' ? ctx.agents.list() : undefined;
-    if (Array.isArray(list) && list.length > 0) {
-      // 只认会话匹配的 agent：退回「列表中第一个有 cwd 的 agent」会把请求落到无关工作区的记忆上
-      if (sessionId) {
-        const matched = list.find((a: any) => a?.session?.id === sessionId);
-        const matchedCwd = extractAgentCwd(matched);
-        if (matchedCwd) return matchedCwd;
-      }
-    }
-  } catch {}
-  return '';
-}
-
-function resolveSessionWorkspaceId(db: Db, sessionId?: string): string {
-  if (!sessionId) return '';
-  try {
-    const owner = db.get<{ workspace_id: string }>(
-      "SELECT workspace_id FROM session_workspace_owners WHERE session_id = ? AND workspace_id != '' LIMIT 1",
-      [sessionId]
-    );
-    if (owner?.workspace_id) return owner.workspace_id;
-    const raw = db.get<{ workspace_id: string }>(
-      "SELECT workspace_id FROM raw_events WHERE session_id = ? AND workspace_id != '' LIMIT 1",
-      [sessionId]
-    );
-    return raw?.workspace_id || '';
-  } catch {
-    return '';
-  }
-}
+type RegisterWebRoutesFn = (
+  webCtx: any,
+  db: Db,
+  cfg: PluginConfig,
+  options?: WebRouteOptions
+) => () => void | Promise<void>;
 
 export const Config = {
   '~standard': {
@@ -120,32 +71,50 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
   let promptSections: PromptSectionManager | undefined;
   let queue: IngestQueue | undefined;
   let scheduler: JobScheduler | undefined;
+  let unregisterJobHandlers: (() => void) | undefined;
   let unlistenSession: (() => void) | undefined;
   let unlistenPressure: (() => void) | undefined;
   let unlistenAgentDisposed: (() => void) | undefined;
   let visibility: MemoryVisibilityReader | undefined;
   let unlistenPreStep: (() => void) | undefined;
   let unlistenTurnStopping: (() => void) | undefined;
-  let unlistenWeb: (() => void) | undefined;
-  const regDisposers: Array<() => void> = [];
-  let handlersRegistered = false;
+  let unlistenWeb: (() => void | Promise<void>) | undefined;
+  let startupTimer: ReturnType<typeof setTimeout> | undefined;
+  const regDisposers: Array<() => void | Promise<void>> = [];
   let disposed = false;
   let cleanupPromise: Promise<void> | undefined;
+
+  const addDisp = (d: unknown) => {
+    if (typeof d === 'function') {
+      regDisposers.push(d as () => void | Promise<void>);
+    }
+  };
 
   const cleanup = (logClean = false): Promise<void> => {
     disposed = true;
     if (cleanupPromise) return cleanupPromise;
     cleanupPromise = (async () => {
       try {
-        for (const disp of regDisposers.splice(0, regDisposers.length)) {
+        // 1. 取消延迟启动任务，停止接收新请求与新事件
+        if (startupTimer !== undefined) {
+          clearTimeout(startupTimer);
+          startupTimer = undefined;
+        }
+
+        const webUnlisten = unlistenWeb;
+        unlistenWeb = undefined;
+        if (webUnlisten) {
           try {
-            disp();
+            await Promise.resolve(webUnlisten());
           } catch {}
         }
-        try {
-          unlistenWeb?.();
-        } catch {}
-        unlistenWeb = undefined;
+
+        for (const disp of regDisposers.splice(0, regDisposers.length)) {
+          try {
+            await Promise.resolve(disp());
+          } catch {}
+        }
+
         try {
           unlistenTurnStopping?.();
         } catch {}
@@ -170,22 +139,39 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
           visibility?.dispose();
         } catch {}
         visibility = undefined;
-
-        const stopSchedPromise = scheduler ? scheduler.stopAndWait() : Promise.resolve();
-        if (handlersRegistered) {
-          for (const kind of ['distill', 'reflect', 'consolidate', 'maintain', 'curate', 'repair', 'evolve']) {
-            unregisterJobHandler(kind);
-          }
-          handlersRegistered = false;
-        }
         try {
           promptSections?.disposeAll();
         } catch {}
-        await Promise.allSettled([queue ? queue.close() : Promise.resolve(), stopSchedPromise]);
+
+        // 2. 等待实例级 JobScheduler 优雅收敛并注销实例级任务处理器
+        if (scheduler) {
+          try {
+            await scheduler.stopAndWait();
+          } catch {}
+          scheduler = undefined;
+        }
+        try {
+          unregisterJobHandlers?.();
+        } catch {}
+        unregisterJobHandlers = undefined;
+
+        // 3. 落盘并关闭摄入队列（必须在关闭 DB 之前完成）
+        if (queue) {
+          try {
+            await queue.flush();
+          } catch {}
+          try {
+            await queue.close();
+          } catch {}
+          queue = undefined;
+        }
+
+        // 4. 所有异步写路径全部停止后才关闭 SQLite
         try {
           db?.close();
         } catch {}
         db = undefined;
+
         if (logClean) {
           console.log('[dsh-memory] Plugin disposed cleanly');
         }
@@ -213,7 +199,7 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
       db = openDb(dbPath);
       (db as any).filePath = dbPath;
     } catch (dbErr: any) {
-      // 验收项 5: 临时把数据库文件改名，让插件无法打开 → DSH 照常对话，日志中出现降级提示
+      // 验收项 5: 数据库无法打开时优雅降级，不阻断 DSH 对话
       console.warn(
         '[dsh-memory] Database open failed (gracefully degraded to disabled state):',
         dbErr?.message || dbErr
@@ -231,260 +217,160 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
     }
     const currentDb: Db = db;
 
-    // 合并存储中的用户自定义动态配置 (LLM 配置、风控与隐私选项)，并保持全局共享 cfg 引用实时同步
-    const cfg = loadConfigFromDb(currentDb, initialCfg);
-    const getLiveCfg = (): PluginConfig => {
-      const loaded = loadConfigFromDb(currentDb, initialCfg);
-      Object.assign(cfg, loaded);
+    // 动态配置共享引用 + 短 TTL 缓存 + onConfigUpdated 即时失效
+    const cfg: PluginConfig = loadConfigFromDb(currentDb, initialCfg);
+    let lastCfgLoadAt = Date.now();
+
+    const syncSharedCfg = (nextCfg: PluginConfig): PluginConfig => {
+      Object.assign(cfg, nextCfg);
+      lastCfgLoadAt = Date.now();
       return cfg;
+    };
+
+    const getLiveCfg = (): PluginConfig => {
+      const now = Date.now();
+      if (now - lastCfgLoadAt < LIVE_CONFIG_CACHE_TTL_MS) {
+        return cfg;
+      }
+      const loaded = loadConfigFromDb(currentDb, initialCfg);
+      return syncSharedCfg(loaded);
+    };
+
+    const onConfigUpdated = (nextCfg: PluginConfig): void => {
+      syncSharedCfg(nextCfg);
     };
 
     console.log('[dsh-memory] Plugin initialized with database at:', dbPath);
 
-    // 1.1 启动恢复与首次安装冷启动自动记忆初始化 (v0.6.0 Autonomous Bootstrap & Auto-Heal)
+    // 1.1 启动恢复：只做轻量僵尸任务恢复，绝不在启动主路径同步运行全局 autoHeal / 重型 backfill
     recoverJobsOnStartup(currentDb);
-    try {
-      const isDefaultDbPath = !initialCfg.dbPath && !initialCfg.dataDir;
-      const shouldAutoBootstrap =
-        config?.autoBootstrap === true ||
-        (isDefaultDbPath && config?.autoBootstrap !== false);
-      if (shouldAutoBootstrap) {
+
+    // 1.2 实例隔离的离线任务执行器与调度器（绝不污染全局 defaultJobRunner）
+    const localRunner = new JobRunner();
+    const localScheduler = new JobScheduler(currentDb, cfg, { runner: localRunner });
+    scheduler = localScheduler;
+    unregisterJobHandlers = registerPluginJobHandlers(localRunner, {
+      db: currentDb,
+      ctx,
+      getLiveCfg,
+      scheduler: localScheduler,
+      dbPath,
+    });
+
+    // 1.3 冷启动自动初始化：
+    // - 显式 autoBootstrap: true（例如测试或首次初始化）同步执行轻量 seed（不阻塞全盘回填），重型回填交由后台任务
+    // - 默认路径自动冷启动延迟至 .unref() 定时器后台触发，避免拖慢插件冷启动
+    const resolveStartupWsPath = (): string => {
+      try {
+        const rawBase =
+          typeof ctx?.get === 'function' ? ctx.get('baseDir') : ctx?.baseDir;
+        if (typeof rawBase === 'string' && rawBase.trim() && fs.existsSync(rawBase.trim())) {
+          return rawBase.trim();
+        }
+      } catch {}
+      return process.cwd();
+    };
+    const startupWsPath = resolveStartupWsPath();
+    const isDefaultDbPath = !initialCfg.dbPath && !initialCfg.dataDir;
+
+    const runLightweightBootstrap = (wsPath: string) => {
+      try {
+        const liveCfg = getLiveCfg();
+        if (isWorkspaceOrMappedExcluded(wsPath, liveCfg.excludeWorkspaces, currentDb)) {
+          return;
+        }
         const bootRes = autoBootstrapMemory(currentDb, {
-          workspacePath: process.cwd(),
-          cfg,
+          workspacePath: wsPath,
+          cfg: liveCfg,
+          includeBackfill: false,
         });
         if (!bootRes.alreadyInitialized) {
           console.log(
             `[dsh-memory] Auto-initialized workspace memory (core=${
               bootRes.coreBlocksInitialized.join(',') || 'ready'
-            }, seeded=${bootRes.workspaceMemoriesSeeded}, backfill=${
-              bootRes.backfillMemoriesCreated
-            }, links=${bootRes.linksWeaved})`
+            }, seeded=${bootRes.workspaceMemoriesSeeded}, links=${bootRes.linksWeaved})`
           );
-        }
-        autoHealMemoryHealth(currentDb);
-      }
-      backfillMissingEmbeddings(currentDb, { limit: 200 });
-    } catch {}
-
-    // 1.2 初始化离线任务调度器与全自动处理器
-    const localScheduler = new JobScheduler(currentDb, cfg);
-    scheduler = localScheduler;
-    handlersRegistered = true;
-
-    registerJobHandler('distill', async (job, signal) => {
-      const liveCfg = getLiveCfg();
-      const payload = job.payload ? JSON.parse(job.payload) : {};
-      const payloadCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : '';
-      const payloadWsId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : '';
-      const cwd =
-        payloadCwd ||
-        resolveCtxAgentCwd(ctx, payload.sessionId) ||
-        payloadWsId ||
-        resolveSessionWorkspaceId(currentDb, payload.sessionId) ||
-        process.cwd();
-      const res = await distillSession(currentDb, liveCfg, { sessionId: payload.sessionId, cwd, signal });
-      if (!res.success) {
-        return jobFailure(res.error || 'distill_failed');
-      }
-      if (res.sessionId && res.consumedCount > 0) {
-        const nextBatch = findEligibleDistillSession(currentDb, liveCfg, true, res.sessionId);
-        if (nextBatch) {
-          localScheduler.enqueue('distill', `${nextBatch.sessionId}:seq:${nextBatch.minSeq}`, {
-            sessionId: nextBatch.sessionId,
-            cwd,
-          });
-        }
-      }
-      return { action: 'done' };
-    });
-
-    registerJobHandler('reflect', async (job, signal) => {
-      const liveCfg = getLiveCfg();
-      return runReflectJob(currentDb, liveCfg, job, signal);
-    });
-
-    registerJobHandler('consolidate', async (job, signal) => {
-      const liveCfg = getLiveCfg();
-      const payload = job.payload ? JSON.parse(job.payload) : {};
-      const payloadCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : '';
-      const payloadWsId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : '';
-      const wsId = payloadWsId
-        ? workspaceId(payloadWsId)
-        : resolveSessionWorkspaceId(currentDb, payload.sessionId) ||
-          workspaceId(payloadCwd || resolveCtxAgentCwd(ctx, payload.sessionId) || process.cwd());
-      const clusters = findConsolidationClusters(currentDb, wsId, liveCfg);
-      for (const c of clusters) {
-        const res = await consolidateCluster(currentDb, liveCfg, c, { signal });
-        if (!res.success) {
-          return jobFailure(res.error || 'consolidate_failed');
-        }
-      }
-      // Hindsight 零网络开销确定性跨网络心智模型合成兜底 (即使未配置外部 LLM 也能持续进化心智模型)
-      try {
-        runHindsightReflect(currentDb, {
-          workspaceId: wsId,
-          autoSynthesize: true,
-          minClusterSize: 3,
-          persistCalibration: true,
-        });
-      } catch {}
-      return { action: 'done' };
-    });
-
-    registerJobHandler('maintain', async (job, signal) => {
-      const liveCfg = getLiveCfg();
-      const payload = job?.payload ? JSON.parse(job.payload) : {};
-      const payloadCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : '';
-      const payloadWsId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : '';
-      const rawCwd =
-        payloadCwd ||
-        resolveCtxAgentCwd(ctx, payload.sessionId) ||
-        process.cwd();
-      const maintainWsId = payloadWsId
-        ? workspaceId(payloadWsId)
-        : resolveSessionWorkspaceId(currentDb, payload.sessionId) || workspaceId(rawCwd);
-      pruneInvalidMemories(currentDb, { workspaceId: maintainWsId });
-      archiveColdMemories(currentDb, liveCfg);
-      expireCandidates(currentDb);
-      autoPinMemories(currentDb);
-      checkAndRepairFts(currentDb);
-      backfillMissingEmbeddings(currentDb, { limit: 500 });
-      const curateResult = await curateMemoriesWithLLM(currentDb, liveCfg, {
-        workspaceId: maintainWsId,
-        cwd: rawCwd,
-        signal,
-      });
-      autoHealMemoryHealth(currentDb, { workspaceId: maintainWsId });
-      weaveZettelkastenLinks(currentDb, { maxNewLinks: 25 });
-      syncAutonomousVikingTree(currentDb, { workspacePath: rawCwd, workspaceId: maintainWsId });
-      cleanOldTelemetry(currentDb);
-      checkSentinelAndRollback(currentDb);
-
-      // 每日一次热备 (§10)：backupDatabase 此前没有任何调用方，自动备份从未执行
-      try {
-        const today = getBackupTimestamp().slice(0, 8);
-        const lastBackupDay = currentDb.get<{ value: string }>(
-          "SELECT value FROM meta WHERE key = 'backup.last_day'"
-        )?.value;
-        if (dbPath !== ':memory:' && lastBackupDay !== today) {
-          backupDatabase(currentDb, dbPath, path.join(path.dirname(path.resolve(dbPath)), 'backups'));
-          currentDb.run(
-            `INSERT INTO meta (key, value) VALUES ('backup.last_day', ?)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-            [today]
+          const hasBackfillWatermark = Boolean(
+            currentDb.get<{ value: string }>(
+              "SELECT value FROM meta WHERE key = 'bootstrap_backfill_v1'"
+            )
           );
-        }
-      } catch (err: any) {
-        console.warn('[dsh-memory] Daily backup failed:', err?.message || err);
-      }
-
-      // 若线上自动收割样本 (eval_cases.suite = 'harvested') 新增达到阈值，全自动排队策略进化任务
-      try {
-        const sampleCnt =
-          currentDb.get<{ cnt: number }>(
-            "SELECT COUNT(*) as cnt FROM eval_cases WHERE suite = 'harvested'"
-          )?.cnt || 0;
-        const lastRow = currentDb.get<{ value: string }>(
-          "SELECT value FROM meta WHERE key = 'lab.last_evolved_harvest_count'"
-        );
-        const lastCnt = lastRow ? Number(lastRow.value) || 0 : 0;
-        if (sampleCnt >= 5 && sampleCnt >= lastCnt + 5) {
-          const bucket6h = Math.floor(Date.now() / (6 * 3600_000));
-          localScheduler.enqueue('evolve', `auto_evolve:${bucket6h}:n${sampleCnt}`, { auto: true });
-        }
-      } catch {}
-
-      return curateResult.ok ? { action: 'done' } : jobFailure(curateResult.error || 'curate_failed');
-    });
-
-    registerJobHandler('curate', async (job, signal) => {
-      const liveCfg = getLiveCfg();
-      const payload = job.payload ? JSON.parse(job.payload) : {};
-      const payloadCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : '';
-      const payloadWsId = typeof payload.workspaceId === 'string' ? payload.workspaceId.trim() : '';
-      const rawCwd =
-        payloadCwd ||
-        resolveCtxAgentCwd(ctx, payload.sessionId) ||
-        process.cwd();
-      const wsId = payloadWsId
-        ? workspaceId(payloadWsId)
-        : resolveSessionWorkspaceId(currentDb, payload.sessionId) || workspaceId(rawCwd);
-      const res = await curateMemoriesWithLLM(currentDb, liveCfg, {
-        workspaceId: wsId,
-        cwd: rawCwd,
-        signal,
-      });
-      if (!res.ok) return jobFailure(res.error || 'curate_failed');
-      return { action: 'done' };
-    });
-
-    registerJobHandler('repair', async (job, signal) => {
-      const liveCfg = getLiveCfg();
-      return executeRepair(
-        currentDb,
-        { id: job.id, key: job.key, payload: job.payload || '{}' },
-        { signal },
-        liveCfg
-      );
-    });
-
-    registerJobHandler('evolve', async () => {
-      const liveCfg = getLiveCfg();
-      runStrategyEvolution(currentDb, {}, liveCfg);
-      try {
-        const sampleCnt =
-          currentDb.get<{ cnt: number }>(
-            "SELECT COUNT(*) as cnt FROM eval_cases WHERE suite = 'harvested'"
-          )?.cnt || 0;
-        currentDb.run(
-          `INSERT INTO meta (key, value) VALUES ('lab.last_evolved_harvest_count', ?)
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-          [String(sampleCnt)]
-        );
-      } catch {}
-      return { action: 'done' };
-    });
-
-    // 2. 初始化摄入队列与 Session 事件监听器
-    const localQueue = new IngestQueue(currentDb, cfg);
-    queue = localQueue;
-    unlistenSession = registerSessionListener(ctx, localQueue, cfg);
-
-    // 2.1 监听上下文压力事件，自适应触发后台抽取 (汲取自 creativedswork/dsh-expmem)
-    unlistenPressure = ctx.on
-      ? ctx.on('memory/context-pressure', (evt: any) => {
-          if (evt?.sessionId) {
-            const liveCfg = getLiveCfg();
-            const eligible = findEligibleDistillSession(currentDb, liveCfg, true, evt.sessionId);
-            const minSeq = eligible?.minSeq ?? 1;
-            const rawCwd =
-              extractAgentCwd(evt?.agent) ||
-              extractSessionCwd(evt?.session) ||
-              (typeof evt?.cwd === 'string' ? evt.cwd.trim() : '') ||
-              resolveCtxAgentCwd(ctx, evt.sessionId) ||
-              (typeof evt?.workspaceId === 'string' ? evt.workspaceId.trim() : '') ||
-              resolveSessionWorkspaceId(currentDb, evt.sessionId) ||
-              process.cwd();
-            if (isWorkspaceExcluded(rawCwd, liveCfg.excludeWorkspaces)) return;
-            localScheduler.enqueue('distill', `${evt.sessionId}:seq:${minSeq}`, {
-              sessionId: evt.sessionId,
-              cwd: rawCwd,
+          if (!hasBackfillWatermark) {
+            localScheduler.enqueue('backfill', `auto_bootstrap_backfill:${bootRes.workspaceId}`, {
+              auto: true,
+              workspaceId: bootRes.workspaceId,
             });
           }
-        })
-      : undefined;
+        }
+      } catch {}
+    };
 
-    // 3. 初始化稳定层 Prompt Section 管理器
-    promptSections = new PromptSectionManager(currentDb, cfg);
-    unlistenAgentDisposed = typeof ctx.on === 'function'
-      ? ctx.on('agent/disposed', (evt: any) => {
-          const agentId = evt?.agent?.id || evt?.id || evt?.agentId;
-          if (typeof agentId === 'string' && agentId) {
-            promptSections?.disposeAgent(agentId);
-          }
-        })
-      : undefined;
+    if (config?.autoBootstrap === true) {
+      runLightweightBootstrap(startupWsPath);
+    } else if (isDefaultDbPath && config?.autoBootstrap !== false) {
+      startupTimer = setTimeout(() => {
+        startupTimer = undefined;
+        if (disposed) return;
+        runLightweightBootstrap(startupWsPath);
+      }, DEFERRED_STARTUP_DELAY_MS);
+      startupTimer.unref?.();
+    }
+
+    // 2. 初始化摄入队列（携带 onJobEnqueued 主动唤醒本地调度器）与 Session 事件监听器
+    const localQueue = new IngestQueue(currentDb, cfg, {
+      onJobEnqueued: () => localScheduler.notifyPending(),
+    });
+    queue = localQueue;
+    unlistenSession = registerSessionListener(ctx, localQueue, getLiveCfg, currentDb);
+
+    // 2.1 监听上下文压力事件，自适应触发后台抽取
+    unlistenPressure =
+      typeof ctx.on === 'function'
+        ? ctx.on('memory/context-pressure', (evt: any) => {
+            if (!evt?.sessionId) return;
+            try {
+              const liveCfg = getLiveCfg();
+              const scope = resolveRuntimeScope(
+                ctx,
+                currentDb,
+                {
+                  agent: evt?.agent,
+                  session: evt?.session,
+                  sessionId: evt.sessionId,
+                  cwd: evt?.cwd,
+                  workspaceId: evt?.workspaceId,
+                },
+                { allowCwdFallback: false }
+              );
+              if (scope.resolved && isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)) {
+                return;
+              }
+              const eligible = findEligibleDistillSession(currentDb, liveCfg, true, evt.sessionId);
+              const minSeq = eligible?.minSeq ?? 1;
+              const rawCwd = scope.workspacePath || scope.cwd || eligible?.workspaceId || '';
+              if (rawCwd && isWorkspaceOrMappedExcluded(rawCwd, liveCfg.excludeWorkspaces, currentDb)) {
+                return;
+              }
+              localScheduler.enqueue('distill', `${evt.sessionId}:seq:${minSeq}`, {
+                sessionId: evt.sessionId,
+                ...(rawCwd ? { cwd: rawCwd } : {}),
+                ...(scope.workspaceId ? { workspaceId: scope.workspaceId } : {}),
+              });
+            } catch {}
+          })
+        : undefined;
+
+    // 3. 初始化稳定层 Prompt Section 管理器（支持实时配置与快速 SQL 指纹缓存）
+    promptSections = new PromptSectionManager(currentDb, cfg, getLiveCfg);
+    unlistenAgentDisposed =
+      typeof ctx.on === 'function'
+        ? ctx.on('agent/disposed', (evt: any) => {
+            const agentId = evt?.agent?.id || evt?.id || evt?.agentId;
+            if (typeof agentId === 'string' && agentId) {
+              promptSections?.disposeAgent(agentId);
+            }
+          })
+        : undefined;
 
     // Register before publishing consumers; the host rebuilds visibility from committed session logs.
     const registeredVisibility = await registerMemoryVisibility(ctx);
@@ -502,61 +388,25 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
       db: currentDb,
       promptSections,
       cfg,
-      getVisibleRefs: session => visibility?.getVisibleRefs(session) ?? null,
+      getCfg: getLiveCfg,
+      getVisibleRefs: (session) => visibility?.getVisibleRefs(session) ?? null,
       flushIngest: () => localQueue.flush(),
     });
 
-    // 5. 初始化模型工具
-    const tools = new MemoryTools({ db: currentDb, cfg });
-    const addDisp = (d: any) => {
-      if (typeof d === 'function') regDisposers.push(d);
-    };
-    const resolveRuntimeScope = (input?: {
-      agent?: any;
-      session?: any;
-      sessionId?: string;
-      cwd?: string;
-      workspaceId?: string;
-      turn?: number;
-      position?: { turn?: number };
-    }) => {
-      const agent = input?.agent;
-      const session = input?.session || agent?.session;
-      const rawSessionId =
-        (typeof input?.sessionId === 'string' && input.sessionId.trim()) ||
-        (typeof session?.id === 'string' && session.id.trim()) ||
-        '';
-      const sessId = rawSessionId || 'default_session';
-      const cwd =
-        extractAgentCwd(agent) ||
-        extractSessionCwd(session) ||
-        (typeof input?.cwd === 'string' ? input.cwd.trim() : '') ||
-        resolveCtxAgentCwd(ctx, rawSessionId || undefined) ||
-        (typeof input?.workspaceId === 'string' ? input.workspaceId.trim() : '') ||
-        resolveSessionWorkspaceId(currentDb, rawSessionId || undefined) ||
-        process.cwd();
-      const turn =
-        typeof input?.turn === 'number'
-          ? input.turn
-          : (input?.position?.turn ?? agent?.position?.turn ?? 0);
-      return { cwd, sessId, explicitSessionId: rawSessionId || undefined, turn };
-    };
-
     // 4.1 预同步当前已存活 agent、后续 agent/created 及 system-prompt/assemble 时的稳定层 section
-    // DSH >= 0.2.2-rc.5 中 dsh-agent-loop 在 agent/pre-step 之前先调用 systemPrompt.assemble()
     const syncAgentPromptSection = (agent: any) => {
       if (!agent || !promptSections) return undefined;
       const liveCfg = getLiveCfg();
-      const { cwd, sessId } = resolveRuntimeScope({ agent });
-      if (isWorkspaceExcluded(cwd, liveCfg.excludeWorkspaces)) {
+      const scope = resolveRuntimeScope(ctx, currentDb, { agent }, { allowCwdFallback: false });
+      if (!scope.resolved || isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)) {
         if (typeof agent.id === 'string' && agent.id) {
           promptSections.disposeAgent(agent.id);
         }
         return undefined;
       }
       return promptSections.updateSection(agent, {
-        workspaceId: workspaceId(cwd),
-        sessionId: sessId,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessId,
       });
     };
 
@@ -601,13 +451,24 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                   ? ctx.agents.get(assembleCtx.agentId)
                   : undefined);
 
-              if (agent && promptSections) {
-                const synced = syncAgentPromptSection(agent);
-                if (Array.isArray(assembly?.sections)) {
-                  const stableText = synced?.text || '';
-                  const existingIdx = assembly.sections.findIndex(
-                    (s: any) => s && s.name === 'memory-stable'
-                  );
+              if (agent && promptSections && Array.isArray(assembly?.sections)) {
+                const liveCfg = getLiveCfg();
+                const scope = resolveRuntimeScope(ctx, currentDb, { agent }, { allowCwdFallback: false });
+                const existingIdx = assembly.sections.findIndex(
+                  (s: any) => s && s.name === 'memory-stable'
+                );
+
+                if (!scope.resolved || isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)) {
+                  if (existingIdx >= 0) {
+                    assembly.sections.splice(existingIdx, 1);
+                  }
+                } else {
+                  // 在 assemble 瀑布中仅更新缓存状态并修补 assembly.sections，绝不重复修改全局 section() 注册
+                  const synced = promptSections.syncAssemblyState(agent, {
+                    workspaceId: scope.workspaceId,
+                    sessionId: scope.sessId,
+                  });
+                  const stableText = synced.text || '';
                   if (stableText) {
                     const entry = {
                       name: 'memory-stable',
@@ -642,7 +503,8 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
             } catch {}
 
             if (typeof next === 'function') {
-              return await next();
+              const result = await next();
+              return result ?? assembly;
             }
             return assembly;
           },
@@ -651,260 +513,40 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
       );
     }
 
-    if (ctx.tools?.register) {
-      // tool 1: memory_search
-      addDisp(
-        ctx.tools.register({
-          name: 'memory_search',
-          description:
-            '在长期记忆库中检索历史事实、配置与经验规则（支持 Hindsight 四层认知网络过滤与 OpenViking 虚拟路径/L0-L1 分层输出）。注意：只有在当前系统提供的 memory_context 中找不到所需信息时才调用此工具。',
-          parameters: {
-            query: { type: 'string', required: true, description: '搜索关键词或问题' },
-            limit: { type: 'number', description: '最多返回结果数 (1-8)' },
-            types: { type: 'array', items: { type: 'string' }, description: '过滤的记忆类型' },
-            network: {
-              type: 'string',
-              description: 'Hindsight 认知网络过滤: world | experience | observation | opinion',
-            },
-            uriPrefix: {
-              type: 'string',
-              description: 'OpenViking 虚拟路径前缀过滤 (如 viking://workspace/memories/skills)',
-            },
-            tier: {
-              type: 'string',
-              description: 'OpenViking 上下文层级: L0 (一句话摘要, 默认) | L1 (结构化概览)',
-            },
-          },
-          output: {
-            schema: { type: 'string' },
-            render: (_args: any, value: string) => [{ type: 'text', text: value }],
-          },
-          execute: async (args: any, exec: any) => {
-            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
-            return tools.search(args, { workspaceId: cwd, sessionId: sessId, turn });
-          },
-        })
-      );
+    // 5. 初始化并注册 4 个精简 LLM 工具（Option A：memory_search / memory_expand / memory_feedback / memory_note）
+    const tools = new MemoryTools({ db: currentDb, cfg, getCfg: getLiveCfg });
+    addDisp(
+      registerMemoryTools(ctx, {
+        db: currentDb,
+        tools,
+        getLiveCfg,
+      })
+    );
 
-      // tool 2: memory_expand
-      addDisp(
-        ctx.tools.register({
-          name: 'memory_expand',
-          description:
-            '按 OpenViking L0/L1/L2 层级展开某条记忆的摘要、结构化概览或完整正文与来源证据详情（支持记忆 ID、短码或 viking:// 虚拟路径）。',
-          parameters: {
-            id: {
-              type: 'string',
-              required: true,
-              description: '记忆 ID、4 位短码 (如 m_ab12) 或 OpenViking 虚拟路径 (如 viking://...)',
-            },
-            tier: {
-              type: 'string',
-              description: '展开层级: L0 (摘要) | L1 (概览) | L2 (完整正文+证据+拓扑关系, 默认)',
-            },
-          },
-          output: {
-            schema: { type: 'string' },
-            render: (_args: any, value: string) => [{ type: 'text', text: value }],
-          },
-          execute: async (args: any, exec: any) => {
-            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
-            return tools.expand(args, { workspaceId: cwd, sessionId: sessId, turn });
-          },
-        })
-      );
-
-      // tool 3: memory_feedback
-      addDisp(
-        ctx.tools.register({
-          name: 'memory_feedback',
-          description: '向记忆系统反馈某条引用的有用程度。',
-          parameters: {
-            id: { type: 'string', required: true, description: '记忆完整 ID' },
-            contentRev: { type: 'integer', required: true, description: '当前引用的正文修订号' },
-            helpful: { type: 'boolean', required: true, description: '是否有帮助' },
-            note: { type: 'string', description: '反馈说明' },
-          },
-          output: {
-            schema: { type: 'string' },
-            render: (_args: any, value: string) => [{ type: 'text', text: value }],
-          },
-          execute: async (args: any, exec: any) => {
-            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
-            return tools.feedback(args, { workspaceId: cwd, sessionId: sessId, turn });
-          },
-        })
-      );
-
-      // tool 4: memory_note
-      addDisp(
-        ctx.tools.register({
-          name: 'memory_note',
-          description: '记录一条待审批的候选记忆备忘 (每轮最多调用 3 次)。',
-          parameters: {
-            content: { type: 'string', required: true, description: '记忆内容 (8-400字符)' },
-            kind: {
-              type: 'string',
-              required: true,
-              description: '类型: fact (事实), preference (偏好), procedure (步骤/流程)',
-            },
-          },
-          output: {
-            schema: { type: 'string' },
-            render: (_args: any, value: string) => [{ type: 'text', text: value }],
-          },
-          execute: async (args: any, exec: any) => {
-            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
-            return tools.note(args, { workspaceId: cwd, sessionId: sessId, turn });
-          },
-        })
-      );
-
-      // tool 5: memory_confirm (汲取自 tr1v3r/dsh-ltm)
-      addDisp(
-        ctx.tools.register({
-          name: 'memory_confirm',
-          description: '显式确认某条记忆的事实依然正确有效，强化其可信度与效用。',
-          parameters: {
-            id: { type: 'string', required: true, description: '记忆完整 ID 或短码' },
-          },
-          output: {
-            schema: { type: 'string' },
-            render: (_args: any, value: string) => [{ type: 'text', text: value }],
-          },
-          execute: async (args: any, exec: any) => {
-            const { cwd, explicitSessionId } = resolveRuntimeScope(exec);
-            return tools.confirm(args, { workspaceId: cwd, sessionId: explicitSessionId });
-          },
-        })
-      );
-
-      // tool 6: memory_merge (汲取自 tr1v3r/dsh-ltm)
-      addDisp(
-        ctx.tools.register({
-          name: 'memory_merge',
-          description: '将两条重复或相关的记忆合并为一条规范记录，旧记忆自动被取代。',
-          parameters: {
-            sourceId: { type: 'string', required: true, description: '待合并/被取代的记忆 ID' },
-            targetId: { type: 'string', required: true, description: '保留并吸收证据的目标记忆 ID' },
-            reason: { type: 'string', description: '合并原因说明' },
-          },
-          output: {
-            schema: { type: 'string' },
-            render: (_args: any, value: string) => [{ type: 'text', text: value }],
-          },
-          execute: async (args: any, exec: any) => {
-            const { cwd, explicitSessionId } = resolveRuntimeScope(exec);
-            return tools.merge(args, { workspaceId: cwd, sessionId: explicitSessionId });
-          },
-        })
-      );
-
-      // tool 7: memory (统一工具，汲取自 LZMW/dsh-memory 单工具设计，极大节省提示词空间)
-      addDisp(
-        ctx.tools.register({
-          name: 'memory',
-          description:
-            '长期记忆统一集成工具 (支持 search, expand, tree, reflect, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal, init)。',
-          parameters: {
-            action: {
-              type: 'string',
-              required: true,
-              description:
-                '操作类型: search | expand | tree | reflect | note | feedback | confirm | merge | core_read | core_set | core_append | reconcile | doctor | heal | init',
-            },
-            query: { type: 'string', description: '搜索关键词或主题 (action=search/reflect/tree 时使用)' },
-            id: { type: 'string', description: '记忆 ID 或 viking:// 路径 (action=expand/feedback/confirm 时使用)' },
-            uri: { type: 'string', description: 'OpenViking 虚拟目录或路径 (如 viking://workspace/memories/skills)' },
-            tier: { type: 'string', description: 'OpenViking 分层上下文粒度: L0 | L1 | L2' },
-            network: { type: 'string', description: 'Hindsight 四层认知网络: world | experience | observation | opinion' },
-            topic: { type: 'string', description: 'Hindsight 心智模型归纳主题 (action=reflect 时使用)' },
-            sourceId: { type: 'string', description: '待合并的源记忆 ID (action=merge 时使用)' },
-            targetId: { type: 'string', description: '目标记忆 ID (action=merge 时使用)' },
-            content: {
-              type: 'string',
-              description: '备忘/核心块/调和正文 (action=note/core_set/reconcile 时使用)',
-            },
-            kind: {
-              type: 'string',
-              description: '备忘类型: fact | preference | procedure (action=note 时使用)',
-            },
-            contentRev: { type: 'integer', description: '正文修订号 (action=feedback 时使用)' },
-            helpful: { type: 'boolean', description: '是否有帮助 (action=feedback 时使用)' },
-            limit: { type: 'number', description: '返回结果数量限制' },
-            block: {
-              type: 'string',
-              description: '核心块名称 (human | persona | project, action=core_* 时使用)',
-            },
-            text: { type: 'string', description: '追加文本 (action=core_append 时使用)' },
-          },
-          output: {
-            schema: { type: 'string' },
-            render: (_args: any, value: string) => [{ type: 'text', text: value }],
-          },
-          execute: async (args: any, exec: any) => {
-            const { cwd, sessId, turn } = resolveRuntimeScope(exec);
-            return tools.unified(args, { workspaceId: cwd, sessionId: sessId, turn });
-          },
-        })
-      );
-
-      // tool 8: memory_core (汲取自 Letta/MemGPT 核心工作区自编辑)
-      addDisp(
-        ctx.tools.register({
-          name: 'memory_core',
-          description:
-            '读取核心记忆块，或提出等待用户审批的修改 (human 用户画像, persona 智能体准则, project 项目规则)。',
-          parameters: {
-            action: { type: 'string', required: true, description: '操作: read | set | append' },
-            block: {
-              type: 'string',
-              description: '核心块名称: human | persona | project (默认 project)',
-            },
-            content: { type: 'string', description: '设置的内容 (action=set 时使用)' },
-            text: { type: 'string', description: '追加的内容 (action=append 时使用)' },
-          },
-          output: {
-            schema: { type: 'string' },
-            render: (_args: any, value: string) => [{ type: 'text', text: value }],
-          },
-          execute: async (args: any, exec: any) => {
-            const { cwd, explicitSessionId } = resolveRuntimeScope(exec);
-            if (args.action === 'read') return tools.coreRead({ block: args.block }, { workspaceId: cwd });
-            if (args.action === 'set')
-              return tools.coreSet(
-                { block: args.block || 'project', content: args.content || '' },
-                { workspaceId: cwd, sessionId: explicitSessionId }
-              );
-            if (args.action === 'append')
-              return tools.coreAppend(
-                { block: args.block || 'project', text: args.text || args.content || '' },
-                { workspaceId: cwd, sessionId: explicitSessionId }
-              );
-            return `Error: unknown action '${args.action}'. Supported: read, set, append`;
-          },
-        })
-      );
-    }
-
-    // 6. 初始化并注册用户命令 /memory（无 commands 服务的 CLI/headless 环境按可选延迟注入）
-    const commands = new MemoryCommands(currentDb, cfg);
+    // 6. 初始化并延迟注册用户命令 /memory（无 commands 服务的 CLI/headless/ACP 宿主安全降级）
+    const commands = new MemoryCommands(currentDb, cfg, getLiveCfg);
     const mountCommands = (cmdCtx: any): (() => void) => {
       if (!cmdCtx?.commands?.register) return () => {};
       let cmdDisposed = false;
-      let regDisp: any;
+      let regDisp: unknown;
       try {
         regDisp = cmdCtx.commands.register({
           name: 'memory',
           description: '长期记忆系统管理与状态检查',
           input: {
-            hint: 'init | stats | doctor | heal | tree [viking://uri] [--l1|--l2] | reflect [topic] | inspect <id|viking://uri> | list [page] | confirm <id> | merge <src> <tgt> | restore <id> | core [block] [text] | reconcile <text> | graph [id|limit] | export-viking [dir] | import-viking [dir] | export-md <dir> | import-md <dir> | export-bank [dir] | import-bank [dir] | migrate <fmt> <path> | history <id> | rollback <id> <v> | forget <id> | pin <id> | unpin <id> | freeze <id> | unfreeze <id> | approve <id> | pending | approve-repair <id> | reject-repair <id> | evolve | strategy [list|rollback <v>] | backfill [--dry-run] | eval [suite] | budget | export <path> | import <path>',
+            hint: getMemoryCommandHint(),
           },
           handler: ({ agent, session, rawInput }: any) => {
-            const { cwd, sessId } = resolveRuntimeScope({ agent, session });
+            const scope = resolveRuntimeScope(
+              cmdCtx,
+              currentDb,
+              { agent, session },
+              { allowCwdFallback: true }
+            );
             return commands.handleCommand(rawInput, {
-              workspaceId: cwd,
-              sessionId: sessId,
+              workspaceId: scope.cwd,
+              ...(scope.workspacePath ? { cwd: scope.workspacePath } : {}),
+              sessionId: scope.explicitSessionId,
             });
           },
         });
@@ -920,9 +562,7 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
       };
     };
 
-    if (typeof ctx.commands?.register === 'function') {
-      addDisp(mountCommands(ctx));
-    } else if (typeof ctx.inject === 'function') {
+    if (typeof ctx.inject === 'function') {
       addDisp(
         ctx.inject(['commands'], (cmdCtx: any) => {
           const disp = mountCommands(cmdCtx);
@@ -934,10 +574,15 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
           } catch {}
         })
       );
+    } else {
+      try {
+        if (typeof ctx.commands?.register === 'function') {
+          addDisp(mountCommands(ctx));
+        }
+      } catch {}
     }
 
-    // 6.2 注册 turn-stopping 全自动闭环调度监听器
-    let lastTurnWeaveAt = 0;
+    // 6.2 注册极速非阻塞 turn-stopping 调度监听器 (< 1ms，仅入队后台任务，严禁同步清理/反思/织网/同步目录树)
     unlistenTurnStopping =
       typeof ctx.on === 'function'
         ? ctx.on('agent/turn-stopping', (evt: any) => {
@@ -949,18 +594,23 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                 (typeof evt?.sessionId === 'string' && evt.sessionId.trim()) ||
                 (typeof session?.id === 'string' && session.id.trim()) ||
                 undefined;
-              const { cwd: rawCwd } = resolveRuntimeScope({
-                agent: evt?.agent,
-                session,
-                sessionId: sessId,
-                cwd: evt?.cwd,
-                workspaceId: evt?.workspaceId,
-              });
-              if (isWorkspaceExcluded(rawCwd, liveCfg.excludeWorkspaces)) return;
-              const wsId =
-                (typeof evt?.workspaceId === 'string' && evt.workspaceId.trim()
-                  ? workspaceId(evt.workspaceId.trim())
-                  : '') || workspaceId(rawCwd);
+              const scope = resolveRuntimeScope(
+                ctx,
+                currentDb,
+                {
+                  agent: evt?.agent,
+                  session,
+                  sessionId: sessId,
+                  cwd: evt?.cwd,
+                  workspaceId: evt?.workspaceId,
+                },
+                { allowCwdFallback: false }
+              );
+              if (!scope.resolved || isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)) {
+                return;
+              }
+              const wsId = scope.workspaceId;
+              const rawCwd = scope.workspacePath || scope.cwd;
 
               if (sessId) {
                 const eligible =
@@ -973,7 +623,7 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                       : eligible.workspaceId ||
                         resolveSessionWorkspaceId(currentDb, eligible.sessionId) ||
                         rawCwd;
-                  if (!isWorkspaceExcluded(distillCwd, liveCfg.excludeWorkspaces)) {
+                  if (!isWorkspaceOrMappedExcluded(distillCwd, liveCfg.excludeWorkspaces, currentDb)) {
                     localScheduler.enqueue('distill', `${eligible.sessionId}:seq:${eligible.minSeq}`, {
                       sessionId: eligible.sessionId,
                       cwd: distillCwd,
@@ -981,29 +631,14 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                   }
                 }
               }
-              // 聚类计算留给空闲期的 consolidate 任务自行完成，不在每轮对话结束时同步阻塞宿主事件循环
+
               const bucket1h = Math.floor(now / 3600_000);
               localScheduler.enqueue('consolidate', `auto_consolidate:${wsId}:${bucket1h}`, {
                 workspaceId: wsId,
               });
 
-              // 节流执行本地无效记忆清理、Hindsight 置信度校准/心智模型合成、A-Mem 双链织网与 OpenViking 目录树同步 (至少间隔 60s)
-              if (now - lastTurnWeaveAt >= 60_000) {
-                lastTurnWeaveAt = now;
-                pruneInvalidMemories(currentDb, { workspaceId: wsId, now });
-                runHindsightReflect(currentDb, {
-                  workspaceId: wsId,
-                  sessionId: sessId,
-                  autoSynthesize: true,
-                  minClusterSize: 3,
-                  persistCalibration: true,
-                  now,
-                });
-                weaveZettelkastenLinks(currentDb, { workspaceId: wsId, maxNewLinks: 15, now });
-                syncAutonomousVikingTree(currentDb, { workspacePath: rawCwd, workspaceId: wsId });
-              }
               const bucket10m = Math.floor(now / 600_000);
-              localScheduler.enqueue('maintain', `auto_maintain:${bucket10m}`, {
+              localScheduler.enqueue('maintain', `auto_maintain:${wsId}:${bucket10m}`, {
                 auto: true,
                 workspaceId: wsId,
                 cwd: rawCwd,
@@ -1014,10 +649,37 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
           })
         : () => {};
 
-    // 6.3 注册 Web 端点（供 DSH 前端侧栏面板访问；headless/CLI 环境按可选延迟注入）
+    // 6.3 注册 Web 端点（传入 scheduler / initialCfg / getLiveCfg / onConfigUpdated / activeWorkspaces 契约）
+    const activeWorkspaces = (): string[] => {
+      const wsSet = new Set<string>();
+      try {
+        const liveCfg = getLiveCfg();
+        const liveAgents = typeof ctx.agents?.list === 'function' ? ctx.agents.list() : [];
+        if (Array.isArray(liveAgents)) {
+          for (const agent of liveAgents) {
+            const rawCwd = extractAgentCwd(agent);
+            if (!rawCwd) continue;
+            if (isWorkspaceOrMappedExcluded(rawCwd, liveCfg.excludeWorkspaces, currentDb)) continue;
+            const wsId = observeWorkspacePath(currentDb, rawCwd);
+            if (wsId) wsSet.add(wsId);
+          }
+        }
+      } catch {}
+      return Array.from(wsSet);
+    };
+
+    const webRouteOptions: WebRouteOptions = {
+      scheduler: localScheduler,
+      initialCfg,
+      getLiveCfg,
+      onConfigUpdated,
+      activeWorkspaces,
+    };
+    const registerWeb: RegisterWebRoutesFn = registerWebRoutes;
+
     if (typeof ctx.inject === 'function') {
       unlistenWeb = ctx.inject(['webServer'], (webCtx: any) => {
-        const disp = registerWebRoutes(webCtx, currentDb, cfg);
+        const disp = registerWeb(webCtx, currentDb, cfg, webRouteOptions);
         addDisp(disp);
         try {
           if (typeof webCtx?.effect === 'function') {
@@ -1028,10 +690,11 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
     } else {
       try {
         if (typeof ctx.webServer?.register === 'function') {
-          unlistenWeb = registerWebRoutes(ctx, currentDb, cfg);
+          unlistenWeb = registerWeb(ctx, currentDb, cfg, webRouteOptions);
         }
       } catch {}
     }
+
     if (disposed) {
       await cleanup(true);
     }

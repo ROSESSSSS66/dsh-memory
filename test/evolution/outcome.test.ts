@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import { DEFAULTS, type PluginConfig } from '../../src/config.js';
 import { evaluateTurnOutcome } from '../../src/evolution/outcome.js';
@@ -15,6 +15,10 @@ describe('Turn Outcome & Utility Evaluation (M3-T4)', () => {
       ...DEFAULTS,
       utilityLR: 0.1,
     };
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   it('updates utility accurately for used vs unused memories upon positive outcome (精确数值断言)', () => {
@@ -181,5 +185,96 @@ describe('Turn Outcome & Utility Evaluation (M3-T4)', () => {
 
     const jobsAfter = db.all("SELECT * FROM jobs WHERE kind = 'reflect'");
     expect(jobsAfter).toHaveLength(1);
+    // Idempotency: second evaluation must NOT double-update fail_count or utility
+    expect(res2.updatedInjections).toBe(0);
+    const m1After = db.get<MemoryRecord>('SELECT utility, fail_count FROM memories WHERE id = ?', [m1Id]);
+    expect(m1After?.fail_count).toBe(1);
+    expect(m1After?.utility).toBeCloseTo(0.45, 4);
+  });
+
+  it('always writes turn_metrics even without injections, preserves injection strategy_v, uses isCorrectionMessage, and harvests redacted samples with distractors', () => {
+    // Conditional statement must NOT be treated as correction (shared isCorrectionMessage)
+    const condRes = evaluateTurnOutcome(
+      db,
+      {
+        sessionId: 's_no_inj',
+        turn: 1,
+        nextUserMessage: '如果不行就回退到旧版本',
+        now: 5000,
+      },
+      cfg
+    );
+    expect(condRes.isCorrection).toBe(false);
+    expect(condRes.updatedInjections).toBe(0);
+    // turn_metrics MUST still be written even though injectionRows.length === 0
+    const metricRow = db.get<{ outcome: number; correction: number; strategy_v: number }>(
+      "SELECT outcome, correction, strategy_v FROM turn_metrics WHERE session_id = 's_no_inj' AND turn = 1"
+    );
+    expect(metricRow).toBeDefined();
+    expect(metricRow?.correction).toBe(0);
+
+    // Harvest with turn IS NULL userEvent fallback, secret redaction, and workspace distractor
+    const targetRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '项目 PostgreSQL 端口配置为 5432。',
+      scope: 'workspace',
+      workspaceId: 'ws_harv',
+      source_kind: 'user',
+      confidence: 1.0,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's_harv', seq: 1, kind: 'user' }],
+      actor: 'user',
+    });
+    const distRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '前端样式框架统一采用 Tailwind CSS 4。',
+      scope: 'workspace',
+      workspaceId: 'ws_harv',
+      source_kind: 'user',
+      confidence: 1.0,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's_harv', seq: 2, kind: 'user' }],
+      actor: 'user',
+    });
+    const targetId = (targetRes as any).id;
+    expect((distRes as any).id).toBeTruthy();
+
+    // Injection recorded with strategy_v = 7 (even though active strategy is v1)
+    db.run(
+      `INSERT INTO injections (session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at)
+       VALUES ('s_harv', 1, ?, 1, 'dynamic', 1, 40, 'content', 7, 1000)`,
+      [targetId]
+    );
+    // NULL-turn user prompt containing a secret, followed by turn=1 assistant reply
+    db.run(
+      `INSERT INTO raw_events (session_id, seq, workspace_id, type, time, turn, role, origin_kind, text, processed)
+       VALUES
+       ('s_harv', 1, 'ws_harv', 'user/message', 1000, NULL, 'user', 'user', 'PostgreSQL 端口是多少？token="sk-secret1234567890123456"', 0),
+       ('s_harv', 2, 'ws_harv', 'assistant/message', 1100, 1, 'assistant', 'assistant', 'PostgreSQL 端口配置为 5432。', 0)`
+    );
+
+    const harvRes = evaluateTurnOutcome(
+      db,
+      {
+        sessionId: 's_harv',
+        turn: 1,
+        nextUserMessage: '好的，解决了！',
+        now: 6000,
+      },
+      cfg
+    );
+    expect(harvRes.outcome).toBe(1.0);
+
+    const metricHarv = db.get<{ strategy_v: number }>(
+      "SELECT strategy_v FROM turn_metrics WHERE session_id = 's_harv' AND turn = 1"
+    );
+    expect(metricHarv?.strategy_v).toBe(7);
+
+    const evalRow = db.get<{ payload: string }>('SELECT payload FROM eval_cases LIMIT 1');
+    expect(evalRow).toBeDefined();
+    expect(evalRow!.payload).not.toContain('sk-secret1234567890123456');
+    const parsedCase = JSON.parse(evalRow!.payload);
+    // Must include the target memory AND workspace distractor(s)
+    expect(parsedCase.setup.length).toBeGreaterThanOrEqual(2);
   });
 });

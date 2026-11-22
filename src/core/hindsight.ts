@@ -1,16 +1,30 @@
-import type {
-  Db,
-  MemoryRecord,
-  MemoryType,
-  HindsightNetwork,
-  HindsightDisposition,
-  QueryPlan,
+import crypto from 'node:crypto';
+import {
+  hydrateMemoryRow,
+  parseOriginKinds,
+  type Db,
+  type MemoryRecord,
+  type MemoryRow,
+  type MemoryType,
+  type OriginKind,
+  type HindsightNetwork,
+  type HindsightDisposition,
+  type QueryPlan,
 } from '../types.js';
 import { workspaceId, scopeFilterSQL } from './scope.js';
 import { extractEntities } from './text.js';
-import { redactSecrets } from './privacy.js';
-import { upsertCandidate, addRelation } from './writer.js';
-import { hasUserEvidence } from './trust.js';
+import {
+  redactSecrets,
+  isWorkspaceExcluded,
+  memoryPrivacyFilterSQL,
+} from './privacy.js';
+import { upsertCandidate, addRelation, saveVersionSnapshot } from './writer.js';
+import {
+  hasUntrustedOrigin,
+  isUntrustedSourceKind,
+  sourceKindToOriginKind,
+} from './trust.js';
+import { removeCachedRuntimeEmbedding } from './vector.js';
 
 export const DEFAULT_DISPOSITION: HindsightDisposition = {
   skepticism: 0.35,
@@ -32,13 +46,37 @@ export const HINDSIGHT_NETWORK_LABELS: Record<HindsightNetwork, string> = {
   opinion: 'OPINION (心智模型与偏好网络)',
 };
 
+function clamp01(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(1, value));
+}
+
+function sanitizeDisposition(d?: Partial<HindsightDisposition>): HindsightDisposition {
+  return {
+    skepticism: clamp01(d?.skepticism, DEFAULT_DISPOSITION.skepticism),
+    literalism: clamp01(d?.literalism, DEFAULT_DISPOSITION.literalism),
+    empathy: clamp01(d?.empathy, DEFAULT_DISPOSITION.empathy),
+  };
+}
+
+function escapeLike(input: string): string {
+  return input.replace(/[\\%_]/g, '\\$&');
+}
+
 /**
  * 将底层 MemoryType 映射到 Hindsight 四层认知网络
+ * 注意：优先判定 procedural -> observation，确保合成的 procedural 规程模型在所有路径中一致归类为 observation
  */
 export function classifyHindsightNetwork(
   type: MemoryType,
   slotKey?: string | null
 ): HindsightNetwork {
+  if (type === 'procedural') {
+    return 'observation';
+  }
+  if (slotKey && slotKey.startsWith('hindsight.obs.')) {
+    return 'observation';
+  }
   if (slotKey && slotKey.startsWith('hindsight.model.')) {
     return 'opinion';
   }
@@ -48,8 +86,6 @@ export function classifyHindsightNetwork(
     case 'episodic':
     case 'failure':
       return 'experience';
-    case 'procedural':
-      return 'observation';
     case 'belief':
     case 'preference':
     case 'goal':
@@ -116,23 +152,50 @@ export interface EvidenceMetrics {
   derivedSourceCount: number;
 }
 
+function deriveBaseConfidencePrior(
+  memory: Pick<MemoryRecord, 'source_kind' | 'approved_by' | 'origin_kinds'>,
+  hasUserProof: boolean
+): number {
+  if (hasUntrustedOrigin(memory)) {
+    return 0.45;
+  }
+  if (memory.approved_by === 'user' || (memory.source_kind === 'user' && hasUserProof)) {
+    return 0.8;
+  }
+  if (hasUserProof) {
+    return 0.65;
+  }
+  if (memory.source_kind === 'system' || memory.source_kind === 'rule') {
+    return 0.58;
+  }
+  return 0.5;
+}
+
 /**
- * Hindsight Opinion / Observation 证据密度与 Disposition 调制置信度演化算子
- * 结合多会话独立证据、正负向在线效用反馈、矛盾张力与认知倾向 (skepticism / literalism / empathy) 动态校准置信度
+ * Hindsight Opinion / Observation 无状态幂等目标置信度校准算子
+ * 锚定固定来源先验 (basePrior)，结合多会话独立证据、正负向在线效用反馈、矛盾张力与认知倾向计算目标置信度；
+ * 多次重复调用不发生加性漂移，彻底消除趋近 0.99 或坍缩至 0.10 的反馈失控。
  */
 export function computeEvidenceCalibratedConfidence(
   memory: MemoryRecord,
   metrics: EvidenceMetrics,
-  disposition: HindsightDisposition = DEFAULT_DISPOSITION
+  disposition: HindsightDisposition = DEFAULT_DISPOSITION,
+  basePrior?: number
 ): number {
-  let conf = memory.confidence;
+  const disp = sanitizeDisposition(disposition);
+  const untrusted = hasUntrustedOrigin(memory);
+
+  let conf =
+    typeof basePrior === 'number' && Number.isFinite(basePrior)
+      ? Math.max(0.1, Math.min(0.95, basePrior))
+      : deriveBaseConfidencePrior(memory, metrics.hasUserProof);
 
   // 1. 多源独立会话证据强化 (Noisy-OR 对数增益)
-  const extraSessions = Math.max(0, metrics.distinctSessions - 1);
-  const derivedBonus = Math.min(3, metrics.derivedSourceCount);
+  const extraSessions = Math.max(0, (metrics.distinctSessions || 1) - 1);
+  const derivedBonus = Math.min(3, Math.max(0, metrics.derivedSourceCount || 0));
   if (extraSessions > 0 || derivedBonus > 0) {
     const evidenceBoost =
-      0.04 * Math.log2(1 + extraSessions + 0.8 * derivedBonus) * (1 - 0.3 * disposition.skepticism);
+      0.05 * Math.log2(1 + extraSessions + 0.8 * derivedBonus) * (1 - 0.3 * disp.skepticism);
     conf += evidenceBoost;
   }
 
@@ -141,28 +204,34 @@ export function computeEvidenceCalibratedConfidence(
   const fail = Math.max(0, memory.fail_count || 0);
   if (succ + fail > 0) {
     const netSignal = (succ - 1.5 * fail) / (succ + fail + 2);
-    conf += 0.08 * netSignal;
+    conf += 0.1 * netSignal;
   }
 
   // 3. Disposition: Empathy 对用户验证偏好/目标的正向保护 vs Skepticism 对无用户证据项的衰减
   const network = classifyHindsightNetwork(memory.type, memory.slot_key);
-  if (network === 'opinion' && memory.type === 'preference' && metrics.hasUserProof) {
-    conf += 0.03 * disposition.empathy;
-  } else if (!metrics.hasUserProof && disposition.skepticism > 0.2) {
-    conf -= 0.04 * disposition.skepticism;
+  if (
+    network === 'opinion' &&
+    (memory.type === 'preference' || memory.type === 'goal') &&
+    metrics.hasUserProof
+  ) {
+    conf += 0.04 * disp.empathy;
+  } else if (!metrics.hasUserProof && disp.skepticism > 0.2) {
+    conf -= 0.06 * disp.skepticism;
   }
 
   // 4. Literalism: 拥有明确规范槽位 (slot_key) 的结构化记忆获得确定性加成
   if (memory.slot_key && !memory.slot_key.startsWith('core:')) {
-    conf += 0.02 * disposition.literalism;
+    conf += 0.025 * disp.literalism;
   }
 
   // 5. 矛盾张力折损
   if (metrics.hasActiveContradiction) {
-    conf -= 0.12 * (0.5 + 0.5 * disposition.skepticism);
+    conf -= 0.14 * (0.5 + 0.5 * disp.skepticism);
   }
 
-  return Number(Math.max(0.1, Math.min(0.99, conf)).toFixed(4));
+  // 6. 不可信外部来源 (web/tool) 严格封顶 0.50，与 writer.ts 信任边界一致
+  const upperBound = untrusted ? 0.5 : 0.99;
+  return Number(Math.max(0.1, Math.min(upperBound, conf)).toFixed(4));
 }
 
 export interface SynthesizedMentalModel {
@@ -204,27 +273,131 @@ export interface HindsightReflectReport {
   }>;
 }
 
-function normalizeTopicSlug(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/\\/g, '/')
-    .replace(/[^a-z0-9\u4e00-\u9fa5._/-]+/g, '_')
+interface DerivedSourceSnapshot {
+  memory_id: string;
+  content_rev: number;
+  hash: string;
+}
+
+function parseDerivedSourcesMeta(metadata: string | null | undefined): DerivedSourceSnapshot[] {
+  if (!metadata) return [];
+  try {
+    const parsed = JSON.parse(metadata);
+    if (parsed && Array.isArray(parsed.sources)) {
+      return parsed.sources.filter(
+        (s: unknown): s is DerivedSourceSnapshot =>
+          Boolean(s) &&
+          typeof s === 'object' &&
+          typeof (s as DerivedSourceSnapshot).memory_id === 'string' &&
+          typeof (s as DerivedSourceSnapshot).content_rev === 'number' &&
+          typeof (s as DerivedSourceSnapshot).hash === 'string'
+      );
+    }
+  } catch {
+    // malformed metadata falls back to empty snapshot
+  }
+  return [];
+}
+
+/**
+ * 将主题锚点规范化为严格 ASCII slug ([a-z0-9_-]，长度 <= 32)，
+ * 使 `hindsight.model.<slug>` 始终满足 parse.ts 的 `^[a-z0-9.:_-]+$` 且总长 <= 48。
+ */
+export function normalizeTopicSlug(raw: string): string {
+  const trimmed = (raw || '').trim().toLowerCase().replace(/\\/g, '/');
+  if (trimmed.length < 2) return '';
+
+  const ascii = trimmed
+    .replace(/[^a-z0-9._/-]+/g, '_')
     .replace(/[/_.-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 36);
+    .replace(/^_+|_+$/g, '');
+  const hasNonAscii = /[^\x00-\x7f]/.test(trimmed);
+
+  if (!hasNonAscii && ascii.length >= 2) {
+    return ascii.slice(0, 32).replace(/_+$/, '');
+  }
+
+  const hash = crypto.createHash('sha256').update(trimmed).digest('hex').slice(0, 10);
+  if (ascii.length >= 2) {
+    const prefix = ascii.slice(0, 20).replace(/_+$/, '');
+    return prefix ? `${prefix}_${hash}` : `topic_${hash}`;
+  }
+  return `topic_${hash}`;
+}
+
+interface ModelFreshnessCheck {
+  fresh: boolean;
+  hasInactiveSource: boolean;
+  activeSourceCount: number;
+  linkedTargetIds: Set<string>;
+}
+
+function inspectDerivedModelFreshness(
+  db: Db,
+  modelId: string
+): ModelFreshnessCheck {
+  const edges = db.all<{
+    to_id: string;
+    metadata: string | null;
+    target_id: string | null;
+    target_status: string | null;
+    target_rev: number | null;
+    target_hash: string | null;
+  }>(
+    `SELECT r.to_id, r.metadata,
+            t.id AS target_id, t.status AS target_status,
+            t.content_rev AS target_rev, t.hash AS target_hash
+     FROM memory_relations r
+     LEFT JOIN memories t ON t.id = r.to_id
+     WHERE r.from_id = ? AND r.rel = 'derived_from'`,
+    [modelId]
+  );
+
+  const linkedTargetIds = new Set<string>();
+  if (edges.length === 0) {
+    return { fresh: false, hasInactiveSource: false, activeSourceCount: 0, linkedTargetIds };
+  }
+
+  let fresh = true;
+  let hasInactiveSource = false;
+  let activeSourceCount = 0;
+
+  for (const edge of edges) {
+    linkedTargetIds.add(edge.to_id);
+    const targetAlive =
+      edge.target_id !== null &&
+      (edge.target_status === 'active' || edge.target_status === 'frozen');
+    if (!targetAlive) {
+      fresh = false;
+      hasInactiveSource = true;
+      continue;
+    }
+    activeSourceCount++;
+
+    const snapshots = parseDerivedSourcesMeta(edge.metadata);
+    const snap = snapshots.find((s) => s.memory_id === edge.to_id);
+    if (snap) {
+      if (snap.content_rev !== edge.target_rev || snap.hash !== edge.target_hash) {
+        fresh = false;
+      }
+    }
+  }
+
+  return { fresh, hasInactiveSource, activeSourceCount, linkedTargetIds };
 }
 
 /**
  * Hindsight Reflect 核心引擎：
- * 1. 盘点 World / Experience / Observation / Opinion 四层认知记忆网络
- * 2. 基于多会话证据、执行反馈与认知倾向 (Disposition) 校准 Opinion 与 Observation 置信度
- * 3. 从共享实体或同命名空间槽位的多条 World + Experience 记忆中归纳合成心智模型 (Mental Models / Observations)
+ * 1. 盘点 World / Experience / Observation / Opinion 四层认知记忆网络（SQL 全量 GROUP BY，不被 LIMIT 截断）
+ * 2. 基于多会话证据、执行反馈与认知倾向 (Disposition) 幂等校准置信度（不改写 updated_at）
+ * 3. 从同工作区共享实体/槽位的多条记忆中归纳合成心智模型，并自动检测与刷新陈旧派生模型
  */
 export function runHindsightReflect(
   db: Db,
   options: {
     workspaceId?: string;
     sessionId?: string;
+    excludeWorkspaces?: string[];
     topic?: string;
     disposition?: Partial<HindsightDisposition>;
     autoSynthesize?: boolean;
@@ -235,39 +408,84 @@ export function runHindsightReflect(
 ): HindsightReflectReport {
   const now = options.now ?? Date.now();
   const wsId = workspaceId(options.workspaceId || process.cwd());
-  const disposition: HindsightDisposition = {
-    skepticism: options.disposition?.skepticism ?? DEFAULT_DISPOSITION.skepticism,
-    literalism: options.disposition?.literalism ?? DEFAULT_DISPOSITION.literalism,
-    empathy: options.disposition?.empathy ?? DEFAULT_DISPOSITION.empathy,
-  };
+  const disposition = sanitizeDisposition(options.disposition);
   const autoSynthesize = options.autoSynthesize !== false;
   const persistCalibration = options.persistCalibration !== false;
   const topicFilter = options.topic?.trim().toLowerCase() || '';
   const minClusterSize = options.minClusterSize ?? (topicFilter ? 2 : 3);
+  const excludeWorkspaces = options.excludeWorkspaces;
 
-  const scope = scopeFilterSQL({ workspaceId: wsId, sessionId: options.sessionId });
-  const rows = db.all<MemoryRecord>(
-    `SELECT * FROM memories
-     WHERE (${scope.sql})
-       AND status IN ('active', 'frozen')
-       AND type != 'meta'
-       AND COALESCE(slot_key, '') NOT LIKE 'core:%'
-     ORDER BY pinned DESC, utility DESC, confidence DESC, updated_at DESC
-     LIMIT 250`,
-    scope.params
-  );
-
-  const networkCounts: Record<HindsightNetwork, number> = {
+  const emptyNetworkCounts: Record<HindsightNetwork, number> = {
     world: 0,
     experience: 0,
     observation: 0,
     opinion: 0,
   };
 
-  for (const r of rows) {
-    const net = classifyHindsightNetwork(r.type, r.slot_key);
-    networkCounts[net]++;
+  if (excludeWorkspaces?.length && isWorkspaceExcluded(wsId, excludeWorkspaces)) {
+    return {
+      workspaceId: wsId,
+      disposition,
+      networkCounts: emptyNetworkCounts,
+      calibratedMemories: [],
+      synthesizedModels: [],
+      existingModels: [],
+    };
   }
+
+  const scope = scopeFilterSQL({ workspaceId: wsId, sessionId: options.sessionId });
+  const privacy = memoryPrivacyFilterSQL(excludeWorkspaces);
+  const baseWhere = `(${scope.sql}) AND (${privacy.sql}) AND status IN ('active', 'frozen') AND type != 'meta' AND COALESCE(slot_key, '') NOT LIKE 'core:%'`;
+  const baseParams: unknown[] = [...scope.params, ...privacy.params];
+
+  // 0. SQL 全量 GROUP BY 统计四层网络分布（不受 LIMIT 250 截断）
+  const networkCounts: Record<HindsightNetwork, number> = { ...emptyNetworkCounts };
+  const groupRows = db.all<{ type: MemoryType; slot_net: string | null; cnt: number }>(
+    `SELECT type,
+            CASE
+              WHEN type = 'procedural' THEN 'observation'
+              WHEN slot_key LIKE 'hindsight.obs.%' THEN 'observation'
+              WHEN slot_key LIKE 'hindsight.model.%' THEN 'opinion'
+              ELSE NULL
+            END AS slot_net,
+            COUNT(*) AS cnt
+     FROM memories
+     WHERE ${baseWhere}
+     GROUP BY type, slot_net`,
+    baseParams
+  );
+  for (const g of groupRows) {
+    const net = (g.slot_net as HindsightNetwork | null) ?? classifyHindsightNetwork(g.type);
+    networkCounts[net] += Number(g.cnt || 0);
+  }
+
+  // 推送 topicFilter 到 LIMIT 250 之前，并与 ix_mem_vec_rank 对齐 ORDER BY
+  let topicSql = '';
+  const topicParams: unknown[] = [];
+  if (topicFilter) {
+    const likePattern = `%${escapeLike(topicFilter)}%`;
+    topicSql = `AND (
+      LOWER(summary) LIKE ? ESCAPE '\\'
+      OR LOWER(content) LIKE ? ESCAPE '\\'
+      OR LOWER(COALESCE(slot_key, '')) LIKE ? ESCAPE '\\'
+      OR EXISTS (
+        SELECT 1 FROM memory_entities me
+        WHERE me.memory_id = memories.id
+          AND LOWER(me.entity) LIKE ? ESCAPE '\\'
+      )
+    )`;
+    topicParams.push(likePattern, likePattern, likePattern, likePattern);
+  }
+
+  const rawRows = db.all<MemoryRow>(
+    `SELECT * FROM memories
+     WHERE ${baseWhere}
+       ${topicSql}
+     ORDER BY pinned DESC, utility DESC, updated_at DESC
+     LIMIT 250`,
+    [...baseParams, ...topicParams]
+  );
+  const rows: MemoryRecord[] = rawRows.map((row) => hydrateMemoryRow(row));
 
   if (rows.length === 0) {
     return {
@@ -282,100 +500,254 @@ export function runHindsightReflect(
 
   const rowIds = rows.map((r) => r.id);
   const placeholders = rowIds.map(() => '?').join(', ');
+  const memById = new Map<string, MemoryRecord>();
+  for (const r of rows) {
+    memById.set(r.id, r);
+  }
 
-  // 批量查询来源会话数
-  const srcRows = db.all<{ memory_id: string; session_id: string; kind: string }>(
-    `SELECT memory_id, session_id, kind FROM memory_sources WHERE memory_id IN (${placeholders})`,
+  // 单次批量查询当前 content_rev 的来源证据（在写事务外完成，彻底消除 N+1）
+  const srcRows = db.all<{
+    memory_id: string;
+    content_rev: number;
+    session_id: string;
+    seq: number;
+    kind: string;
+    excerpt: string | null;
+  }>(
+    `SELECT memory_id, content_rev, session_id, seq, kind, excerpt
+     FROM memory_sources
+     WHERE memory_id IN (${placeholders})`,
     rowIds
   );
+
   const sessionsByMem = new Map<string, Set<string>>();
+  const currentRevSourcesByMem = new Map<
+    string,
+    Array<{ session_id: string; seq: number; kind: string; excerpt: string | null }>
+  >();
+  const hasUserSrcByMem = new Set<string>();
+  const hasTaintedSrcByMem = new Set<string>();
+
   for (const sr of srcRows) {
-    let set = sessionsByMem.get(sr.memory_id);
-    if (!set) {
-      set = new Set();
-      sessionsByMem.set(sr.memory_id, set);
+    const mem = memById.get(sr.memory_id);
+    if (!mem || sr.content_rev !== mem.content_rev) continue;
+
+    let sSet = sessionsByMem.get(sr.memory_id);
+    if (!sSet) {
+      sSet = new Set();
+      sessionsByMem.set(sr.memory_id, sSet);
     }
-    if (sr.session_id) set.add(sr.session_id);
+    if (sr.session_id) sSet.add(sr.session_id);
+
+    let list = currentRevSourcesByMem.get(sr.memory_id);
+    if (!list) {
+      list = [];
+      currentRevSourcesByMem.set(sr.memory_id, list);
+    }
+    list.push({
+      session_id: sr.session_id,
+      seq: sr.seq,
+      kind: sr.kind,
+      excerpt: sr.excerpt,
+    });
+
+    const normKind = (sr.kind || '').toLowerCase().trim();
+    if (normKind === 'user' || normKind === 'user_msg') {
+      hasUserSrcByMem.add(sr.memory_id);
+    } else if (isUntrustedSourceKind(normKind)) {
+      hasTaintedSrcByMem.add(sr.memory_id);
+    }
   }
 
-  // 批量查询关系 (derived_from & contradicts)
-  const relRows = db.all<{ from_id: string; to_id: string; rel: string }>(
-    `SELECT from_id, to_id, rel FROM memory_relations
-     WHERE from_id IN (${placeholders}) OR to_id IN (${placeholders})`,
+  const hasCleanUserEvidence = (mem: MemoryRecord): boolean => {
+    if (hasUntrustedOrigin(mem)) return false;
+    if (hasTaintedSrcByMem.has(mem.id)) return false;
+    return hasUserSrcByMem.has(mem.id);
+  };
+
+  // 批量查询关系 (derived_from & contradicts)，仅将 active/frozen 父节点计入有效覆盖
+  const outgoingDerivedRows = db.all<{
+    from_id: string;
+    to_id: string;
+    target_status: string | null;
+  }>(
+    `SELECT r.from_id, r.to_id, t.status AS target_status
+     FROM memory_relations r
+     LEFT JOIN memories t ON t.id = r.to_id
+     WHERE r.rel = 'derived_from'
+       AND r.from_id IN (${placeholders})`,
+    rowIds
+  );
+
+  const derivedTargetsByFrom = new Map<string, Set<string>>();
+  for (const rel of outgoingDerivedRows) {
+    if (rel.target_status !== 'active' && rel.target_status !== 'frozen') continue;
+    let tSet = derivedTargetsByFrom.get(rel.from_id);
+    if (!tSet) {
+      tSet = new Set();
+      derivedTargetsByFrom.set(rel.from_id, tSet);
+    }
+    tSet.add(rel.to_id);
+  }
+
+  // 仅 JOIN active/frozen 父节点，并校验 metadata 快照判断父模型是否仍然新鲜；
+  // 若父模型已被用户 pinned=1 或 frozen，则视为受保护的既有覆盖，禁止其他别名槽位重复合成影子模型
+  const incomingDerivedRows = db.all<{
+    from_id: string;
+    to_id: string;
+    metadata: string | null;
+    parent_pinned: number;
+    parent_status: string;
+  }>(
+    `SELECT r.from_id, r.to_id, r.metadata, p.pinned AS parent_pinned, p.status AS parent_status
+     FROM memory_relations r
+     JOIN memories p ON p.id = r.from_id
+     WHERE r.rel = 'derived_from'
+       AND p.status IN ('active', 'frozen')
+       AND r.to_id IN (${placeholders})`,
+    rowIds
+  );
+
+  const freshParentToTargets = new Map<string, Set<string>>();
+  const staleParentsSeen = new Set<string>();
+  const parentFreshCache = new Map<string, ModelFreshnessCheck>();
+
+  for (const rel of incomingDerivedRows) {
+    const isProtectedParent = rel.parent_pinned === 1 || rel.parent_status === 'frozen';
+    if (!isProtectedParent) {
+      let check = parentFreshCache.get(rel.from_id);
+      if (!check) {
+        check = inspectDerivedModelFreshness(db, rel.from_id);
+        parentFreshCache.set(rel.from_id, check);
+      }
+      if (!check.fresh) {
+        staleParentsSeen.add(rel.from_id);
+        continue;
+      }
+      const targetMem = memById.get(rel.to_id);
+      if (targetMem) {
+        const snaps = parseDerivedSourcesMeta(rel.metadata);
+        const snap = snaps.find((s) => s.memory_id === targetMem.id);
+        if (snap && (snap.content_rev !== targetMem.content_rev || snap.hash !== targetMem.hash)) {
+          staleParentsSeen.add(rel.from_id);
+          continue;
+        }
+      }
+    }
+    let covered = freshParentToTargets.get(rel.from_id);
+    if (!covered) {
+      covered = new Set();
+      freshParentToTargets.set(rel.from_id, covered);
+    }
+    covered.add(rel.to_id);
+  }
+  for (const staleId of staleParentsSeen) {
+    freshParentToTargets.delete(staleId);
+  }
+
+  // 批量查询活跃矛盾边 (仅计入双方均为 active/frozen 的矛盾)
+  const contraRows = db.all<{ from_id: string; to_id: string }>(
+    `SELECT r.from_id, r.to_id
+     FROM memory_relations r
+     JOIN memories m1 ON m1.id = r.from_id
+     JOIN memories m2 ON m2.id = r.to_id
+     WHERE r.rel = 'contradicts'
+       AND m1.status IN ('active', 'frozen')
+       AND m2.status IN ('active', 'frozen')
+       AND (r.from_id IN (${placeholders}) OR r.to_id IN (${placeholders}))`,
     [...rowIds, ...rowIds]
   );
-  const derivedTargetsByFrom = new Map<string, Set<string>>();
-  const derivedParentsByTo = new Map<string, Set<string>>();
-  const activeIdSet = new Set(rowIds);
   const contradictedIds = new Set<string>();
+  for (const rel of contraRows) {
+    contradictedIds.add(rel.from_id);
+    contradictedIds.add(rel.to_id);
+  }
 
-  for (const rel of relRows) {
-    if (rel.rel === 'derived_from') {
-      let tSet = derivedTargetsByFrom.get(rel.from_id);
-      if (!tSet) {
-        tSet = new Set();
-        derivedTargetsByFrom.set(rel.from_id, tSet);
+  // 1. 幂等证据密度置信度校准（基于证据签名跳过无变化记录，绝不改写 updated_at）
+  const calMetaKey = `hs_cal:${wsId}`;
+  const calCache: Record<string, string> = {};
+  try {
+    const metaRow = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [calMetaKey]);
+    if (metaRow?.value) {
+      const parsed = JSON.parse(metaRow.value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const [k, v] of Object.entries(parsed)) {
+          if (typeof v === 'string') calCache[k] = v;
+        }
       }
-      tSet.add(rel.to_id);
+    }
+  } catch {
+    // 忽略损坏缓存，按当前证据重建
+  }
 
-      let pSet = derivedParentsByTo.get(rel.to_id);
-      if (!pSet) {
-        pSet = new Set();
-        derivedParentsByTo.set(rel.to_id, pSet);
-      }
-      pSet.add(rel.from_id);
-    } else if (
-      rel.rel === 'contradicts' &&
-      activeIdSet.has(rel.from_id) &&
-      activeIdSet.has(rel.to_id)
-    ) {
-      contradictedIds.add(rel.from_id);
-      contradictedIds.add(rel.to_id);
+  const calibratedMemories: CalibratedMemoryItem[] = [];
+  const pendingConfUpdates: Array<{ id: string; newConf: number }> = [];
+  let calCacheDirty = false;
+
+  for (const r of rows) {
+    if (r.status === 'frozen') continue;
+    const net = classifyHindsightNetwork(r.type, r.slot_key);
+    const distinctSessions = sessionsByMem.get(r.id)?.size || 1;
+    const derivedSourceCount = derivedTargetsByFrom.get(r.id)?.size || 0;
+    const userProof = hasCleanUserEvidence(r);
+    const hasActiveContradiction = contradictedIds.has(r.id);
+    const succ = Math.max(0, r.success_count || 0);
+    const fail = Math.max(0, r.fail_count || 0);
+
+    const calSig = `${r.content_rev}:${distinctSessions}:${succ}:${fail}:${derivedSourceCount}:${userProof ? 1 : 0}:${hasActiveContradiction ? 1 : 0}:${disposition.skepticism}:${disposition.literalism}:${disposition.empathy}`;
+    if (calCache[r.id] === calSig) {
+      continue;
+    }
+
+    const newConf = computeEvidenceCalibratedConfidence(
+      r,
+      {
+        distinctSessions,
+        hasUserProof: userProof,
+        hasActiveContradiction,
+        derivedSourceCount,
+      },
+      disposition
+    );
+
+    calCache[r.id] = calSig;
+    calCacheDirty = true;
+
+    if (Math.abs(newConf - r.confidence) >= 0.025) {
+      pendingConfUpdates.push({ id: r.id, newConf });
+      calibratedMemories.push({
+        id: r.id,
+        network: net,
+        summary: r.summary || r.content.slice(0, 60),
+        oldConfidence: Number(r.confidence.toFixed(2)),
+        newConfidence: Number(newConf.toFixed(2)),
+        distinctSessions,
+      });
+      r.confidence = newConf;
     }
   }
 
-  // 1. 证据密度置信度校准
-  const calibratedMemories: CalibratedMemoryItem[] = [];
-  db.transaction(() => {
-    for (const r of rows) {
-      if (r.status === 'frozen') continue;
-      const net = classifyHindsightNetwork(r.type, r.slot_key);
-      const distinctSessions = sessionsByMem.get(r.id)?.size || 1;
-      const derivedSourceCount = derivedTargetsByFrom.get(r.id)?.size || 0;
-      const userProof = hasUserEvidence(db, r);
-      const hasActiveContradiction = contradictedIds.has(r.id);
-
-      const newConf = computeEvidenceCalibratedConfidence(
-        r,
-        {
-          distinctSessions,
-          hasUserProof: userProof,
-          hasActiveContradiction,
-          derivedSourceCount,
-        },
-        disposition
-      );
-
-      if (Math.abs(newConf - r.confidence) >= 0.025) {
-        if (persistCalibration) {
-          db.run(`UPDATE memories SET confidence = ?, updated_at = ? WHERE id = ?`, [
-            newConf,
-            now,
-            r.id,
-          ]);
-        }
-        calibratedMemories.push({
-          id: r.id,
-          network: net,
-          summary: r.summary || r.content.slice(0, 60),
-          oldConfidence: Number(r.confidence.toFixed(2)),
-          newConfidence: Number(newConf.toFixed(2)),
-          distinctSessions,
-        });
-        r.confidence = newConf;
+  if (persistCalibration && (pendingConfUpdates.length > 0 || calCacheDirty)) {
+    // 控制 meta 缓存体积上限
+    const cacheKeys = Object.keys(calCache);
+    if (cacheKeys.length > 1000) {
+      const keepSet = new Set(rowIds);
+      for (const k of cacheKeys) {
+        if (!keepSet.has(k)) delete calCache[k];
       }
     }
-  });
+    db.transaction(() => {
+      for (const upd of pendingConfUpdates) {
+        // 严格仅更新 confidence，不触碰 updated_at 以保护 ACT-R 新鲜度、healthFingerprint 与 review-snapshot
+        db.run(`UPDATE memories SET confidence = ? WHERE id = ?`, [upd.newConf, upd.id]);
+      }
+      db.run(
+        `INSERT INTO meta (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        [calMetaKey, JSON.stringify(calCache)]
+      );
+    });
+  }
 
   // 2. 盘点已有心智模型 / 归纳规程
   const existingModels = rows
@@ -403,8 +775,10 @@ export function runHindsightReflect(
       derivedCount: derivedTargetsByFrom.get(r.id)?.size ?? 0,
     }));
 
-  // 3. 跨网络实体/主题聚类归纳合成心智模型 (World + Experience -> Observation / Opinion Mental Model)
+  // 3. 实体/主题聚类归纳合成心智模型 (World + Experience -> Observation / Opinion Mental Model)
   const synthesizedModels: SynthesizedMentalModel[] = [];
+  const refreshedSlotKeys = new Set<string>();
+
   if (autoSynthesize) {
     const entRows = db.all<{ memory_id: string; entity: string }>(
       `SELECT memory_id, entity FROM memory_entities WHERE memory_id IN (${placeholders})`,
@@ -417,17 +791,13 @@ export function runHindsightReflect(
       entitiesByMem.set(er.memory_id, list);
     }
 
-    // 按主题锚点 (slot 命名空间前缀 或 核心实体) 聚合记忆
+    // 仅从 workspace / global 记忆中归纳 workspace 心智模型，严禁将 session 临时记忆或 user 私人记忆泄漏进 workspace 模型
     const topicBuckets = new Map<string, { label: string; memories: MemoryRecord[] }>();
 
     for (const r of rows) {
-      if (r.slot_key?.startsWith('hindsight.model.')) continue;
-      if (topicFilter) {
-        const hay = `${r.summary} ${r.content} ${r.slot_key || ''}`.toLowerCase();
-        const memEnts = entitiesByMem.get(r.id) || [];
-        if (!hay.includes(topicFilter) && !memEnts.some((e) => e.includes(topicFilter))) {
-          continue;
-        }
+      if (r.scope === 'session' || r.scope === 'user') continue;
+      if (r.slot_key?.startsWith('hindsight.model.') || r.slot_key?.startsWith('hindsight.obs.')) {
+        continue;
       }
 
       const anchors: string[] = [];
@@ -456,36 +826,68 @@ export function runHindsightReflect(
       }
     }
 
-    // 优先选择跨网络 (例如同时包含 World 事实与 Experience 教训/事件) 且规模 >= minClusterSize 的聚类
+    // 优先选择跨网络且规模 >= minClusterSize 的聚类
     const candidateBuckets = Array.from(topicBuckets.entries())
       .filter(([, b]) => b.memories.length >= minClusterSize)
       .sort((a, b) => {
-        const netsA = new Set(a[1].memories.map((m) => classifyHindsightNetwork(m.type, m.slot_key))).size;
-        const netsB = new Set(b[1].memories.map((m) => classifyHindsightNetwork(m.type, m.slot_key))).size;
+        const netsA = new Set(
+          a[1].memories.map((m) => classifyHindsightNetwork(m.type, m.slot_key))
+        ).size;
+        const netsB = new Set(
+          b[1].memories.map((m) => classifyHindsightNetwork(m.type, m.slot_key))
+        ).size;
         if (netsB !== netsA) return netsB - netsA;
         return b[1].memories.length - a[1].memories.length;
       });
 
+    const isClusterCoveredByFreshParent = (members: MemoryRecord[]): boolean => {
+      for (const coveredSet of freshParentToTargets.values()) {
+        if (members.every((m) => coveredSet.has(m.id))) {
+          return true;
+        }
+      }
+      return false;
+    };
+
     for (const [slug, bucket] of candidateBuckets) {
       if (synthesizedModels.length >= 3) break;
       const modelSlotKey = `hindsight.model.${slug}`;
-
-      // 若该集群绝大多数记忆已被某个现有心智模型 derived_from 覆盖，则跳过重复合成
       const topMembers = bucket.memories.slice(0, 4);
-      const alreadyCovered = topMembers.every((m) => (derivedParentsByTo.get(m.id)?.size ?? 0) > 0);
-      const existingSlotModel = db.get<MemoryRecord>(
+
+      const rawExistingSlot = db.get<MemoryRow>(
         `SELECT * FROM memories
          WHERE scope = 'workspace' AND COALESCE(workspace_id, '') = ?
-           AND slot_key = ? AND status IN ('active', 'candidate', 'frozen')`,
+           AND slot_key = ? AND status IN ('active', 'candidate', 'frozen')
+         ORDER BY CASE status WHEN 'frozen' THEN 0 WHEN 'active' THEN 1 ELSE 2 END ASC, updated_at DESC
+         LIMIT 1`,
         [wsId, modelSlotKey]
       );
-      if (alreadyCovered && existingSlotModel) continue;
+      const existingSlotModel = hydrateMemoryRow(rawExistingSlot);
+
+      // 尊重 pinned=1 或 frozen 的既有心智模型，禁止覆盖或取代
+      if (existingSlotModel && (existingSlotModel.pinned === 1 || existingSlotModel.status === 'frozen')) {
+        continue;
+      }
+
+      if (existingSlotModel) {
+        const check = inspectDerivedModelFreshness(db, existingSlotModel.id);
+        const coversAllTop = topMembers.every((m) => check.linkedTargetIds.has(m.id));
+        if (check.fresh && coversAllTop) {
+          continue;
+        }
+      } else if (isClusterCoveredByFreshParent(topMembers)) {
+        continue;
+      }
 
       const hasFailureOrProc = topMembers.some(
         (m) => m.type === 'failure' || m.type === 'procedural'
       );
       const synthType: MemoryType = hasFailureOrProc ? 'procedural' : 'belief';
-      const synthNet: HindsightNetwork = hasFailureOrProc ? 'observation' : 'opinion';
+      const synthNet: HindsightNetwork = classifyHindsightNetwork(synthType, modelSlotKey);
+
+      const uniqueNetworks = new Set(
+        topMembers.map((m) => classifyHindsightNetwork(m.type, m.slot_key))
+      ).size;
 
       const clauses = topMembers.map((m) => {
         const tag = classifyHindsightNetwork(m.type, m.slot_key).toUpperCase();
@@ -494,56 +896,93 @@ export function runHindsightReflect(
       });
 
       const summary = `[Hindsight 心智模型] ${bucket.label} 综合认知与操作准则`.slice(0, 75);
-      const content = `针对「${bucket.label}」的跨网络归纳心智模型（融合 ${topMembers.length} 条事实与经验）：${clauses.join('；')}。`.slice(
-        0,
-        380
-      );
+      const singleNetLabel = classifyHindsightNetwork(
+        topMembers[0].type,
+        topMembers[0].slot_key
+      ).toUpperCase();
+      const content =
+        uniqueNetworks >= 2
+          ? `针对「${bucket.label}」的跨网络归纳心智模型（融合 ${topMembers.length} 条事实与经验）：${clauses.join('；')}。`.slice(
+              0,
+              380
+            )
+          : `针对「${bucket.label}」的 ${singleNetLabel} 网络归纳心智模型（融合 ${topMembers.length} 条同网络记忆）：${clauses.join('；')}。`.slice(
+              0,
+              380
+            );
 
-      // 收集真实来源证据以坚守信任边界
+      // 复用已批量加载的 current_rev 来源证据，合并全部成员 origin_kinds 与污点标记，严禁伪造 user 身份
       const collectedSources: Array<{
         session_id: string;
         seq: number;
         kind: string;
         excerpt?: string;
       }> = [];
-      let allUserVerified = true;
+      const unionOrigins = new Set<OriginKind>(['system']);
+      let allCleanUserVerified = true;
+
       for (const m of topMembers) {
-        if (!hasUserEvidence(db, m)) {
-          allUserVerified = false;
+        if (!hasCleanUserEvidence(m)) {
+          allCleanUserVerified = false;
         }
-        const mSrcs = db.all<{
-          session_id: string;
-          seq: number;
-          kind: string;
-          excerpt: string | null;
-        }>(
-          `SELECT session_id, seq, kind, excerpt FROM memory_sources
-           WHERE memory_id = ? AND content_rev = ? LIMIT 1`,
-          [m.id, m.content_rev]
-        );
+        for (const ok of parseOriginKinds(m.origin_kinds)) {
+          unionOrigins.add(ok);
+        }
+        if (m.source_kind === 'web') unionOrigins.add('web');
+        if (m.source_kind === 'tool') unionOrigins.add('tool');
+
+        const mSrcs = currentRevSourcesByMem.get(m.id) || [];
+        if (mSrcs.length === 0) {
+          allCleanUserVerified = false;
+        }
         for (const s of mSrcs) {
+          unionOrigins.add(sourceKindToOriginKind(s.kind));
+          if (isUntrustedSourceKind(s.kind)) {
+            allCleanUserVerified = false;
+          }
+        }
+        if (mSrcs.length > 0) {
+          const first = mSrcs[0];
           collectedSources.push({
-            session_id: s.session_id,
-            seq: s.seq,
-            kind: s.kind,
-            excerpt: s.excerpt || m.summary.slice(0, 80),
+            session_id: first.session_id,
+            seq: first.seq,
+            kind: first.kind,
+            excerpt: first.excerpt || m.summary.slice(0, 80),
           });
         }
+      }
+
+      if (unionOrigins.has('web') || unionOrigins.has('tool')) {
+        allCleanUserVerified = false;
       }
 
       if (collectedSources.length === 0) {
         collectedSources.push({
           session_id: options.sessionId || 'hindsight_reflect',
           seq: 0,
-          kind: 'assistant',
+          kind: 'system',
           excerpt: summary,
         });
-        allUserVerified = false;
+        allCleanUserVerified = false;
       }
 
       const avgConf =
         topMembers.reduce((acc, m) => acc + m.confidence, 0) / Math.max(1, topMembers.length);
-      const modelConf = Number(Math.min(0.95, avgConf * 0.95 + 0.05).toFixed(2));
+      const modelConf = Number(
+        Math.min(allCleanUserVerified ? 0.95 : 0.5, avgConf * 0.95 + 0.05).toFixed(2)
+      );
+
+      // 若旧槽位上存在陈旧 candidate 模型，先归档它避免堆积
+      if (existingSlotModel && existingSlotModel.status === 'candidate') {
+        db.transaction(() => {
+          saveVersionSnapshot(db, existingSlotModel, 'hindsight_stale_refresh', 'system', now);
+          db.run(
+            `UPDATE memories SET status = 'superseded', valid_to = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+            [now, now, existingSlotModel.id]
+          );
+          db.afterCommit(() => removeCachedRuntimeEmbedding(existingSlotModel.id, db));
+        });
+      }
 
       const upsertRes = upsertCandidate(
         db,
@@ -554,19 +993,19 @@ export function runHindsightReflect(
           slot_key: modelSlotKey,
           scope: 'workspace',
           workspaceId: wsId,
-          sessionId: options.sessionId,
-          source_kind: allUserVerified ? 'user' : 'llm_extract',
-          origin_kinds: [allUserVerified ? 'user' : 'assistant'],
+          source_kind: 'system',
+          origin_kinds: Array.from(unionOrigins),
           confidence: modelConf,
           importance: 8,
-          status: allUserVerified ? 'active' : 'candidate',
+          status: allCleanUserVerified ? 'active' : 'candidate',
           sources: collectedSources.slice(0, 4),
-          actor: allUserVerified ? 'user' : 'llm',
+          actor: 'system',
         },
         now
       );
 
       if ('id' in upsertRes) {
+        refreshedSlotKeys.add(modelSlotKey);
         const snapshotMeta = JSON.stringify({
           sources: topMembers.map((m) => ({
             memory_id: m.id,
@@ -574,15 +1013,39 @@ export function runHindsightReflect(
             hash: m.hash,
           })),
         });
-        for (const m of topMembers) {
-          if (m.id === upsertRes.id) continue;
+        const memberIds = topMembers.map((m) => m.id).filter((id) => id !== upsertRes.id);
+
+        db.transaction(() => {
+          // 防御性确保机器合成模型永不伪造 approved_by = 'user'
           db.run(
-            `INSERT OR IGNORE INTO memory_relations (from_id, to_id, rel, metadata, created_at)
-             VALUES (?, ?, 'derived_from', ?, ?)`,
-            [upsertRes.id, m.id, snapshotMeta, now]
+            `UPDATE memories SET approved_by = 'system' WHERE id = ? AND approved_by = 'user'`,
+            [upsertRes.id]
           );
-          addRelation(db, upsertRes.id, m.id, 'related', now);
-        }
+
+          if (memberIds.length > 0) {
+            const keepPh = memberIds.map(() => '?').join(', ');
+            db.run(
+              `DELETE FROM memory_relations
+               WHERE from_id = ? AND rel = 'derived_from' AND to_id NOT IN (${keepPh})`,
+              [upsertRes.id, ...memberIds]
+            );
+          }
+
+          for (const m of topMembers) {
+            if (m.id === upsertRes.id) continue;
+            db.run(
+              `INSERT INTO memory_relations (from_id, to_id, rel, metadata, created_at)
+               VALUES (?, ?, 'derived_from', ?, ?)
+               ON CONFLICT(from_id, to_id, rel) DO UPDATE SET
+                 metadata = excluded.metadata,
+                 created_at = excluded.created_at`,
+              [upsertRes.id, m.id, snapshotMeta, now]
+            );
+            addRelation(db, upsertRes.id, m.id, 'related', now);
+          }
+        });
+
+        freshParentToTargets.set(upsertRes.id, new Set(memberIds));
 
         const stored = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [upsertRes.id]);
         synthesizedModels.push({
@@ -596,6 +1059,29 @@ export function runHindsightReflect(
           confidence: stored?.confidence ?? modelConf,
           supportingMemoryIds: topMembers.map((m) => m.id),
           status: (stored?.status as 'active' | 'candidate') || 'candidate',
+        });
+      }
+    }
+
+    // 4. 失效清理：若已有未置顶/未冻结的 hindsight.model.* 派生源已被归档/取代且剩余活跃源不足 minClusterSize，将其归档失效
+    for (const r of rows) {
+      if (r.pinned === 1 || r.status === 'frozen') continue;
+      if (!r.slot_key?.startsWith('hindsight.model.') && !r.slot_key?.startsWith('hindsight.obs.')) {
+        continue;
+      }
+      if (r.slot_key && refreshedSlotKeys.has(r.slot_key)) continue;
+
+      const check = inspectDerivedModelFreshness(db, r.id);
+      if (check.hasInactiveSource && check.activeSourceCount < minClusterSize) {
+        db.transaction(() => {
+          saveVersionSnapshot(db, r, 'hindsight_source_invalidated', 'system', now);
+          db.run(
+            `UPDATE memories
+             SET status = 'archived', valid_to = ?, invalidated_at = ?, version = version + 1, updated_at = ?
+             WHERE id = ? AND status = 'active' AND pinned = 0`,
+            [now, now, now, r.id]
+          );
+          db.afterCommit(() => removeCachedRuntimeEmbedding(r.id, db));
         });
       }
     }
@@ -673,18 +1159,61 @@ export interface HindsightEvolutionTrace {
   contradictions: HindsightEvolutionNode[];
 }
 
+export interface HindsightScopeContext {
+  workspaceId?: string;
+  sessionId?: string;
+  excludeWorkspaces?: string[];
+}
+
+function buildEvolutionScopeClause(
+  scopeCtx?: HindsightScopeContext
+): { sql: string; params: unknown[] } {
+  if (!scopeCtx) {
+    return { sql: '1 = 1', params: [] };
+  }
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (scopeCtx.workspaceId) {
+    const sf = scopeFilterSQL(
+      { workspaceId: workspaceId(scopeCtx.workspaceId), sessionId: scopeCtx.sessionId },
+      'memories'
+    );
+    clauses.push(sf.sql);
+    params.push(...sf.params);
+  } else if (scopeCtx.sessionId) {
+    clauses.push(`(memories.scope != 'session' OR memories.session_id = ?)`);
+    params.push(scopeCtx.sessionId.trim());
+  }
+
+  if (scopeCtx.excludeWorkspaces?.length) {
+    const privacy = memoryPrivacyFilterSQL(scopeCtx.excludeWorkspaces);
+    if (privacy.params.length > 0) {
+      clauses.push(privacy.sql);
+      params.push(...privacy.params);
+    }
+  }
+
+  return {
+    sql: clauses.length > 0 ? clauses.join(' AND ') : '1 = 1',
+    params,
+  };
+}
+
 /**
  * Hindsight 认知演化时间线与因果溯源链追踪 (`traceHindsightEvolution`)
- * 沿着 supersedes 历史链、memory_versions 版本快照、derived_from 归纳链与 contradicts 矛盾边还原某条信念/事实的完整演化轨迹
+ * 沿着 supersedes 历史链、memory_versions 版本快照、derived_from 归纳链与 contradicts 活跃矛盾边还原演化轨迹
  */
 export function traceHindsightEvolution(
   db: Db,
-  targetMemory: MemoryRecord
+  targetMemory: MemoryRecord,
+  scopeCtx?: HindsightScopeContext
 ): HindsightEvolutionTrace {
   const net = classifyHindsightNetwork(targetMemory.type, targetMemory.slot_key);
   const timeline: HindsightEvolutionNode[] = [];
+  const vis = buildEvolutionScopeClause(scopeCtx);
 
-  // 1. 追溯 supersedes 历史祖先链 (最多向后追溯 6 代)
+  // 1. 追溯 supersedes 历史祖先链 (最多向后追溯 6 代，遵守 scope/privacy 隔离)
   const visitedAncestors = new Set<string>([targetMemory.id]);
   let cursorId: string | undefined = targetMemory.id;
   const ancestorRecords: MemoryRecord[] = [];
@@ -696,10 +1225,11 @@ export function traceHindsightEvolution(
     );
     if (!sup || visitedAncestors.has(sup.to_id)) break;
     visitedAncestors.add(sup.to_id);
-    const oldMem: MemoryRecord | undefined = db.get<MemoryRecord>(
-      'SELECT * FROM memories WHERE id = ?',
-      [sup.to_id]
+    const oldMemRow: MemoryRow | undefined = db.get<MemoryRow>(
+      `SELECT memories.* FROM memories WHERE memories.id = ? AND (${vis.sql})`,
+      [sup.to_id, ...vis.params]
     );
+    const oldMem: MemoryRecord | undefined = hydrateMemoryRow(oldMemRow);
     if (oldMem) {
       ancestorRecords.unshift(oldMem);
       cursorId = oldMem.id;
@@ -721,11 +1251,14 @@ export function traceHindsightEvolution(
     });
   }
 
-  // 2. 加入当前节点自身的历史版本快照 (memory_versions)
-  const verRows = db.all<{ version: number; snapshot: string; created_at: number }>(
-    `SELECT version, snapshot, created_at FROM memory_versions WHERE memory_id = ? ORDER BY version ASC LIMIT 6`,
-    [targetMemory.id]
-  );
+  // 2. 加入当前节点自身最近 6 条历史版本快照 (ORDER BY version DESC LIMIT 6 后反转为时间正序)
+  const verRows = db
+    .all<{ version: number; snapshot: string; created_at: number }>(
+      `SELECT version, snapshot, created_at FROM memory_versions WHERE memory_id = ? ORDER BY version DESC LIMIT 6`,
+      [targetMemory.id]
+    )
+    .reverse();
+
   for (const vr of verRows) {
     try {
       const snap = JSON.parse(vr.snapshot);
@@ -739,7 +1272,9 @@ export function traceHindsightEvolution(
         timestamp: vr.created_at,
         relationToCurrent: 'ancestor',
       });
-    } catch {}
+    } catch {
+      // ignore malformed snapshot
+    }
   }
 
   // 3. 当前现行版本
@@ -755,13 +1290,17 @@ export function traceHindsightEvolution(
   });
 
   // 4. 归纳支撑源 (target -> derived_from -> source) 与上层派生模型 (model -> derived_from -> target)
-  const derivedSourceRows = db.all<MemoryRecord>(
-    `SELECT m.* FROM memory_relations r
-     JOIN memories m ON m.id = r.to_id
-     WHERE r.from_id = ? AND r.rel = 'derived_from'
-     ORDER BY m.updated_at DESC LIMIT 8`,
-    [targetMemory.id]
-  );
+  const derivedSourceRows = db
+    .all<MemoryRow>(
+      `SELECT memories.* FROM memory_relations r
+       JOIN memories ON memories.id = r.to_id
+       WHERE r.from_id = ? AND r.rel = 'derived_from'
+         AND (${vis.sql})
+       ORDER BY memories.updated_at DESC LIMIT 8`,
+      [targetMemory.id, ...vis.params]
+    )
+    .map((r) => hydrateMemoryRow(r));
+
   const derivedSources: HindsightEvolutionNode[] = derivedSourceRows.map((m) => ({
     id: m.id,
     version: m.version,
@@ -773,13 +1312,17 @@ export function traceHindsightEvolution(
     relationToCurrent: 'derived_source',
   }));
 
-  const derivedModelRows = db.all<MemoryRecord>(
-    `SELECT m.* FROM memory_relations r
-     JOIN memories m ON m.id = r.from_id
-     WHERE r.to_id = ? AND r.rel = 'derived_from'
-     ORDER BY m.updated_at DESC LIMIT 8`,
-    [targetMemory.id]
-  );
+  const derivedModelRows = db
+    .all<MemoryRow>(
+      `SELECT memories.* FROM memory_relations r
+       JOIN memories ON memories.id = r.from_id
+       WHERE r.to_id = ? AND r.rel = 'derived_from'
+         AND (${vis.sql})
+       ORDER BY memories.updated_at DESC LIMIT 8`,
+      [targetMemory.id, ...vis.params]
+    )
+    .map((r) => hydrateMemoryRow(r));
+
   const derivedModels: HindsightEvolutionNode[] = derivedModelRows.map((m) => ({
     id: m.id,
     version: m.version,
@@ -791,14 +1334,20 @@ export function traceHindsightEvolution(
     relationToCurrent: 'derived_model',
   }));
 
-  // 5. 矛盾张力节点 (contradicts)
-  const contraRows = db.all<MemoryRecord>(
-    `SELECT m.* FROM memory_relations r
-     JOIN memories m ON (m.id = CASE WHEN r.from_id = ? THEN r.to_id ELSE r.from_id END)
-     WHERE (r.from_id = ? OR r.to_id = ?) AND r.rel = 'contradicts'
-     ORDER BY m.updated_at DESC LIMIT 6`,
-    [targetMemory.id, targetMemory.id, targetMemory.id]
-  );
+  // 5. 活跃矛盾张力节点 (contradicts，仅包含 active/frozen 记录并遵守 scope/privacy 隔离)
+  const contraRows = db
+    .all<MemoryRow>(
+      `SELECT memories.* FROM memory_relations r
+       JOIN memories ON (memories.id = CASE WHEN r.from_id = ? THEN r.to_id ELSE r.from_id END)
+       WHERE (r.from_id = ? OR r.to_id = ?)
+         AND r.rel = 'contradicts'
+         AND memories.status IN ('active', 'frozen')
+         AND (${vis.sql})
+       ORDER BY memories.updated_at DESC LIMIT 6`,
+      [targetMemory.id, targetMemory.id, targetMemory.id, ...vis.params]
+    )
+    .map((r) => hydrateMemoryRow(r));
+
   const contradictions: HindsightEvolutionNode[] = contraRows.map((m) => ({
     id: m.id,
     version: m.version,

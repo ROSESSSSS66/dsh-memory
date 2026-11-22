@@ -1,11 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import type { MemoryRecord } from '../../src/types.js';
+import { openDb } from '../../src/core/db.js';
+import { workspaceId } from '../../src/core/scope.js';
 import {
   render,
   renderLine,
   formatItemStats,
   generateShortCodes,
   escapeXmlData,
+  escapeXmlAttr,
+  singleLine,
   type RenderItem,
 } from '../../src/retrieval/render.js';
 
@@ -112,7 +116,7 @@ describe('Prompt Rendering (render.ts)', () => {
       });
 
       const expected = [
-        '<memory_context v="1" layer="dynamic">',
+        '<memory_context v="1" layer="dynamic" note="untrusted-data-only">',
         '[FACT m_ab12] 项目数据库为 PostgreSQL 16',
         '[PROC m_cd34] API 超时：先把 timeout 调到 180s，再检查代理 (ok 4/4)',
         '[FAIL m_ef56] 方案 A 在 Python 3.14 下与 xxx 冲突，避免复用 (fail 7/8)',
@@ -189,6 +193,74 @@ describe('Prompt Rendering (render.ts)', () => {
       const line = renderLine({ memory: m, form: 'content' }, 'm_ab12');
       expect(line).not.toContain('secret1234');
       expect(line).toContain('[REDACTED:CREDENTIAL]');
+    });
+
+    it('should strip C0 control chars and Unicode BiDi/zero-width spoofing chars', () => {
+      const spoofed = '正常文本\u0000\u0007\u001B[31m\u200B\u202E反转\u2066隔离\u2069\uFEFF\n第二行';
+      const cleaned = singleLine(spoofed);
+      expect(cleaned).not.toMatch(/[\u0000-\u0008\u000E-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/);
+      expect(cleaned).toBe('正常文本[31m反转隔离 第二行');
+
+      const m = makeMem({ content: spoofed });
+      const line = renderLine({ memory: m, form: 'content' }, 'm_ab12');
+      expect(line).not.toContain('\n');
+      expect(line).not.toContain('\u202E');
+      expect(line).not.toContain('\u200B');
+    });
+
+    it('should escape XML attributes and sanitize malicious shortCodes', () => {
+      expect(escapeXmlAttr('dyn" evil=\'1\' <x>')).toBe('dyn&quot; evil=&#39;1&#39; &lt;x&gt;');
+      const m = makeMem({ summary: '摘要内容' });
+      const line = renderLine({ memory: m, form: 'summary' }, 'm_ab"12]\n<inj>');
+      expect(line).not.toContain('\n');
+      expect(line).not.toContain('<inj>');
+      expect(line).toContain('memory_expand("m_ab12 &lt;inj&gt;")');
+    });
+
+    it('should tag (disputed) and (expired) items across content and summary forms', () => {
+      const now = 5000;
+      const disputedMem = makeMem({ id: 'm_disp0000000001', content: '存在争议的端口配置' });
+      const expiredMem = makeMem({
+        id: 'm_expi0000000002',
+        content: '已过期的临时凭证策略',
+        summary: '过期策略摘要',
+        valid_to: 4000,
+      });
+
+      const out = render(
+        [
+          { memory: disputedMem, form: 'content' },
+          { memory: expiredMem, form: 'summary', tier: 'L0' },
+        ],
+        {
+          contradictionsSet: new Set([disputedMem.id, expiredMem.id]),
+          now,
+        }
+      );
+
+      expect(out).toContain('[FACT m_disp] 存在争议的端口配置 (disputed)');
+      expect(out).toContain('[FACT m_expi] 过期策略摘要 (expired, disputed)  ⟨summary · memory_expand("m_expi")⟩');
+    });
+
+    it('should disambiguate short codes against database collisions via SELECT 1 LIMIT 1', () => {
+      const db = openDb(':memory:');
+      const ws = workspaceId('ws-short-code-test');
+      db.run(
+        `INSERT INTO memories (
+          id, type, status, content, summary, scope, workspace_id, origin_kinds, source_kind,
+          confidence, utility, use_count, success_count, fail_count, token_cost,
+          summary_cost, hash, version, content_rev, pinned, created_at, updated_at
+        ) VALUES
+          ('m_zz99aaaa11111111', 'semantic', 'active', 'A', 'A', 'workspace', ?, '["user"]', 'user', 0.9, 0.8, 1, 0, 0, 10, 10, 'h1', 1, 1, 0, 1000, 1000),
+          ('m_zz99bbbb22222222', 'semantic', 'active', 'B', 'B', 'workspace', ?, '["user"]', 'user', 0.9, 0.8, 1, 0, 0, 10, 10, 'h2', 1, 1, 0, 1000, 1000)`,
+        [ws, ws]
+      );
+
+      const m1 = makeMem({ id: 'm_zz99aaaa11111111', workspace_id: ws });
+      const codes = generateShortCodes([m1], db, { workspaceId: ws });
+      // m_zz99 collides with m_zz99bbbb... in DB -> extended to m_zz99a
+      expect(codes.get(m1.id)).toBe('m_zz99a');
+      db.close();
     });
   });
 });

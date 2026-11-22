@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import { DEFAULTS } from '../../src/config.js';
 import {
@@ -15,6 +15,10 @@ describe('Evolution Ledger (M3-T1)', () => {
 
   beforeEach(() => {
     db = openDb(':memory:');
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   it('successfully reserves within budget', () => {
@@ -218,7 +222,66 @@ describe('Evolution Ledger (M3-T1)', () => {
       [res.ledgerId!]
     );
     expect(row?.note).not.toContain('sk-1234567890abcdef1234');
-    expect(row?.note).toContain('[REDACTED:SECRET]');
+    expect(row?.note).toMatch(/\[REDACTED:(?:API_KEY|SECRET)\]/);
+  });
+
+  it('guards settle() with status = reserved so already settled or cancelled rows cannot be overwritten', () => {
+    const r1 = reserve(
+      db,
+      {
+        jobKind: 'distill',
+        model: 'deepseek-chat',
+        promptVersion: 'distill-v2',
+        reservedTokens: 1000,
+      },
+      DEFAULTS
+    );
+    settle(db, {
+      ledgerId: r1.ledgerId!,
+      status: 'succeeded',
+      ok: 1,
+      inTokens: 300,
+      outTokens: 100,
+      note: 'first_settlement',
+    });
+    // Second settle attempt must be ignored
+    settle(db, {
+      ledgerId: r1.ledgerId!,
+      status: 'failed',
+      ok: 0,
+      inTokens: 0,
+      outTokens: 0,
+      note: 'overwrite_attempt',
+    });
+    const row1 = db.get<{ status: string; in_tokens: number; note: string }>(
+      'SELECT status, in_tokens, note FROM llm_ledger WHERE id = ?',
+      [r1.ledgerId!]
+    );
+    expect(row1).toEqual({ status: 'succeeded', in_tokens: 300, note: 'first_settlement' });
+
+    const r2 = reserve(
+      db,
+      {
+        jobKind: 'distill',
+        model: 'deepseek-chat',
+        promptVersion: 'distill-v2',
+        reservedTokens: 1000,
+      },
+      DEFAULTS
+    );
+    expect(cancel(db, r2.ledgerId!, 'aborted')).toBe(true);
+    settle(db, {
+      ledgerId: r2.ledgerId!,
+      status: 'succeeded',
+      ok: 1,
+      inTokens: 500,
+      outTokens: 500,
+    });
+    const row2 = db.get<{ status: string; in_tokens: number }>(
+      'SELECT status, in_tokens FROM llm_ledger WHERE id = ?',
+      [r2.ledgerId!]
+    );
+    expect(row2).toEqual({ status: 'cancelled', in_tokens: 0 });
   });
 
   it('normalizes non-date day strings in getLedgerUsage to today', () => {

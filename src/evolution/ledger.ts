@@ -84,13 +84,13 @@ export function reserve(db: Db, params: ReserveParams, cfg: PluginConfig): Reser
 export function settle(db: Db, params: SettleParams): void {
   const now = params.now ?? Date.now();
 
-  // 读取原预留记录
+  // 读取原预留记录；仅允许对 reserved 状态行执行一次性结算
   const row = db.get<{ reserved_tokens: number; status: string }>(
     `SELECT reserved_tokens, status FROM llm_ledger WHERE id = ?`,
     [params.ledgerId]
   );
 
-  if (!row) return;
+  if (!row || row.status !== 'reserved') return;
 
   let note = params.note ?? '';
   if (note) {
@@ -115,7 +115,7 @@ export function settle(db: Db, params: SettleParams): void {
          out_tokens = ?,
          note = ?,
          finished_at = ?
-     WHERE id = ?`,
+     WHERE id = ? AND status = 'reserved'`,
     [params.status, params.ok, inTokens, outTokens, note || null, now, params.ledgerId]
   );
 }
