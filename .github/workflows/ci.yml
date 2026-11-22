@@ -58,11 +58,37 @@ jobs:
 
       - name: Smoke-import dist/index.js
         shell: bash
-        run: node --input-type=module -e 'import * as mod from "./dist/index.js"; if (mod.name !== "dsh-memory" || typeof mod.apply !== "function" || typeof mod.openDb !== "function") { throw new Error("dist/index.js missing expected exports"); } console.log("Smoke-import dist/index.js OK");'
+        run: |
+          node --input-type=module <<'EOF'
+          import * as mod from './dist/index.js';
+          if (mod.name !== 'dsh-memory' || typeof mod.apply !== 'function' || typeof mod.openDb !== 'function') {
+            throw new Error('dist/index.js missing expected exports');
+          }
+          console.log('Smoke-import dist/index.js OK');
+          EOF
 
       - name: Smoke mock-load dist/client.js
         shell: bash
-        run: node --input-type=module -e 'import fs from "node:fs"; import { createRequire } from "node:module"; import vm from "node:vm"; const req = createRequire(import.meta.url); const code = fs.readFileSync("./dist/client.js", "utf8"); vm.runInNewContext(code, {}, { filename: "dist/client.js" }); let loaded = null; const ctx = { window: { __ModuleLoader__: { load(spec) { loaded = spec; } } }, console }; vm.runInNewContext(code, ctx, { filename: "dist/client.js" }); if (!loaded || loaded.id !== "dsh-memory" || typeof loaded.factory !== "function") { throw new Error("dist/client.js failed to register with __ModuleLoader__"); } const exported = loaded.factory((id) => (id.startsWith("@deepseek-ai/") ? {} : req(id))); if (!exported || exported.name !== "dsh-memory" || typeof exported.apply !== "function") { throw new Error("dist/client.js factory returned invalid exports"); } console.log("Smoke mock-load dist/client.js OK");'
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          import { createRequire } from 'node:module';
+          import vm from 'node:vm';
+          const req = createRequire(import.meta.url);
+          const code = fs.readFileSync('./dist/client.js', 'utf8');
+          vm.runInNewContext(code, {}, { filename: 'dist/client.js' });
+          let loaded = null;
+          const ctx = { window: { __ModuleLoader__: { load(spec) { loaded = spec; } } }, console };
+          vm.runInNewContext(code, ctx, { filename: 'dist/client.js' });
+          if (!loaded || loaded.id !== 'dsh-memory' || typeof loaded.factory !== 'function') {
+            throw new Error('dist/client.js failed to register with __ModuleLoader__');
+          }
+          const exported = loaded.factory((id) => (id.startsWith('@deepseek-ai/') ? {} : req(id)));
+          if (!exported || exported.name !== 'dsh-memory' || typeof exported.apply !== 'function') {
+            throw new Error('dist/client.js factory returned invalid exports');
+          }
+          console.log('Smoke mock-load dist/client.js OK');
+          EOF
 
       - name: Production Dependency Audit
         if: matrix.os == 'ubuntu-latest'
