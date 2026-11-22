@@ -60,12 +60,17 @@ describe('Tool trust and scope boundaries', () => {
     }
   });
 
-  it('records only search results actually returned within the output budget', () => {
-    const ids = Array.from({ length: 8 }, (_, i) => seed(
+  it('records only search results actually returned within the calibrated 800-token output budget', () => {
+    // Under calibrated budgetTokens (~1.2x estimateTokens), craft 10 distinct entries (~110-130 tokens each)
+    // so the combined output exceeds 800 tokens and truncates cleanly.
+    const ids = Array.from({ length: 10 }, (_, i) => seed(
       `PostgreSQL database configuration ${i} uses a separate connection pool and timeout setting.`,
-      { slot_key: `database.setting.${i}`, summary: `PostgreSQL database configuration ${i}: ${'details '.repeat(12)}` }
+      {
+        slot_key: `database.setting.${i}`,
+        summary: `PostgreSQL database configuration ${i}: ${'connection_pool_timeout_parameter_setting '.repeat(12)}`,
+      }
     ));
-    const output = tools.search({ query: 'PostgreSQL database configuration', limit: 8 }, ctx);
+    const output = tools.search({ query: 'PostgreSQL database configuration', limit: 10 }, ctx);
     const visible = ids.filter(id => output.includes(id));
     expect(visible.length).toBeGreaterThan(0);
     expect(visible.length).toBeLessThan(ids.length);
@@ -76,8 +81,11 @@ describe('Tool trust and scope boundaries', () => {
     expect(tools.feedback({ id: omitted, contentRev: 1, helpful: true }, ctx)).toContain('not referenced');
   });
 
-  it('does not attribute an oversized expansion that returns an error', () => {
-    const id = seed(`PostgreSQL configuration: ${'db '.repeat(600)}`);
+  it('does not attribute an oversized expansion that exceeds the calibrated 1500-token limit', () => {
+    const id = seed('PostgreSQL configuration baseline.', { summary: 'PostgreSQL configuration' });
+    const oversized = `PostgreSQL configuration: ${'database_connection_pool_timeout_parameter '.repeat(450)}`;
+    db.run('UPDATE memories SET content = ? WHERE id = ?', [oversized, id]);
+    expect(budgetTokens(oversized)).toBeGreaterThan(1500);
     expect(tools.expand({ id }, ctx)).toContain('exceeds token limit');
     expect(db.all('SELECT * FROM injections')).toHaveLength(0);
     expect(tools.feedback({ id, contentRev: 1, helpful: true }, ctx)).toContain('not referenced');

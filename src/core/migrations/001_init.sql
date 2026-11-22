@@ -1,5 +1,4 @@
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
+-- PRAGMAs (busy_timeout, WAL, synchronous, foreign_keys) are applied by openDb() before BEGIN IMMEDIATE
 
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,

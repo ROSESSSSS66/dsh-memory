@@ -1,6 +1,7 @@
 {
   "meta": {
     "title": "DSH Long-Term Memory",
-    "description": "Local-first long-term memory system for DSH with hybrid recall, working memory buffer, and background consolidation."
-  }
+    "description": "Zero-dependency local-first long-term memory for DSH: full in-memory vector matrix + SQLite FTS5 hybrid recall (p95 < 10ms at 10k), Hindsight & OpenViking insights, 4 lean model tools, and autonomous background self-evolution."
+  },
+  "panel": "Memory"
 }

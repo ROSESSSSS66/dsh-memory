@@ -82,6 +82,64 @@ describe('Committed memory visibility projection', () => {
     }
   );
 
+  it('validates memoryRefs per-item, keeping valid items while counting invalid ones', () => {
+    const event = {
+      type: 'user/message',
+      seq: 10,
+      surfaceOp: { op: 'append' },
+      data: {
+        id: 'msg-mixed',
+        source: {
+          kind: 'dsh-memory',
+          plugin: 'dsh-memory',
+          memoryRefs: [
+            { id: fullId, contentRev: 2 },
+            { id: 'm_bad', contentRev: 1 },
+            { id: secondId, contentRev: 3 },
+          ],
+        },
+      },
+    };
+    const state = foldMemoryVisibility(emptyMemoryVisibility(), event);
+    expect(visibleMemoryRefs(state)).toEqual(new Set([`${fullId}@2`, `${secondId}@3`]));
+    expect(state.invalidReferenceEvents).toBe(1);
+  });
+
+  it('caches derived Set<string> via WeakMap and handles throwing projection APIs gracefully with throttled warning', async () => {
+    const state = foldMemoryVisibility(emptyMemoryVisibility(), committed(10));
+    const firstRefs = visibleMemoryRefs(state);
+    const secondRefs = visibleMemoryRefs(state);
+    expect(secondRefs).toBe(firstRefs);
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const throwingReader = await registerMemoryVisibility({
+        sessionProjections: {
+          register: async () => ({
+            stateOf: () => {
+              throw new Error('projection store crashed');
+            },
+            dispose: () => {},
+          }),
+        },
+      });
+      expect(throwingReader.getVisibleRefs({ id: 's1' })).toBeNull();
+      expect(throwingReader.getVisibleRefs({ id: 's1' })).toBeNull();
+      // Throttled warning fires once within 60s window
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+
+      // Missing stateOf and snapshot returns null cleanly without throwing
+      const noMethodReader = await registerMemoryVisibility({
+        sessionProjections: {
+          register: async () => () => {},
+        },
+      });
+      expect(noMethodReader.getVisibleRefs({ id: 's2' })).toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it.each(['stateOf', 'snapshot'])('registers and reads through the host %s API', async (method) => {
     const state = foldMemoryVisibility(emptyMemoryVisibility(), committed(10));
     const dispose = vi.fn();
@@ -92,7 +150,10 @@ describe('Committed memory visibility projection', () => {
     });
     const service = { register, [method]: () => method === 'stateOf' ? state : { values: { [MEMORY_VISIBILITY_KEY]: state } } };
     const reader = await registerMemoryVisibility({ sessionProjections: service });
-    expect(reader.getVisibleRefs({ id: 'session' })).toEqual(new Set([`${fullId}@1`]));
+    const refs1 = reader.getVisibleRefs({ id: 'session' });
+    const refs2 = reader.getVisibleRefs({ id: 'session' });
+    expect(refs1).toEqual(new Set([`${fullId}@1`]));
+    expect(refs2).toBe(refs1);
     reader.dispose();
     expect(dispose).toHaveBeenCalledOnce();
   });

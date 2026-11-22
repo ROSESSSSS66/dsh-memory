@@ -478,9 +478,12 @@ describe('Review round 3 regressions', () => {
       } as any;
     }
 
-    function mountWeb(): { handler: any; liveCfg: PluginConfig } {
+    function mountWeb(overrides: Partial<PluginConfig> = {}): { handler: any; liveCfg: PluginConfig } {
       let handler: any;
-      const liveCfg: PluginConfig = JSON.parse(JSON.stringify(DEFAULTS));
+      const liveCfg: PluginConfig = {
+        ...JSON.parse(JSON.stringify(DEFAULTS)),
+        ...overrides,
+      };
       registerWebRoutes(
         { webServer: { register: (o: any) => ((handler = o.handler), () => {}) } },
         db,
@@ -517,18 +520,26 @@ describe('Review round 3 regressions', () => {
       expect(liveCfg.privacy.offlineConsent).toBe(false);
     });
 
-    it('imports the raw /export payload and skips forgotten records', async () => {
-      const { handler } = mountWeb();
+    it('blocks /import with 403 when webAdminEnabled is false and imports raw /export payload when enabled', async () => {
+      const payload = {
+        memories: [
+          { content: '导入的现行事实：网关监听 9090 端口', status: 'active', updated_at: 2 },
+          { content: '已被遗忘的旧事实：网关监听 8080 端口', status: 'archived', updated_at: 1 },
+        ],
+      };
+
+      // Default webAdminEnabled=false -> 403 web_admin_disabled
+      const { handler: readOnlyHandler } = mountWeb({ webAdminEnabled: false });
+      const blocked = makeRes();
+      await readOnlyHandler(post('/import', payload), blocked.res);
+      expect(blocked.out.status).toBe(403);
+      expect(blocked.out.body).toMatchObject({ ok: false, code: 'web_admin_disabled' });
+
+      // Enabled webAdminEnabled=true -> imports active and skips archived
+      const { handler: adminHandler } = mountWeb({ webAdminEnabled: true });
       const { res, out } = makeRes();
-      await handler(
-        post('/import', {
-          memories: [
-            { content: '导入的现行事实：网关监听 9090 端口', status: 'active', updated_at: 2 },
-            { content: '已被遗忘的旧事实：网关监听 8080 端口', status: 'archived', updated_at: 1 },
-          ],
-        }),
-        res
-      );
+      await adminHandler(post('/import', payload), res);
+      expect(out.status).toBe(200);
       expect(out.body).toMatchObject({ ok: true, imported: 1, skipped: 1 });
       expect(list(db, { status: 'active' })).toHaveLength(1);
     });

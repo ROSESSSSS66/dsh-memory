@@ -2,14 +2,18 @@ import type { Db, RawEvent } from '../types.js';
 import type { PluginConfig } from '../config.js';
 import type { EvidenceLedger } from './types.js';
 import { jobFailure, type JobRecord, type JobHandlerResult } from '../jobs/types.js';
-import { PROMPT_REFLECT, renderTranscript } from './prompts.js';
+import {
+  PROMPT_REFLECT,
+  packPromptWithinBudget,
+  renderTranscript,
+  truncateTextToTokenBudget,
+} from './prompts.js';
 import { parseOutput } from './parse.js';
 import { callOfflineLLM } from './llm.js';
 import { upsertCandidate } from '../core/writer.js';
-import { workspaceId } from '../core/scope.js';
+import { workspaceId, resolveWorkspaceCwd } from '../core/scope.js';
 import { estimateTokens } from '../core/tokens.js';
 import { redactSecrets } from '../core/privacy.js';
-import { registerJobHandler } from '../jobs/runner.js';
 
 export interface ReflectPayload {
   sessionId?: string;
@@ -20,13 +24,6 @@ export interface ReflectPayload {
   sig?: string;
   signalKind?: 'user_correction' | 'repeated_tool_failure';
   correctionMessage?: string;
-}
-
-function resolveRealCwd(cwdOrWsId?: string): string {
-  if (cwdOrWsId && cwdOrWsId.trim() && !/^[0-9a-f]{16}$/i.test(cwdOrWsId.trim())) {
-    return cwdOrWsId.trim();
-  }
-  return process.cwd();
 }
 
 function estimateReflectPromptTokens(
@@ -43,14 +40,15 @@ function estimateReflectPromptTokens(
     signalDetail,
     transcript,
   });
-  return estimateTokens(PROMPT_REFLECT.system + userPrompt) + 200;
+  return estimateTokens(PROMPT_REFLECT.system + userPrompt) + 250;
 }
 
 /**
- * 对超长失败/纠正轮次进行高信号有界事件筛选，保证总输入稳定控制在 distillMaxInputTokens 以内：
+ * O(N) 高信号有界事件筛选：预先一次性计算每条事件的渲染成本，
+ * 优先保留：
  * 1) 真实用户提问/纠正消息 (origin_kind='user')
  * 2) 轮次尾部事件（最终答复或末尾失败现场）
- * 3) 所有错误事件 (is_error=1) 及其紧邻前后事件（tool/call + assistant 反应）
+ * 3) 所有错误事件 (is_error=1) 及其紧邻前后事件
  * 4) 从后向前补齐剩余预算内的最近上下文
  */
 function selectBoundedReflectEvents(
@@ -59,6 +57,7 @@ function selectBoundedReflectEvents(
 ): RawEvent[] {
   if (events.length === 0 || maxTranscriptTokens <= 0) return [];
 
+  // 一次性预渲染计算单行 token 成本，全程 O(N)
   const renderedCost = events.map((ev) => {
     const line = renderTranscript([ev], new Map());
     if (!line) return 0;
@@ -114,19 +113,32 @@ function selectBoundedReflectEvents(
     }
   }
 
-  const ordered = Array.from(chosen)
-    .sort((a, b) => a - b)
-    .map((idx) => events[idx]);
-
-  if (ordered.length === 1) {
-    const cost0 = estimateTokens(renderTranscript([ordered[0]], new Map()));
-    if (cost0 > maxTranscriptTokens) {
-      const maxChars = Math.max(60, Math.floor(maxTranscriptTokens * 2));
-      return [{ ...ordered[0], text: (ordered[0].text || '').slice(0, maxChars) }];
+  // O(N) 裁剪：按优先级保留末尾事件、用户消息与错误事件，逐个移除非关键低优先级条目直到满足预算
+  const selectedIndices = Array.from(chosen).sort((a, b) => a - b);
+  let totalCost = selectedIndices.reduce((acc, idx) => acc + renderedCost[idx], 0);
+  if (selectedIndices.length > 1 && totalCost > maxTranscriptTokens) {
+    const keepMask = new Array<boolean>(selectedIndices.length).fill(true);
+    // 先丢弃非用户、非错误的非末尾事件
+    for (let i = 0; i < selectedIndices.length - 1 && totalCost > maxTranscriptTokens; i++) {
+      const ev = events[selectedIndices[i]];
+      if (ev.origin_kind !== 'user' && ev.is_error !== 1) {
+        keepMask[i] = false;
+        totalCost -= renderedCost[selectedIndices[i]];
+      }
     }
+    // 若仍超预算，从最早事件开始裁剪直到只剩至少 1 条
+    let remaining = keepMask.filter(Boolean).length;
+    for (let i = 0; i < selectedIndices.length - 1 && totalCost > maxTranscriptTokens && remaining > 1; i++) {
+      if (keepMask[i]) {
+        keepMask[i] = false;
+        totalCost -= renderedCost[selectedIndices[i]];
+        remaining--;
+      }
+    }
+    return selectedIndices.filter((_, i) => keepMask[i]).map((idx) => events[idx]);
   }
 
-  return ordered;
+  return selectedIndices.map((idx) => events[idx]);
 }
 
 /**
@@ -146,18 +158,36 @@ export async function runReflectJob(
     return { action: 'failed', error: 'invalid_reflect_job_payload', nonRetryable: true };
   }
 
-  let { sessionId, turn, cwd = '', correctionMessage } = payload;
+  let { sessionId, turn, triggerSeq, cwd = '', correctionMessage } = payload;
   const sig = payload.sig;
+  const rawPayloadWs = (payload.workspaceId || '').trim();
+  const payloadWs = rawPayloadWs ? workspaceId(rawPayloadWs) : '';
+  let sigWorkspaceId = '';
 
   // 兼容 R4 跨会话重复工具失败入队的 reflect:failure_sig 任务
+  // 严格按 workspace_id 过滤 failure_sigs，且当无有效 turn 时使用 triggerSeq 定位，避免 turn=0 误拉取 turn 1
   if (sig && (!sessionId || typeof turn !== 'number')) {
-    const sigRow = db.get<{ sessions: string; last_seq_ref: string | null; workspace_id: string }>(
-      'SELECT sessions, last_seq_ref, workspace_id FROM failure_sigs WHERE sig = ? ORDER BY updated_at DESC LIMIT 1',
-      [sig]
-    );
+    const sigRow = rawPayloadWs
+      ? db.get<{ sessions: string; last_seq_ref: string | null; workspace_id: string }>(
+          'SELECT sessions, last_seq_ref, workspace_id FROM failure_sigs WHERE sig = ? AND workspace_id IN (?, ?) ORDER BY updated_at DESC LIMIT 1',
+          [sig, rawPayloadWs, payloadWs]
+        )
+      : db.get<{ sessions: string; last_seq_ref: string | null; workspace_id: string }>(
+          'SELECT sessions, last_seq_ref, workspace_id FROM failure_sigs WHERE sig = ? ORDER BY updated_at DESC LIMIT 1',
+          [sig]
+        );
     if (sigRow) {
-      if (!sessionId && sigRow.last_seq_ref && sigRow.last_seq_ref.includes(':')) {
-        sessionId = sigRow.last_seq_ref.split(':')[0];
+      sigWorkspaceId = sigRow.workspace_id || '';
+      if (sigRow.last_seq_ref && sigRow.last_seq_ref.includes(':')) {
+        const lastColon = sigRow.last_seq_ref.lastIndexOf(':');
+        const refSess = sigRow.last_seq_ref.slice(0, lastColon);
+        const refSeq = parseInt(sigRow.last_seq_ref.slice(lastColon + 1), 10);
+        if (!sessionId && refSess) {
+          sessionId = refSess;
+        }
+        if (typeof triggerSeq !== 'number' && Number.isInteger(refSeq) && refSeq > 0) {
+          triggerSeq = refSeq;
+        }
       }
       if (!sessionId) {
         try {
@@ -168,11 +198,19 @@ export async function runReflectJob(
         } catch {}
       }
       if (typeof turn !== 'number' && sessionId) {
-        const lastEv = db.get<{ turn: number | null }>(
-          'SELECT turn FROM raw_events WHERE session_id = ? ORDER BY seq DESC LIMIT 1',
-          [sessionId]
-        );
-        turn = typeof lastEv?.turn === 'number' ? lastEv.turn : 0;
+        const lastEv =
+          typeof triggerSeq === 'number'
+            ? db.get<{ turn: number | null }>(
+                'SELECT turn FROM raw_events WHERE session_id = ? AND seq = ? LIMIT 1',
+                [sessionId, triggerSeq]
+              )
+            : db.get<{ turn: number | null }>(
+                'SELECT turn FROM raw_events WHERE session_id = ? ORDER BY seq DESC LIMIT 1',
+                [sessionId]
+              );
+        if (typeof lastEv?.turn === 'number' && lastEv.turn >= 1) {
+          turn = lastEv.turn;
+        }
       }
     }
     if (!correctionMessage) {
@@ -184,56 +222,75 @@ export async function runReflectJob(
     correctionMessage = 'User corrected previous answer';
   }
 
-  if (!sessionId || typeof turn !== 'number') {
+  const hasValidTurn = typeof turn === 'number' && Number.isInteger(turn) && turn >= 1;
+  const hasTriggerSeq = typeof triggerSeq === 'number' && Number.isInteger(triggerSeq) && triggerSeq >= 1;
+
+  if (!sessionId || (!hasValidTurn && !hasTriggerSeq && !sig)) {
     return { action: 'failed', error: 'missing_session_or_turn', nonRetryable: true };
   }
 
-  // 1. 获取失败/纠正前后的关键事件（兼容 DSH 中 user/message.turn 为 NULL 的真实会话日志）
-  const baseEvents = db.all<RawEvent>(
-    `SELECT * FROM raw_events
-     WHERE session_id = ? AND (turn = ? OR turn = ?)
-     ORDER BY seq ASC`,
-    [sessionId, turn, turn + 1]
-  );
-
+  // 1. 获取失败/纠正前后的关键事件（支持省略 turn 时基于 triggerSeq 精确切片，禁止 turn=0 拉取 turn 1）
   let events: RawEvent[] = [];
-  if (baseEvents.length > 0) {
-    const minBaseSeq = baseEvents[0].seq;
-    const maxBaseSeq = baseEvents[baseEvents.length - 1].seq;
-    const prevTurnRow = db.get<{ prev_seq: number | null }>(
-      `SELECT MAX(seq) AS prev_seq
-       FROM raw_events
-       WHERE session_id = ? AND turn IS NOT NULL AND turn < ? AND seq < ?`,
-      [sessionId, turn, minBaseSeq]
-    );
-    const prevTurnMaxSeq = prevTurnRow?.prev_seq ?? 0;
 
-    const nullTurnPrompts = db.all<RawEvent>(
+  if (hasValidTurn) {
+    const baseEvents = db.all<RawEvent>(
       `SELECT * FROM raw_events
-       WHERE session_id = ?
-         AND turn IS NULL
-         AND origin_kind = 'user'
-         AND seq > ?
-         AND seq <= ?
+       WHERE session_id = ? AND (turn = ? OR turn = ?)
        ORDER BY seq ASC`,
-      [sessionId, prevTurnMaxSeq, maxBaseSeq]
+      [sessionId, turn!, turn! + 1]
     );
 
-    const extraTrigger =
-      typeof payload.triggerSeq === 'number'
+    if (baseEvents.length > 0) {
+      const minBaseSeq = baseEvents[0].seq;
+      const maxBaseSeq = baseEvents[baseEvents.length - 1].seq;
+      const prevTurnRow = db.get<{ prev_seq: number | null }>(
+        `SELECT MAX(seq) AS prev_seq
+         FROM raw_events
+         WHERE session_id = ? AND turn IS NOT NULL AND turn < ? AND seq < ?`,
+        [sessionId, turn!, minBaseSeq]
+      );
+      const prevTurnMaxSeq = prevTurnRow?.prev_seq ?? 0;
+
+      const nullTurnPrompts = db.all<RawEvent>(
+        `SELECT * FROM raw_events
+         WHERE session_id = ?
+           AND turn IS NULL
+           AND origin_kind = 'user'
+           AND seq > ?
+           AND seq <= ?
+         ORDER BY seq ASC`,
+        [sessionId, prevTurnMaxSeq, maxBaseSeq]
+      );
+
+      const extraTrigger = hasTriggerSeq
         ? db.all<RawEvent>(
             `SELECT * FROM raw_events
-             WHERE session_id = ? AND seq = ? AND origin_kind = 'user'`,
-            [sessionId, payload.triggerSeq]
+             WHERE session_id = ? AND seq = ?`,
+            [sessionId, triggerSeq!]
           )
         : [];
 
-    const bySeq = new Map<number, RawEvent>();
-    for (const ev of [...nullTurnPrompts, ...baseEvents, ...extraTrigger]) {
-      bySeq.set(ev.seq, ev);
+      const bySeq = new Map<number, RawEvent>();
+      for (const ev of [...nullTurnPrompts, ...baseEvents, ...extraTrigger]) {
+        bySeq.set(ev.seq, ev);
+      }
+      events = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
     }
-    events = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
-  } else if (sig) {
+  }
+
+  if (events.length === 0 && hasTriggerSeq) {
+    events = db
+      .all<RawEvent>(
+        `SELECT * FROM raw_events
+         WHERE session_id = ? AND seq <= ?
+         ORDER BY seq DESC
+         LIMIT 16`,
+        [sessionId, triggerSeq!]
+      )
+      .reverse();
+  }
+
+  if (events.length === 0 && sig) {
     events = db
       .all<RawEvent>(
         `SELECT * FROM raw_events
@@ -253,92 +310,82 @@ export async function runReflectJob(
     "SELECT workspace_id FROM session_workspace_owners WHERE session_id = ? AND workspace_id != ''",
     [sessionId]
   );
-  const nonEmptyEventWs = events.find(ev => ev.workspace_id)?.workspace_id || '';
-  const payloadWs = payload.workspaceId ? workspaceId(payload.workspaceId) : '';
+  const nonEmptyEventWs = events.find((ev) => ev.workspace_id)?.workspace_id || '';
   const cwdWs = cwd && !/^[0-9a-f]{16}$/i.test(cwd) ? workspaceId(cwd) : cwd || '';
-  const wsId = nonEmptyEventWs || sessionOwnerRows[0]?.workspace_id || payloadWs || cwdWs || '';
-  const realCwd = resolveRealCwd(cwd);
+  const wsId =
+    nonEmptyEventWs || sessionOwnerRows[0]?.workspace_id || sigWorkspaceId || payloadWs || cwdWs || '';
+  const realCwd =
+    (cwd && cwd.trim() && !/^[0-9a-f]{16}$/i.test(cwd.trim())
+      ? cwd.trim()
+      : resolveWorkspaceCwd(db, wsId)) || '';
+
   const dataWorkspaceIds = Array.from(
-    new Set([
-      ...events.map(ev => ev.workspace_id),
-      ...sessionOwnerRows.map(r => r.workspace_id),
-    ])
+    new Set(
+      [
+        ...events.map((ev) => ev.workspace_id),
+        ...sessionOwnerRows.map((r) => r.workspace_id),
+        sigWorkspaceId,
+        payloadWs,
+      ].filter(Boolean)
+    )
   );
   const signalKind = payload.signalKind || (sig ? 'repeated_tool_failure' : 'user_correction');
+  const displayTurn = hasValidTurn ? turn! : 0;
 
   const maxInputTokens = cfg.distillMaxInputTokens || 6000;
   let boundedDetail = redactSecrets(correctionMessage).text.slice(0, 800);
-  const emptyWrapperTokens = estimateReflectPromptTokens(wsId, turn, signalKind, '', '');
+  const emptyWrapperTokens = estimateReflectPromptTokens(wsId, displayTurn, signalKind, '', '');
   if (emptyWrapperTokens + estimateTokens(boundedDetail) > maxInputTokens) {
-    const maxDetailChars = Math.max(40, Math.floor((maxInputTokens - emptyWrapperTokens - 20) * 2));
-    boundedDetail = boundedDetail.slice(0, maxDetailChars);
+    const availDetailTokens = Math.max(20, maxInputTokens - emptyWrapperTokens - 40);
+    boundedDetail = truncateTextToTokenBudget(boundedDetail, availDetailTokens);
   }
-  const baseWrapperTokens = estimateReflectPromptTokens(wsId, turn, signalKind, boundedDetail, '');
+  const baseWrapperTokens = estimateReflectPromptTokens(
+    wsId,
+    displayTurn,
+    signalKind,
+    boundedDetail,
+    ''
+  );
   const transcriptBudget = Math.max(120, maxInputTokens - baseWrapperTokens - 60);
 
   let selectedEvents = selectBoundedReflectEvents(events, transcriptBudget);
-  const evidenceLedger: EvidenceLedger = new Map();
-  let transcript = renderTranscript(selectedEvents, evidenceLedger);
-  let userPrompt = PROMPT_REFLECT.buildUser({
-    cwd: wsId,
-    turn,
-    signalKind,
-    signalDetail: boundedDetail,
-    transcript,
-  });
 
-  while (
-    selectedEvents.length > 1 &&
-    estimateTokens(PROMPT_REFLECT.system + userPrompt) + 200 > maxInputTokens
-  ) {
-    const dropIdx = selectedEvents.findIndex(
-      (ev, idx) =>
-        idx < selectedEvents.length - 1 &&
-        ev.origin_kind !== 'user' &&
-        ev.is_error !== 1
-    );
-    const removeAt = dropIdx >= 0 ? dropIdx : 0;
-    selectedEvents.splice(removeAt, 1);
-    evidenceLedger.clear();
-    transcript = renderTranscript(selectedEvents, evidenceLedger);
-    userPrompt = PROMPT_REFLECT.buildUser({
+  // 若预选结果加上外层包装后仍略超预算，通过 O(log N) packPromptWithinBudget 或单条真实 token 截断收敛
+  const buildReflectUser = (evs: RawEvent[], ledger?: EvidenceLedger): string => {
+    const transcript = renderTranscript(evs, ledger ?? new Map());
+    return PROMPT_REFLECT.buildUser({
       cwd: wsId,
-      turn,
+      turn: displayTurn,
       signalKind,
       signalDetail: boundedDetail,
       transcript,
     });
+  };
+
+  const packed = packPromptWithinBudget(
+    PROMPT_REFLECT.system,
+    (evs) => buildReflectUser(evs),
+    selectedEvents,
+    maxInputTokens,
+    250
+  );
+
+  if (packed.selected.length > 0) {
+    selectedEvents = packed.selected;
+  } else if (selectedEvents.length > 0) {
+    // 即使只剩最后 1 条事件也超出预算时，基于真实 estimateTokens 截断该单条事件文本
+    const targetEv = selectedEvents[selectedEvents.length - 1];
+    const availTokens = Math.max(30, maxInputTokens - baseWrapperTokens - 40);
+    selectedEvents = [
+      {
+        ...targetEv,
+        text: truncateTextToTokenBudget(targetEv.text || '', availTokens),
+      },
+    ];
   }
 
-  if (
-    selectedEvents.length === 1 &&
-    estimateTokens(PROMPT_REFLECT.system + userPrompt) + 200 > maxInputTokens
-  ) {
-    const rawText = selectedEvents[0].text || '';
-    const allowedTranscriptTokens = Math.max(40, maxInputTokens - baseWrapperTokens - 60);
-    let targetChars = Math.min(rawText.length, Math.max(40, Math.floor(allowedTranscriptTokens * 1.2)));
-    while (targetChars >= 20) {
-      selectedEvents = [
-        {
-          ...selectedEvents[0],
-          text: rawText.slice(0, targetChars),
-        },
-      ];
-      evidenceLedger.clear();
-      transcript = renderTranscript(selectedEvents, evidenceLedger);
-      userPrompt = PROMPT_REFLECT.buildUser({
-        cwd: wsId,
-        turn,
-        signalKind,
-        signalDetail: boundedDetail,
-        transcript,
-      });
-      if (estimateTokens(PROMPT_REFLECT.system + userPrompt) + 200 <= maxInputTokens) {
-        break;
-      }
-      targetChars = Math.floor(targetChars * 0.75);
-    }
-  }
+  const evidenceLedger: EvidenceLedger = new Map();
+  const userPrompt = buildReflectUser(selectedEvents, evidenceLedger);
 
   // 2. 调用离线 LLM
   const llmRes = await callOfflineLLM(
@@ -382,13 +429,4 @@ export async function runReflectJob(
   });
 
   return { action: 'done' };
-}
-
-/**
- * 注册 reflect 离线任务处理器
- */
-export function registerReflectHandler(db: Db, cfg: PluginConfig, fetchFn?: typeof fetch): void {
-  registerJobHandler('reflect', async (job, signal) => {
-    return runReflectJob(db, cfg, job, signal, fetchFn);
-  });
 }

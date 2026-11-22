@@ -44,7 +44,7 @@ describe('M1-T1: db.ts & Migrations', () => {
 
     // 验证 meta 初始化值
     const versionRow = db.get<{ value: string }>("SELECT value FROM meta WHERE key='schema_version'");
-    expect(versionRow?.value).toBe('2');
+    expect(versionRow?.value).toBe('3');
 
     const contractRow = db.get<{ value: string }>("SELECT value FROM meta WHERE key='contract_version'");
     expect(contractRow?.value).toBe('1.1');
@@ -61,7 +61,7 @@ describe('M1-T1: db.ts & Migrations', () => {
       // 再次打开并执行迁移
       const db2 = openDb(tmpFile);
       const versionRow = db2.get<{ value: string }>("SELECT value FROM meta WHERE key='schema_version'");
-      expect(versionRow?.value).toBe('2');
+      expect(versionRow?.value).toBe('3');
       db2.close();
     } finally {
       try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}

@@ -1,3 +1,86 @@
+export type UiLocale = 'zh' | 'en';
+
+export type LLMProtocolType = 'chat/completions' | 'responses' | 'messages';
+
+export type EmbeddingProviderType = 'none' | 'openai-compatible';
+
+export interface EmbeddingConfigData {
+  provider: EmbeddingProviderType;
+  baseURL: string;
+  model: string;
+  apiKeyEnv: string;
+  apiKeyMasked?: string;
+  hasApiKey?: boolean;
+  dim: number;
+  batchSize?: number;
+  timeoutMs?: number;
+}
+
+export interface LLMConfigData {
+  offlineLLM: {
+    useDshLlm: boolean;
+    baseURL: string;
+    model: string;
+    apiKeyEnv: string;
+    apiKeyMasked: string;
+    hasApiKey: boolean;
+    protocol?: LLMProtocolType;
+  };
+  privacy: {
+    offlineConsent: boolean;
+    allowedOfflineEndpoints: string[];
+  };
+  embedding?: EmbeddingConfigData;
+  dailyLLMCalls: number;
+  dailyLLMTokens: number;
+  distillMaxInputTokens?: number;
+}
+
+export interface ConfigSavePayload {
+  offlineLLM?: {
+    useDshLlm: boolean;
+    baseURL: string;
+    model: string;
+    apiKeyEnv: string;
+    apiKey?: string;
+    clearApiKey?: boolean;
+    protocol: LLMProtocolType;
+  };
+  privacy?: {
+    offlineConsent: boolean;
+  };
+  embedding?: {
+    provider: EmbeddingProviderType;
+    baseURL: string;
+    model: string;
+    apiKeyEnv: string;
+    apiKey?: string;
+    clearApiKey?: boolean;
+    dim: number;
+  };
+  dailyLLMCalls?: number;
+  dailyLLMTokens?: number;
+  distillMaxInputTokens?: number;
+}
+
+export interface LLMTestPayload {
+  baseURL?: string;
+  model?: string;
+  apiKey?: string;
+  apiKeyEnv?: string;
+  protocol?: LLMProtocolType;
+  useDshLlm?: boolean;
+}
+
+export interface LLMTestResult {
+  ok: boolean;
+  latencyMs?: number;
+  status?: number;
+  error?: string;
+  model?: string;
+  protocol?: string;
+}
+
 export interface OverviewStatsData {
   stats: {
     total: number;
@@ -61,7 +144,6 @@ export interface CoreMemoryBlock {
   id: string;
   content: string;
   updated_at?: number;
-  updatedAt?: number;
   version: number;
   tokens: number;
 }
@@ -118,4 +200,82 @@ export interface MemoryHealthReportData {
   }>;
   recommendations: string[];
   checkedAt: number;
+}
+
+export interface WorkspaceOption {
+  workspaceId: string;
+  path?: string;
+  activeMemories: number;
+}
+
+export interface HindsightMentalModelItem {
+  id: string;
+  slot_key?: string | null;
+  slotKey?: string | null;
+  summary: string;
+  confidence: number;
+  utility?: number;
+  type?: string;
+  network?: string;
+  derivedCount?: number;
+  updated_at?: number;
+  vikingUri?: string;
+}
+
+export interface HindsightSummaryData {
+  networkCounts: {
+    world: number;
+    experience: number;
+    observation: number;
+    opinion: number;
+  };
+  mentalModels?: HindsightMentalModelItem[];
+  existingModels?: HindsightMentalModelItem[];
+}
+
+export interface VikingCategorySummary {
+  category: string;
+  uri: string;
+  count: number;
+  description?: string;
+  sampleAbstracts?: string[];
+}
+
+export interface VikingSummaryData {
+  rootUri: string;
+  totalMemories: number;
+  categories: VikingCategorySummary[];
+}
+
+export interface StudioSnapshotResponse {
+  ok: true;
+  etag: string;
+  workspaceId: string;
+  workspaces: WorkspaceOption[];
+  stats: OverviewStatsData;
+  health: MemoryHealthReportData;
+  coreMemory: {
+    blocks: CoreMemoryBlock[];
+    totalTokens: number;
+    stableBudgetTokens: number;
+    stableLayerTokens: number;
+  };
+  memories: {
+    total: number;
+    limit: number;
+    offset: number;
+    items: MemoryItem[];
+  };
+  evolution: {
+    recentJobs: JobLogItem[];
+    activeStrategyVersion: number;
+  };
+  hindsight: HindsightSummaryData;
+  viking: VikingSummaryData;
+}
+
+export interface MemoryHostAdapter {
+  fetchApi?: (path: string, init?: RequestInit) => Promise<Response>;
+  locale?: UiLocale;
+  initialWorkspaceId?: string;
 }

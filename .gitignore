@@ -4,11 +4,17 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+*.bak
+*.tsbuildinfo
+.dsh/
 .DS_Store
 Thumbs.db
 .env
 .env.*
 !.env.example
+.vscode/
+.idea/
+tmp/
 coverage/
 *.local
 *.tgz

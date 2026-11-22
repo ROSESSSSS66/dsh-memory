@@ -119,6 +119,51 @@ export interface MemoryRecord {
   invalidated_at?: number | null; // Zep 时序失效时间戳
 }
 
+/**
+ * 原始 SQLite memories 行（origin_kinds 在库中为 JSON 字符串）
+ */
+export type MemoryRow = Omit<MemoryRecord, 'origin_kinds'> & {
+  origin_kinds: string | OriginKind[];
+};
+
+export function parseOriginKinds(raw: unknown): OriginKind[] {
+  if (Array.isArray(raw)) {
+    return raw.filter(
+      (k): k is OriginKind =>
+        k === 'user' || k === 'assistant' || k === 'tool' || k === 'web' || k === 'system'
+    );
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter(
+          (k): k is OriginKind =>
+            k === 'user' || k === 'assistant' || k === 'tool' || k === 'web' || k === 'system'
+        );
+      }
+    } catch {}
+  }
+  return [];
+}
+
+export function hydrateMemoryRow<T extends MemoryRow | undefined>(
+  row: T
+): T extends undefined ? undefined : MemoryRecord {
+  if (!row) return undefined as any;
+  return {
+    ...row,
+    origin_kinds: parseOriginKinds(row.origin_kinds),
+  } as any;
+}
+
+export interface EmbeddingProviderMeta {
+  provider: 'local' | 'openai-compatible';
+  model: string;
+  dim: number;
+  signature: string;
+}
+
 export interface CandidateInput {
   type: MemoryType;
   content: string;
@@ -135,7 +180,6 @@ export interface CandidateInput {
     seq: number;
     kind: string;
     excerpt?: string;
-    content_rev?: number;
   }[];
   entities?: string[];
   valid_from?: number | null;
@@ -229,17 +273,21 @@ export interface DbResult {
   lastInsertRowid: number | bigint;
 }
 
+export type SqlBindValue = string | number | bigint | Uint8Array | null | undefined;
+
 export interface Db {
+  readonly filePath?: string;
   exec(sql: string): void;
-  run(sql: string, params?: any[]): DbResult;
-  get<T = any>(sql: string, params?: any[]): T | undefined;
-  all<T = any>(sql: string, params?: any[]): T[];
+  run(sql: string, params?: readonly any[]): DbResult;
+  get<T = any>(sql: string, params?: readonly any[]): T | undefined;
+  all<T = any>(sql: string, params?: readonly any[]): T[];
   prepare(sql: string): {
     run(...params: any[]): DbResult;
     get(...params: any[]): any;
     all(...params: any[]): any[];
   };
   transaction<T>(fn: () => T): T;
+  afterCommit(cb: () => void): void;
   close(): void;
 }
 
@@ -291,7 +339,10 @@ export interface MarkdownFrontmatter {
   confidence: number;
   utility: number;
   pinned: number;
+  content_rev?: number;
   entities?: string[];
+  viking_uri?: string;
+  hindsight_network?: HindsightNetwork;
   created_at?: string;
   updated_at?: string;
 }

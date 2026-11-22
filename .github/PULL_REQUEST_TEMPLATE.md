@@ -16,6 +16,8 @@
 - [ ] 本地执行 `npm run typecheck` 通过，无类型报错
 - [ ] 本地执行 `npm test` 通过，全量测试用例全部绿色
 - [ ] 本地执行 `npm run build` 成功生成产物
+- [ ] 本地执行 `npm run eval` 通过 Eval v2（152 用例）基准评测门禁
+- [ ] 本地执行 `npm run pack:check` 通过，发布包产物、截图清单与零运行时依赖校验无误
 - [ ] 代码规范无未处理的临时代码、调试日志或明文敏感密钥
 
 ## 审核者注意点 (Notes for Reviewers)

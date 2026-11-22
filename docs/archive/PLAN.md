@@ -1,3 +1,9 @@
+> **[Archived Historical Baseline Document]**
+> `PLAN.md` is preserved in `docs/archive/` as a historical engineering baseline record from earlier development milestones.
+> For current architecture, configuration, tooling, and verification gates, refer to [README.md](../../README.md) and [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
+---
+
 # DSH Self-Evolving Memory · 落地执行方案 v1.1
 
 > **执行方：** DeepSeek-V4.1-Flash（以下称"执行模型"）。

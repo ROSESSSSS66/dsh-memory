@@ -6,6 +6,7 @@ export interface EvidenceLedgerEntry {
   original_seq: number;
   kind: string;
   redacted_text: string;
+  rendered_line?: string;
   origin_kinds: OriginKind[];
   time: number;
 }

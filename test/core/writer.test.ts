@@ -1,22 +1,36 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import type { Db, MemoryRecord } from '../../src/types.js';
 import {
   upsertCandidate,
   approveCandidate,
   editContent,
+  editMemory,
   rollback,
   forget,
   freeze,
   unfreeze,
+  pin,
+  unpin,
   applyUtility,
+  confirmMemory,
+  mergeMemories,
+  restoreMemory,
+  truncateToTokens,
 } from '../../src/core/writer.js';
+import { getCachedRuntimeEmbedding } from '../../src/core/vector.js';
+import { workspaceId } from '../../src/core/scope.js';
+import { estimateTokens } from '../../src/core/tokens.js';
 
 describe('M1-T3: writer.ts Pipeline Tests (12 Required Checks)', () => {
   let db: Db;
 
   beforeEach(() => {
     db = openDb(':memory:');
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   // 1. 插入一条记录 → memories、memory_fts、memory_entities、memory_sources 四张表中都有对应数据
@@ -71,7 +85,6 @@ describe('M1-T3: writer.ts Pipeline Tests (12 Required Checks)', () => {
 
     const mem1 = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id]);
     expect(mem1?.status).toBe('candidate');
-    const initConf = mem1!.confidence;
 
     // 独立来源 2（同为非用户来源）
     const res2 = upsertCandidate(db, {
@@ -541,5 +554,458 @@ describe('M1-T3: writer.ts Pipeline Tests (12 Required Checks)', () => {
     expect(memReactivated.status).toBe('active');
     expect(memReactivated.valid_to).toBeNull();
     expect(memReactivated.invalidated_at).toBeNull();
+  });
+
+  it('14. P0 taint fix: web/tool taint clears isExplicitUser and approved_by even for user actor', () => {
+    const res = upsertCandidate(db, {
+      type: 'semantic',
+      content: '从网页复制的配置：端口 9999',
+      source_kind: 'user',
+      confidence: 1.0,
+      status: 'active',
+      origin_kinds: ['user', 'web'],
+      sources: [{ session_id: 's_taint', seq: 1, kind: 'web' }],
+      actor: 'user',
+    });
+    expect(res.action).toBe('inserted');
+    const id = (res as any).id;
+    const mem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id])!;
+    expect(mem.status).toBe('candidate');
+    expect(mem.confidence).toBeLessThanOrEqual(0.5);
+    expect(mem.approved_at).toBeNull();
+    expect(mem.approved_by).toBeNull();
+
+    // Re-upserting tainted input on existing candidate must NOT promote it to active
+    const mergeRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '从网页复制的配置：端口 9999',
+      source_kind: 'user',
+      confidence: 1.0,
+      status: 'active',
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's_taint', seq: 2, kind: 'tool_result' }],
+      actor: 'user',
+    });
+    expect(mergeRes).toEqual({ action: 'merged', id });
+    const afterMerge = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id])!;
+    expect(afterMerge.status).toBe('candidate');
+    expect(afterMerge.confidence).toBeLessThanOrEqual(0.5);
+    expect(afterMerge.approved_by).toBeNull();
+    expect(JSON.parse(afterMerge.origin_kinds as unknown as string)).toEqual(
+      expect.arrayContaining(['user', 'web', 'tool'])
+    );
+  });
+
+  it('15. deduplicates repeated slot conflict_pending candidates idempotently', () => {
+    const activeRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '当前框架使用 Vite 5',
+      slot_key: 'project.bundler',
+      source_kind: 'user',
+      confidence: 1.0,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's1', seq: 1, kind: 'user_msg' }],
+      actor: 'user',
+    });
+    const activeId = (activeRes as any).id;
+
+    const cand1 = upsertCandidate(db, {
+      type: 'semantic',
+      content: '提议切换到 Turbopack',
+      slot_key: 'project.bundler',
+      source_kind: 'assistant',
+      confidence: 0.4,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 's1', seq: 2, kind: 'assistant_msg' }],
+      actor: 'llm',
+    });
+    const cand2 = upsertCandidate(db, {
+      type: 'semantic',
+      content: '提议切换到 Turbopack',
+      slot_key: 'project.bundler',
+      source_kind: 'assistant',
+      confidence: 0.4,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 's2', seq: 3, kind: 'assistant_msg' }],
+      actor: 'llm',
+    });
+
+    expect(cand1.action).toBe('conflict_pending');
+    expect(cand2.action).toBe('conflict_pending');
+    expect((cand2 as any).id).toBe((cand1 as any).id);
+    expect((cand2 as any).withId).toBe(activeId);
+
+    const candidateRows = db.all("SELECT id FROM memories WHERE slot_key = 'project.bundler' AND status = 'candidate'");
+    expect(candidateRows).toHaveLength(1);
+    const srcs = db.all('SELECT * FROM memory_sources WHERE memory_id = ?', [(cand1 as any).id]);
+    expect(srcs).toHaveLength(2);
+  });
+
+  it('16. Step 3 merge preserves web/tool taint across assistant merges and records system approver + snapshots', () => {
+    // A: web candidate followed by assistant mention -> stays <= 0.5 and unions origin_kinds
+    const webRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '实验性特性开关默认关闭',
+      source_kind: 'web',
+      confidence: 0.5,
+      origin_kinds: ['web'],
+      sources: [{ session_id: 's1', seq: 1, kind: 'web' }],
+      actor: 'llm',
+    });
+    const webId = (webRes as any).id;
+    upsertCandidate(db, {
+      type: 'semantic',
+      content: '实验性特性开关默认关闭',
+      source_kind: 'assistant',
+      confidence: 0.8,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 's2', seq: 1, kind: 'assistant_msg' }],
+      actor: 'llm',
+    });
+    const webMem = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [webId])!;
+    expect(webMem.confidence).toBeLessThanOrEqual(0.5);
+    expect(JSON.parse(webMem.origin_kinds as unknown as string)).toEqual(
+      expect.arrayContaining(['web', 'assistant'])
+    );
+
+    // B: clean assistant candidate promoted by system actor -> approved_by='system', version=2, snapshot saved
+    const cleanRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '系统初始化约定的日志格式为 JSON',
+      source_kind: 'assistant',
+      confidence: 0.6,
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 's1', seq: 10, kind: 'assistant_msg' }],
+      actor: 'llm',
+    });
+    const cleanId = (cleanRes as any).id;
+    upsertCandidate(db, {
+      type: 'semantic',
+      content: '系统初始化约定的日志格式为 JSON',
+      source_kind: 'system',
+      status: 'active',
+      confidence: 0.9,
+      origin_kinds: ['system'],
+      sources: [{ session_id: 's1', seq: 11, kind: 'system' }],
+      actor: 'system',
+    });
+    const promoted = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [cleanId])!;
+    expect(promoted.status).toBe('active');
+    expect(promoted.approved_by).toBe('system');
+    expect(promoted.version).toBe(2);
+    const snap = db.get('SELECT * FROM memory_versions WHERE memory_id = ? AND reason = ?', [cleanId, 'approve']);
+    expect(snap).toBeDefined();
+  });
+
+  it('17. enforces lifecycle guards across confirmMemory, freeze, restoreMemory, forget, pin/unpin, mergeMemories, applyUtility', () => {
+    const t0 = 10_000;
+    const activeRes = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: '核心构建工具固定使用 pnpm',
+        slot_key: 'build.tool',
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 1, kind: 'user_msg' }],
+        actor: 'user',
+      },
+      t0
+    );
+    const activeId = (activeRes as any).id;
+
+    // applyUtility must NOT increment use_count or touch updated_at, and must clamp/validate
+    applyUtility(db, activeId, 1.5, 1, 0, t0 + 5000);
+    const afterUtil = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [activeId])!;
+    expect(afterUtil.utility).toBe(1.0);
+    expect(afterUtil.use_count).toBe(0);
+    expect(afterUtil.updated_at).toBe(t0);
+    expect(afterUtil.last_used_at).toBe(t0 + 5000);
+    expect(() => applyUtility(db, activeId, Number.NaN)).toThrow('invalid_utility');
+    expect(() => applyUtility(db, activeId, 0.5, 1.5, 0)).toThrow('invalid_delta_success');
+
+    // pin / unpin record snapshots & bump version, and pin rejects candidate/archived
+    expect(pin(db, activeId, 'user', t0 + 100)).toBe(true);
+    expect(db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [activeId])?.version).toBe(2);
+    expect(unpin(db, activeId, 'user', t0 + 200)).toBe(true);
+    expect(db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [activeId])?.version).toBe(3);
+
+    // freeze active -> frozen; forget & confirmMemory & restoreMemory must reject frozen
+    expect(freeze(db, activeId, 'user', t0 + 300)).toBe(true);
+    expect(forget(db, activeId, 'user', t0 + 400)).toBe(false);
+    expect(confirmMemory(db, activeId, 'user', t0 + 400).success).toBe(false);
+    expect(restoreMemory(db, activeId, 'user', t0 + 400).success).toBe(false);
+
+    // Candidate on frozen slot: confirmMemory must fail WITHOUT creating an orphan snapshot
+    const candRes = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: '尝试改用 yarn 作为构建工具',
+        slot_key: 'build.tool',
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's1', seq: 2, kind: 'user_msg' }],
+        actor: 'user',
+      },
+      t0 + 500
+    );
+    expect(candRes.action).toBe('conflict_pending');
+    const candId = (candRes as any).id;
+
+    // pin & freeze & restoreMemory must reject candidate
+    expect(pin(db, candId)).toBe(false);
+    expect(freeze(db, candId)).toBe(false);
+    expect(restoreMemory(db, candId).success).toBe(false);
+
+    const confirmFrozenRes = confirmMemory(db, candId, 'user', t0 + 600);
+    expect(confirmFrozenRes.success).toBe(false);
+    expect(db.all('SELECT * FROM memory_versions WHERE memory_id = ?', [candId])).toHaveLength(0);
+
+    // approveCandidate pending repair_proposals check uses json_each (exact element match)
+    db.run(
+      `INSERT INTO repair_proposals (job_id, memory_id, content_rev, action, candidate_ids, reason, status, created_at, expires_at)
+       VALUES (99, ?, 1, 'revise', ?, 'test repair', 'candidate', ?, ?)`,
+      [activeId, JSON.stringify([candId]), t0, t0 + 86400_000]
+    );
+    expect(approveCandidate(db, candId, 'user', t0 + 700)).toEqual({
+      action: 'rejected',
+      reason: 'pending_repair_proposals',
+    });
+    expect(confirmMemory(db, candId, 'user', t0 + 700).success).toBe(false);
+    expect(db.all('SELECT * FROM memory_versions WHERE memory_id = ?', [candId])).toHaveLength(0);
+
+    // unfreeze -> forget sets valid_to and invalidated_at -> restoreMemory succeeds
+    expect(unfreeze(db, activeId, 'user', t0 + 800)).toBe(true);
+    expect(forget(db, activeId, 'user', t0 + 900)).toBe(true);
+    const archived = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [activeId])!;
+    expect(archived.status).toBe('archived');
+    expect(archived.valid_to).toBe(t0 + 900);
+    expect(archived.invalidated_at).toBe(t0 + 900);
+    expect(restoreMemory(db, activeId, 'user', t0 + 1000).success).toBe(true);
+    expect(db.get<MemoryRecord>('SELECT status FROM memories WHERE id = ?', [activeId])?.status).toBe('active');
+  });
+
+  it('18. mergeMemories preserves taint in origin_kinds and gates utility/confidence boosts on trustedActor', () => {
+    const targetRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '部署服务使用 Docker Compose 编排',
+      source_kind: 'user',
+      confidence: 0.7,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's1', seq: 1, kind: 'user_msg' }],
+      actor: 'user',
+    });
+    const sourceRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '外部文档提到服务通过 docker-compose 启动',
+      source_kind: 'web',
+      confidence: 0.5,
+      origin_kinds: ['web'],
+      sources: [{ session_id: 's1', seq: 2, kind: 'web' }],
+      actor: 'llm',
+    });
+    const targetId = (targetRes as any).id;
+    const sourceId = (sourceRes as any).id;
+
+    const mRes = mergeMemories(db, sourceId, targetId, 'llm_dedup', 'llm', 5000);
+    expect(mRes.success).toBe(true);
+
+    const target = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [targetId])!;
+    expect(target.utility).toBe(0.5); // llm does NOT boost utility
+    expect(target.success_count).toBe(0); // llm does NOT boost success_count
+    expect(target.confidence).toBeLessThanOrEqual(0.85);
+    expect(JSON.parse(target.origin_kinds as unknown as string)).toEqual(
+      expect.arrayContaining(['user', 'web'])
+    );
+  });
+
+  it('19. editContent validates empty content & emoji truncation; editMemory enforces guards & atomic updates', () => {
+    const wsA = workspaceId('C:/ws-edit-a');
+    const wsB = workspaceId('C:/ws-edit-b');
+
+    const r1 = upsertCandidate(db, {
+      type: 'semantic',
+      content: '初始内容指向端口 3000',
+      slot_key: 'svc.port',
+      scope: 'workspace',
+      workspaceId: wsA,
+      source_kind: 'user',
+      confidence: 0.9,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's1', seq: 1, kind: 'user_msg' }],
+      actor: 'user',
+    });
+    const id1 = (r1 as any).id;
+
+    // editContent rejects empty/whitespace content
+    expect(() => editContent(db, id1, '   \n\t  ')).toThrow('empty_content');
+
+    // truncateToTokens is code-point safe on emoji / surrogate pairs
+    const emojiSummary = '🚀🔥'.repeat(120);
+    const truncated = truncateToTokens(emojiSummary, 20);
+    expect(estimateTokens(truncated)).toBeLessThanOrEqual(20);
+    expect(() => encodeURIComponent(truncated)).not.toThrow(); // no lone surrogates
+
+    // editMemory rejects assigning core:* slot_key on non-core memory
+    expect(() =>
+      editMemory(db, id1, { slot_key: 'core:project' }, 'user')
+    ).toThrow('cannot_assign_core_slot_key');
+
+    // Create occupant on wsB slot 'svc.port', then move id1 into wsB -> supersedes occupant
+    const r2 = upsertCandidate(db, {
+      type: 'semantic',
+      content: '工作区 B 原有端口 4000',
+      slot_key: 'svc.port',
+      scope: 'workspace',
+      workspaceId: wsB,
+      source_kind: 'user',
+      confidence: 0.9,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's1', seq: 2, kind: 'user_msg' }],
+      actor: 'user',
+    });
+    const id2 = (r2 as any).id;
+
+    const editRes = editMemory(
+      db,
+      id1,
+      {
+        content: '迁移到工作区 B 的新端口 5000',
+        type: 'procedural',
+        scope: 'workspace',
+        workspaceId: wsB,
+        importance: 9,
+      },
+      'user',
+      9000
+    );
+    expect(editRes.ok).toBe(true);
+    expect(editRes.supersededId).toBe(id2);
+    expect(editRes.memory.workspace_id).toBe(wsB);
+    expect(editRes.memory.type).toBe('procedural');
+    expect(editRes.memory.importance).toBe(9);
+    expect(Array.isArray(editRes.memory.origin_kinds)).toBe(true);
+    expect(db.get<MemoryRecord>('SELECT status, invalidated_at FROM memories WHERE id = ?', [id2])).toMatchObject({
+      status: 'superseded',
+      invalidated_at: 9000,
+    });
+    expect(
+      db.get('SELECT 1 FROM memory_relations WHERE from_id = ? AND to_id = ? AND rel = ?', [id1, id2, 'supersedes'])
+    ).toBeDefined();
+
+    // Frozen memory cannot be edited via editMemory
+    freeze(db, id1);
+    expect(() => editMemory(db, id1, { content: '尝试修改冻结记忆' })).toThrow('memory_is_frozen');
+  });
+
+  it('20. truncates source excerpts to 300 code points, scans secrets before truncation, and keeps cache rollback-safe', () => {
+    const longExcerpt = '🎉'.repeat(350);
+    const res = upsertCandidate(db, {
+      type: 'semantic',
+      content: '带有超长表情摘录的正常事实',
+      source_kind: 'user',
+      confidence: 0.9,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's_exc', seq: 1, kind: 'user_msg', excerpt: longExcerpt }],
+      actor: 'user',
+    });
+    expect(res.action).toBe('inserted');
+    const savedSrc = db.get<{ excerpt: string }>('SELECT excerpt FROM memory_sources WHERE memory_id = ?', [
+      (res as any).id,
+    ])!;
+    expect(Array.from(savedSrc.excerpt).length).toBe(300);
+    expect(() => encodeURIComponent(savedSrc.excerpt)).not.toThrow();
+
+    // Secret placed AFTER char 300 in excerpt must still be rejected
+    const tailSecretExcerpt = `${'a'.repeat(320)} sk-ant-api03-secretvalue1234567890abcdef`;
+    const secretRes = upsertCandidate(db, {
+      type: 'semantic',
+      content: '尾部藏有密钥摘录的记忆',
+      source_kind: 'user',
+      confidence: 0.9,
+      origin_kinds: ['user'],
+      sources: [{ session_id: 's_exc', seq: 2, kind: 'user_msg', excerpt: tailSecretExcerpt }],
+      actor: 'user',
+    });
+    expect(secretRes).toEqual({ action: 'rejected', reason: 'sensitive_content_detected' });
+
+    // Rolled-back outer transaction must NOT prime runtime vector cache
+    let rolledBackId = '';
+    let rolledBackHash = '';
+    expect(() =>
+      db.transaction(() => {
+        const tmpRes = upsertCandidate(db, {
+          type: 'semantic',
+          content: '即将被外层事务回滚的记忆条目',
+          source_kind: 'user',
+          confidence: 0.9,
+          origin_kinds: ['user'],
+          sources: [{ session_id: 's_rb', seq: 1, kind: 'user_msg' }],
+          actor: 'user',
+        });
+        rolledBackId = (tmpRes as any).id;
+        rolledBackHash = db.get<{ hash: string }>('SELECT hash FROM memories WHERE id = ?', [rolledBackId])!.hash;
+        throw new Error('force_outer_rollback');
+      })
+    ).toThrow('force_outer_rollback');
+
+    expect(db.get('SELECT 1 FROM memories WHERE id = ?', [rolledBackId])).toBeUndefined();
+    expect(getCachedRuntimeEmbedding(rolledBackId, rolledBackHash, db)).toBeNull();
+  });
+
+  it('21. rollback recomputes embedding with nextSlotKey and records supersedes relation on slot conflict', () => {
+    const t1 = 1000;
+    const t2 = 2000;
+    const t3 = 3000;
+
+    const r1 = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: '缓存层使用 Redis 7 单节点',
+        slot_key: 'cache.engine',
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's_rb', seq: 1, kind: 'user_msg' }],
+        actor: 'user',
+      },
+      t1
+    );
+    const id1 = (r1 as any).id;
+
+    // Move id1 off slot_key='cache.engine' so another memory can claim that slot
+    editMemory(db, id1, { content: '缓存层暂不绑定槽位', slot_key: null }, 'user', t2);
+    const r2 = upsertCandidate(
+      db,
+      {
+        type: 'semantic',
+        content: '缓存层改用 Memcached',
+        slot_key: 'cache.engine',
+        source_kind: 'user',
+        confidence: 0.9,
+        origin_kinds: ['user'],
+        sources: [{ session_id: 's_rb', seq: 2, kind: 'user_msg' }],
+        actor: 'user',
+      },
+      t2 + 100
+    );
+    const id2 = (r2 as any).id;
+
+    // Rollback id1 to v1 (slot_key='cache.engine') -> must supersede id2 with supersedes relation & invalidated_at
+    const rbRes = rollback(db, id1, 1, 'user', t3);
+    expect(rbRes.ok).toBe(true);
+    const afterId1 = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id1])!;
+    const afterId2 = db.get<MemoryRecord>('SELECT * FROM memories WHERE id = ?', [id2])!;
+    expect(afterId1.slot_key).toBe('cache.engine');
+    expect(afterId2.status).toBe('superseded');
+    expect(afterId2.valid_to).toBe(t3);
+    expect(afterId2.invalidated_at).toBe(t3);
+    expect(
+      db.get('SELECT 1 FROM memory_relations WHERE from_id = ? AND to_id = ? AND rel = ?', [id1, id2, 'supersedes'])
+    ).toBeDefined();
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import type { Db, MemoryRecord } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
@@ -18,6 +18,10 @@ describe('Letta/MemGPT-Inspired Core Memory (core-memory.ts)', () => {
 
   beforeEach(() => {
     db = openDb(':memory:');
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   it('should initialize and read core memory blocks (human, persona, project)', () => {
@@ -100,5 +104,58 @@ describe('Letta/MemGPT-Inspired Core Memory (core-memory.ts)', () => {
     expect(after.importance).toBe(10);
     expect(after.utility).toBe(1.0);
     expect(renderStableLayer(db, { workspaceId: ws1 }).text).toContain('Model-suggested build rule.');
+  });
+
+  it('should reject secret-bearing content without overwriting existing core memory', () => {
+    setCoreMemory(db, 'project', '项目使用 PostgreSQL 16 主库。', { workspaceId: ws1 });
+
+    expect(() =>
+      setCoreMemory(
+        db,
+        'project',
+        '数据库连接串 postgres://admin:superSecretPass123@db.internal:5432/prod',
+        { workspaceId: ws1 }
+      )
+    ).toThrow('sensitive_content_detected');
+
+    expect(() =>
+      appendCoreMemory(db, 'project', 'API Key: sk-proj-1234567890abcdefghijklmnop', {
+        workspaceId: ws1,
+      })
+    ).toThrow('sensitive_content_detected');
+
+    const intact = getCoreMemory(db, 'project', { workspaceId: ws1 });
+    expect(intact?.content).toBe('项目使用 PostgreSQL 16 主库。');
+    expect(intact?.version).toBe(1);
+  });
+
+  it('should validate core block names strictly and deduplicate getAllCoreMemories preferring canonical scope', () => {
+    for (const badName of ['', '   ', '123num', 'bad:colon', '../path', 'a'.repeat(33)]) {
+      expect(() => setCoreMemory(db, badName, 'valid text', { workspaceId: ws1 })).toThrow(
+        'invalid_core_block'
+      );
+      expect(() => appendCoreMemory(db, badName, 'valid text', { workspaceId: ws1 })).toThrow(
+        'invalid_core_block'
+      );
+    }
+
+    // Seed canonical 'human' (scope='user') AND a non-canonical duplicate 'core:human' in workspace scope,
+    // plus an uppercase 'CORE:ignored' row that must NOT match case-sensitive range
+    setCoreMemory(db, 'human', '规范 user scope 的 human 块', { workspaceId: ws1 });
+    db.run(
+      `INSERT INTO memories (
+        id, type, status, content, summary, slot_key, scope, workspace_id, origin_kinds, source_kind,
+        confidence, utility, use_count, success_count, fail_count, token_cost, summary_cost, hash,
+        version, content_rev, pinned, created_at, updated_at
+      ) VALUES
+      ('m_coredupws0000001', 'preference', 'active', '非规范 workspace human', 'dup', 'core:human', 'workspace', ?, '["user"]', 'user', 1, 1, 0, 0, 0, 5, 2, 'hdup1', 9, 1, 1, 1, 999999),
+      ('m_coreupper0000001', 'semantic', 'active', '大写槽位不应混入', 'upper', 'CORE:human', 'workspace', ?, '["user"]', 'user', 1, 1, 0, 0, 0, 5, 2, 'hdup2', 1, 1, 0, 1, 1)`,
+      [ws1, ws1]
+    );
+
+    const all = getAllCoreMemories(db, { workspaceId: ws1 });
+    const humanEntries = all.filter((e) => e.block === 'human');
+    expect(humanEntries).toHaveLength(1);
+    expect(humanEntries[0].content).toBe('规范 user scope 的 human 块');
   });
 });

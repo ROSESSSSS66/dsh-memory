@@ -7,7 +7,7 @@ import type { Db } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
 import { MemoryTools } from '../../src/dsh/tools.js';
 import { MemoryCommands } from '../../src/dsh/commands.js';
-import { upsertCandidate, approveCandidate } from '../../src/core/writer.js';
+import { upsertCandidate, approveCandidate, mergeMemories } from '../../src/core/writer.js';
 import { SessionListener } from '../../src/dsh/session-listener.js';
 import { IngestQueue } from '../../src/ingest/queue.js';
 
@@ -28,6 +28,9 @@ describe('Ecosystem Features Merged into DSH Memory', () => {
   });
 
   afterEach(() => {
+    try {
+      db.close();
+    } catch {}
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch {}
@@ -134,7 +137,33 @@ describe('Ecosystem Features Merged into DSH Memory', () => {
       const rowB = db.get('SELECT * FROM memories WHERE id = ?', [idB]);
       expect(rowA.status).toBe('superseded');
       expect(rowB.status).toBe('active');
-      expect(rowB.utility).toBeGreaterThan(0.5);
+      // 防刷分安全边界：LLM 触发的 merge 不得人为拉高 target.utility
+      expect(rowB.utility).toBe(0.5);
+
+      // 受信任用户（actor='user'）执行合并则正常提升目标记忆效用
+      const resC = upsertCandidate(
+        db,
+        {
+          type: 'semantic',
+          content: 'Redis 客户端需启用 TLSv1.3 与鉴权密码',
+          summary: 'Redis TLS 与鉴权补充',
+          scope: 'workspace',
+          workspaceId: ws1,
+          source_kind: 'user',
+          confidence: 0.85,
+          origin_kinds: ['user'],
+          sources: [{ session_id: sess1, seq: 3, kind: 'user' }],
+          actor: 'user',
+        },
+        now + 800
+      );
+      const idC = (resC as any).id;
+      const userMergeRes = mergeMemories(db, idC, idB, 'user_confirmed_merge', 'user', now + 1000);
+      expect(userMergeRes.success).toBe(true);
+      const rowC = db.get('SELECT * FROM memories WHERE id = ?', [idC]);
+      const rowBAfterUser = db.get('SELECT * FROM memories WHERE id = ?', [idB]);
+      expect(rowC.status).toBe('superseded');
+      expect(rowBAfterUser.utility).toBeGreaterThan(0.5);
     });
   });
 
@@ -272,7 +301,7 @@ describe('Ecosystem Features Merged into DSH Memory', () => {
   });
 
   describe('Context Pressure Monitor (creativedswork/dsh-expmem)', () => {
-    it('should emit context pressure event when turn count or events cross threshold', () => {
+    it('should emit context pressure event when turn count or events cross threshold', async () => {
       const queue = new IngestQueue(db);
       let pressureEvent: any = null;
 
@@ -286,17 +315,24 @@ describe('Ecosystem Features Merged into DSH Memory', () => {
 
       const listener = new SessionListener(queue, undefined, mockCtx);
 
-      // 模拟多轮高压对话
-      for (let i = 1; i <= 16; i++) {
-        listener.handleEvent(
-          { id: 'sess_pressure_test', cwd: ws1 },
-          { type: 'user/message', seq: i, data: { turn: i, content: [{ type: 'text', text: `用户在第 ${i} 轮提问` }] } }
-        );
-      }
+      try {
+        // 模拟多轮高压对话
+        for (let i = 1; i <= 16; i++) {
+          listener.handleEvent(
+            { id: 'sess_pressure_test', cwd: ws1 },
+            { type: 'user/message', seq: i, data: { turn: i, content: [{ type: 'text', text: `用户在第 ${i} 轮提问` }] } }
+          );
+        }
 
-      expect(pressureEvent).not.toBeNull();
-      expect(pressureEvent.sessionId).toBe('sess_pressure_test');
-      expect(pressureEvent.turn).toBeGreaterThanOrEqual(15);
+        // memory/context-pressure 通过 queueMicrotask 异步派发以保持 session/event O(1)
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(pressureEvent).not.toBeNull();
+        expect(pressureEvent.sessionId).toBe('sess_pressure_test');
+        expect(pressureEvent.turn).toBeGreaterThanOrEqual(15);
+      } finally {
+        await queue.close();
+      }
     });
   });
 

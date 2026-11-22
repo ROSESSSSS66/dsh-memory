@@ -1,6 +1,7 @@
 {
   "meta": {
     "title": "DSH 长期记忆系统",
-    "description": "面向 DSH 的本地优先长期记忆插件，支持混合检索召回、工作记忆缓冲与后台记忆巩固演化。"
-  }
+    "description": "面向 DSH 的零运行时依赖纯本地长期记忆插件：全量内存向量矩阵 + SQLite FTS5 毫秒级混合召回（万级 p95 < 10ms）、Hindsight 与 OpenViking 认知洞察、4 个精简模型工具与后台全自动演进。"
+  },
+  "panel": "长期记忆"
 }

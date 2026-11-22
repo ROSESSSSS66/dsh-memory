@@ -1,12 +1,17 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { openDb } from '../../src/core/db.js';
 import type { Db } from '../../src/types.js';
 import { workspaceId } from '../../src/core/scope.js';
 import { buildQueryPlan } from '../../src/retrieval/query.js';
-import { recall } from '../../src/retrieval/recall.js';
-import { upsertCandidate, editContent } from '../../src/core/writer.js';
+import { recall, recallAsync } from '../../src/retrieval/recall.js';
+import { upsertCandidate, editContent, addRelation } from '../../src/core/writer.js';
 import { budgetTokens } from '../../src/core/tokens.js';
 import { get } from '../../src/core/store.js';
+import { computeLocalEmbedding } from '../../src/core/vector.js';
+import { DEFAULTS } from '../../src/config.js';
 
 describe('Recall System Integration (recall.ts)', () => {
   let db: Db;
@@ -16,6 +21,10 @@ describe('Recall System Integration (recall.ts)', () => {
 
   beforeEach(() => {
     db = openDb(':memory:');
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   describe('验收项 2: 构造 200 条记忆，查询 "PostgreSQL 连接超时怎么办"，相关记录排进前 3', () => {
@@ -487,6 +496,134 @@ describe('Recall System Integration (recall.ts)', () => {
       expect(() => {
         get(db, 'm_ambi', { workspaceId: wsId });
       }).toThrow(/Ambiguous short id/);
+    });
+  });
+
+  describe('Wave 2 Retrieval Hardening: Scoped Contradictions, Hydration, Read-Only DB & recallAsync', () => {
+    it('isolates contradicts queries by scopeFilterSQL and tags in-scope contradictions as (disputed)', () => {
+      const wsOther = workspaceId('dsh-memory-other-workspace');
+
+      // Shared user-level memory
+      const userMem = upsertCandidate(
+        db,
+        {
+          type: 'semantic',
+          content: '全局网关默认使用 HTTP/2 协议通信',
+          scope: 'user',
+          source_kind: 'user',
+          confidence: 0.9,
+          origin_kinds: ['user'],
+          sources: [{ session_id: sessId, seq: 1, kind: 'user' }],
+          actor: 'user',
+        },
+        fixedNow
+      );
+      const userMemId = (userMem as any).id;
+
+      // Contradicting memory in ANOTHER workspace wsOther
+      const otherWsContra = upsertCandidate(
+        db,
+        {
+          type: 'semantic',
+          content: '测试工作区临时降级为 HTTP/1.1',
+          scope: 'workspace',
+          workspaceId: wsOther,
+          source_kind: 'user',
+          confidence: 0.9,
+          origin_kinds: ['user'],
+          sources: [{ session_id: 's_other', seq: 1, kind: 'user' }],
+          actor: 'user',
+        },
+        fixedNow + 10
+      );
+      addRelation(db, userMemId, (otherWsContra as any).id, 'contradicts', fixedNow + 20);
+
+      const plan = buildQueryPlan({ userText: '全局网关默认使用什么协议通信', now: fixedNow });
+
+      // In wsId: cross-workspace contradiction MUST NOT leak or tag (disputed)
+      const resWs1 = recall(db, plan, { workspaceId: wsId, sessionId: sessId, now: fixedNow });
+      expect(resWs1.items.some((it) => it.memory.id === userMemId)).toBe(true);
+      expect(resWs1.block).not.toContain('(disputed)');
+      // Verify origin_kinds hydrated via hydrateMemoryRow()
+      const recalledItem = resWs1.items.find((it) => it.memory.id === userMemId)!;
+      expect(Array.isArray(recalledItem.memory.origin_kinds)).toBe(true);
+      expect(recalledItem.memory.origin_kinds).toEqual(['user']);
+
+      // In wsOther: in-scope contradiction MUST tag (disputed)
+      const resWsOther = recall(db, plan, { workspaceId: wsOther, sessionId: 's_other', now: fixedNow });
+      expect(resWsOther.items.some((it) => it.memory.id === userMemId)).toBe(true);
+      expect(resWsOther.block).toContain('(disputed)');
+    });
+
+    it('recall() works safely on a read-only database even when strategies table is empty', () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-recall-ro-'));
+      const dbFile = path.join(tmpDir, 'ro.db');
+      try {
+        const rwDb = openDb(dbFile);
+        upsertCandidate(
+          rwDb,
+          {
+            type: 'semantic',
+            content: '只读数据库检索验证：核心队列服务为 RabbitMQ 3.13',
+            scope: 'workspace',
+            workspaceId: wsId,
+            source_kind: 'user',
+            confidence: 0.95,
+            origin_kinds: ['user'],
+            sources: [{ session_id: sessId, seq: 1, kind: 'user' }],
+            actor: 'user',
+          },
+          fixedNow
+        );
+        // Ensure strategies table is empty so getActiveStrategy would try to write
+        rwDb.run('DELETE FROM strategies');
+        rwDb.close();
+
+        const roDb = openDb(dbFile, { readOnly: true });
+        try {
+          const plan = buildQueryPlan({ userText: '核心队列服务 RabbitMQ', now: fixedNow });
+          const res = recall(roDb, plan, { workspaceId: wsId, sessionId: sessId, now: fixedNow });
+          expect(res.items.length).toBe(1);
+          expect(res.block).toContain('RabbitMQ 3.13');
+          expect(res.strategyVersion).toBe(1);
+        } finally {
+          roDb.close();
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('recallAsync supports precomputed queryVec and gracefully falls back to local vectors when remote disabled', async () => {
+      const ins = upsertCandidate(
+        db,
+        {
+          type: 'procedural',
+          content: '部署 Rust WASM 模块时需运行 wasm-pack build --target web',
+          scope: 'workspace',
+          workspaceId: wsId,
+          source_kind: 'user',
+          confidence: 0.95,
+          origin_kinds: ['user'],
+          sources: [{ session_id: sessId, seq: 1, kind: 'user' }],
+          actor: 'user',
+        },
+        fixedNow
+      );
+      const id = (ins as any).id;
+
+      const plan = buildQueryPlan({ userText: 'Rust WASM wasm-pack build', now: fixedNow });
+      const queryVec = computeLocalEmbedding('Rust WASM wasm-pack build');
+      const res = await recallAsync(db, plan, {
+        workspaceId: wsId,
+        sessionId: sessId,
+        now: fixedNow,
+        cfg: DEFAULTS,
+        queryVec,
+      });
+
+      expect(res.items.some((it) => it.memory.id === id)).toBe(true);
+      expect(res.block).toContain('wasm-pack build');
     });
   });
 });

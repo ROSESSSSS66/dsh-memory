@@ -1,14 +1,14 @@
 import fs from 'node:fs';
-import type { Db, MemoryRecord, MemoryType, VikingContextTier } from '../types.js';
+import * as z from 'zod';
+import type { Db, MemoryRecord, MemoryType, Scope, VikingContextTier } from '../types.js';
 import { get, sources } from '../core/store.js';
 import { workspaceId, scopeFilterSQL } from '../core/scope.js';
 import { buildQueryPlan } from '../retrieval/query.js';
-import { runAllChannels, expandGraphNeighbors } from '../retrieval/channels.js';
-import { fuseCandidates } from '../retrieval/fuse.js';
+import { recall } from '../retrieval/recall.js';
 import { getActiveStrategy } from '../evolution/strategy.js';
-import { TAG_MAP } from '../retrieval/render.js';
+import { TAG_MAP, singleLine, escapeXmlData } from '../retrieval/render.js';
 import { budgetTokens } from '../core/tokens.js';
-import { redactSecrets, isWorkspaceExcluded } from '../core/privacy.js';
+import { redactSecrets } from '../core/privacy.js';
 import { upsertCandidate, confirmMemory, mergeMemories } from '../core/writer.js';
 import {
   getCoreMemory,
@@ -21,13 +21,14 @@ import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
 import {
   parseHindsightNetwork,
-  HINDSIGHT_NETWORK_TYPES,
   classifyHindsightNetwork,
   runHindsightReflect,
   formatHindsightReflectReport,
+  traceHindsightEvolution,
 } from '../core/hindsight.js';
 import {
   resolveVikingUri,
+  resolveVikingUrisBatch,
   normalizeVikingUriInput,
   resolveMemoryByVikingUriOrId,
   browseVikingDirectory,
@@ -39,31 +40,192 @@ import {
 } from '../core/viking.js';
 import { reconcileAndUpsert } from '../evolution/reconciler.js';
 import { enqueueRepairJobIfEligible } from '../evolution/repair.js';
+import { normalizeMemoryType } from '../service/index.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
+import {
+  isWorkspaceOrMappedExcluded,
+  resolveSessionWorkspaceId,
+} from './scope-resolver.js';
 
 export interface ToolContext {
   db: Db;
   cfg?: PluginConfig;
+  getCfg?: () => PluginConfig;
   strategyVersion?: number;
+}
+
+const MAX_RATE_LIMIT_ENTRIES = 500;
+const NOTE_WINDOW_MS = 60_000;
+const MAX_NOTES_PER_WINDOW = 3;
+const MAX_L0_L1_EXPAND_TOKENS = 400;
+const MAX_L2_EXPAND_TOKENS = 1500;
+const MAX_SEARCH_OUTPUT_TOKENS = 800;
+
+const TierSchema = z
+  .string()
+  .trim()
+  .transform((v) => v.toUpperCase())
+  .pipe(z.enum(['L0', 'L1', 'L2']));
+
+const NetworkSchema = z
+  .string()
+  .trim()
+  .refine((v) => parseHindsightNetwork(v) !== undefined, {
+    message: 'network must be one of: world, experience, observation, opinion',
+  })
+  .transform((v) => parseHindsightNetwork(v)!);
+
+const SearchParamsSchema = z.object({
+  query: z.string().trim().min(1, 'query is required').max(500, 'query exceeds 500 characters'),
+  limit: z.number().finite().int().min(1).max(12).optional(),
+  types: z.array(z.string().trim().min(1)).max(16).optional(),
+  network: NetworkSchema.optional(),
+  uriPrefix: z.string().trim().max(300).optional(),
+  tier: TierSchema.optional(),
+});
+
+const ExpandParamsSchema = z.object({
+  id: z.string().trim().min(1, 'memory id is required').max(300),
+  tier: TierSchema.optional(),
+});
+
+const FeedbackParamsSchema = z.object({
+  id: z.string().trim().min(1, 'valid id and integer contentRev are required').max(300),
+  contentRev: z
+    .number({ message: 'valid id and integer contentRev are required' })
+    .int('valid id and integer contentRev are required')
+    .positive('valid id and integer contentRev are required')
+    .max(Number.MAX_SAFE_INTEGER),
+  helpful: z.boolean({ message: 'helpful must be a strict boolean' }),
+  note: z.string().optional(),
+});
+
+const ALLOWED_NOTE_TYPES = [
+  'semantic',
+  'preference',
+  'procedural',
+  'failure',
+  'episodic',
+  'belief',
+  'goal',
+] as const;
+
+const NoteParamsSchema = z.object({
+  content: z
+    .string()
+    .trim()
+    .min(8, 'content length must be between 8 and 400 characters')
+    .max(400, 'content length must be between 8 and 400 characters'),
+  type: z.string().trim().optional(),
+  kind: z.enum(['fact', 'preference', 'procedure']).optional(),
+  scope: z.enum(['workspace', 'session', 'user']).optional(),
+});
+
+const ConfirmParamsSchema = z.object({
+  id: z.string().trim().min(1, 'memory id is required').max(300),
+});
+
+const MergeParamsSchema = z.object({
+  sourceId: z.string().trim().min(1, 'sourceId and targetId are required').max(300),
+  targetId: z.string().trim().min(1, 'sourceId and targetId are required').max(300),
+  reason: z.string().trim().max(300).optional(),
+});
+
+const CoreReadParamsSchema = z.object({
+  block: z.string().trim().max(64).optional(),
+});
+
+const CoreSetParamsSchema = z.object({
+  block: z.string().trim().min(1, 'both block and content are required').max(64),
+  content: z.string().trim().min(1, 'both block and content are required').max(4000),
+});
+
+const CoreAppendParamsSchema = z.object({
+  block: z.string().trim().min(1, 'both block and text are required').max(64),
+  text: z.string().trim().min(1, 'both block and text are required').max(4000),
+});
+
+const ReconcileParamsSchema = z.object({
+  content: z
+    .string()
+    .trim()
+    .min(1, 'content is required for reconciliation')
+    .max(2000, 'content too long for reconciliation (max 2000 characters)'),
+  type: z.string().trim().optional(),
+  slotKey: z.string().trim().max(120).optional(),
+});
+
+const TreeParamsSchema = z.object({
+  uri: z.string().trim().max(300).optional(),
+  query: z.string().trim().max(500).optional(),
+  tier: TierSchema.optional(),
+  limit: z.number().finite().int().min(1).max(25).optional(),
+});
+
+const ReflectParamsSchema = z.object({
+  topic: z.string().trim().max(200).optional(),
+  autoSynthesize: z.boolean().optional(),
+  persistCalibration: z.boolean().optional(),
+});
+
+function formatZodError(err: z.ZodError): string {
+  const first = err.issues[0];
+  return `Error: ${first?.message || 'invalid input parameters'}`;
+}
+
+function truncateToTokenBudget(text: string, maxTokens: number): string {
+  if (budgetTokens(text) <= maxTokens) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const candidate = `${text.slice(0, mid).trimEnd()}…`;
+    if (budgetTokens(candidate) <= maxTokens) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo > 0 ? `${text.slice(0, lo).trimEnd()}…` : '';
+}
+
+function touchLruMap<K, V>(map: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  map.delete(key);
+  if (map.size >= maxEntries) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
 }
 
 export class MemoryTools {
   private db: Db;
   private cfg: PluginConfig;
+  private getCfg?: () => PluginConfig;
   private strategyVersion: number;
-  // session:turn -> note call count
-  private noteCallCounts = new Map<string, number>();
-  // session:memoryId@contentRev -> 已提交过 memory_feedback
-  private feedbackGiven = new Set<string>();
+  // session:turn -> note call count (LRU bounded)
+  private noteTurnCounts = new Map<string, number>();
+  // sessionId -> timestamps within 60s window (fallback when turn === 0 / unavailable)
+  private noteWindowTimestamps = new Map<string, number[]>();
 
   constructor(ctx: ToolContext) {
     this.db = ctx.db;
     this.cfg = ctx.cfg || DEFAULTS;
+    this.getCfg = ctx.getCfg;
     this.strategyVersion = ctx.strategyVersion || 1;
   }
 
+  private currentCfg(): PluginConfig {
+    return this.getCfg ? this.getCfg() : this.cfg;
+  }
+
+  private isExcludedWorkspace(rawWs: string | undefined): boolean {
+    const cfg = this.currentCfg();
+    return isWorkspaceOrMappedExcluded(rawWs, cfg.excludeWorkspaces, this.db);
+  }
+
   /**
-   * 1. memory_search (§6.6 + Hindsight 4-Network & OpenViking URI / Tiered L0-L1 Filter)
+   * 1. memory_search (§6.6 + Hindsight 4-Network & OpenViking URI / Tiered L0-L1-L2 Filter)
    */
   public search(
     params: {
@@ -72,198 +234,159 @@ export class MemoryTools {
       types?: string[];
       network?: string;
       uriPrefix?: string;
-      tier?: VikingContextTier;
+      tier?: VikingContextTier | string;
     },
     agentCtx: { workspaceId: string; sessionId: string; turn?: number }
   ): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    const rawQuery = (params.query || '').trim();
-    if (!rawQuery) return 'Error: query is required';
-    if (rawQuery.length > 500) return 'Error: query exceeds 500 characters';
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const parsed = SearchParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
 
-    const limit = Math.max(1, Math.min(8, params.limit ?? 5));
+    const cfg = this.currentCfg();
+    const { query: rawQuery, types, network: targetNet, uriPrefix } = parsed.data;
+    const requestedTier: VikingContextTier = parsed.data.tier || 'L0';
+    const limit = parsed.data.limit ?? 5;
     const now = Date.now();
-    const wsId = workspaceId(agentCtx.workspaceId);
+    const wsId = workspaceId(agentCtx.workspaceId || '');
     const sessionId = agentCtx.sessionId || 'default_session';
-    const turn = agentCtx.turn ?? 0;
+    const turn = typeof agentCtx.turn === 'number' && Number.isFinite(agentCtx.turn) ? agentCtx.turn : 0;
 
     const plan = buildQueryPlan({
       userText: rawQuery,
       now,
-      cfg: this.cfg,
+      cfg,
     });
 
-    const activeStrat = getActiveStrategy(this.db, this.cfg);
-    const strategy = activeStrat.config;
-    const stratVer = activeStrat.version || this.strategyVersion;
+    let activeStrat: ReturnType<typeof getActiveStrategy>;
+    try {
+      activeStrat = getActiveStrategy(this.db, cfg);
+    } catch {
+      activeStrat = {
+        version: this.strategyVersion,
+        config: {
+          rrfK: 25,
+          channelWeights: { lexical: 1, entity: 1.2, typed: 0.8, temporal: 0.8, preference: 0.6, vector: 1 },
+          scoreWeights: { relevance: 0.5, confidence: 0.14, utility: 0.14, freshness: 0.08, consistency: 0.06, specificity: 0.03, importance: 0.05 },
+          minRelevance: 0.15,
+          dynamicBudgetTokens: 1600,
+          maxItems: 6,
+        },
+      };
+    }
 
-    // 运行完整 7 路混合召回 (6 基础通道 + SYNAPSE 图谱拓扑扩散)
-    const channelResults = runAllChannels(this.db, plan, {
+    const stratVer = activeStrat.version || this.strategyVersion;
+    const normUriPrefix = uriPrefix ? normalizeVikingUriInput(uriPrefix) : null;
+    const hasPostFilters = Boolean(
+      (types && types.length > 0) || targetNet || (normUriPrefix && normUriPrefix !== 'viking://')
+    );
+
+    const searchStrategy = {
+      ...activeStrat.config,
+      maxItems: hasPostFilters ? Math.max(limit * 4, 32) : Math.max(limit, activeStrat.config.maxItems, 12),
+      dynamicBudgetTokens: hasPostFilters ? 16_000 : 10_000,
+    };
+    const recallCfg: PluginConfig =
+      cfg.dynamicBudgetTokens === 0
+        ? { ...cfg, dynamicBudgetTokens: searchStrategy.dynamicBudgetTokens }
+        : cfg;
+
+    // 委托共享 recall()（享受 onlineBudgetMs、索引 UNION 矛盾查询、水合 origin_kinds、作用域隔离）
+    const recallRes = recall(this.db, plan, {
       workspaceId: wsId,
       sessionId,
-      cfg: this.cfg,
-    });
-
-    const allIdsSet = new Set<string>();
-    for (const cands of Object.values(channelResults)) {
-      for (const c of cands) {
-        allIdsSet.add(c.id);
-      }
-    }
-
-    if (allIdsSet.size === 0) {
-      return 'No relevant memories found.';
-    }
-
-    const topSeedIds = [
-      ...channelResults.lexical.slice(0, 4).map((c) => c.id),
-      ...channelResults.entity.slice(0, 4).map((c) => c.id),
-      ...channelResults.vector.slice(0, 3).map((c) => c.id),
-    ];
-    const associativeNeighbors = expandGraphNeighbors(
-      this.db,
-      topSeedIds,
-      { workspaceId: wsId, sessionId, cfg: this.cfg },
-      10
-    );
-    for (const edge of associativeNeighbors) {
-      allIdsSet.add(edge.neighborId);
-    }
-
-    const allIds = Array.from(allIdsSet);
-    const placeholders = allIds.map(() => '?').join(', ');
-    const memRows = this.db.all<MemoryRecord>(
-      `SELECT * FROM memories WHERE id IN (${placeholders}) AND status IN ('active', 'frozen')`,
-      allIds
-    );
-    const memoriesMap = new Map<string, MemoryRecord>();
-    const targetNet = parseHindsightNetwork(params.network);
-    const allowedNetTypes = targetNet ? new Set<string>(HINDSIGHT_NETWORK_TYPES[targetNet]) : null;
-    const normUriPrefix = params.uriPrefix ? normalizeVikingUriInput(params.uriPrefix) : null;
-
-    for (const m of memRows) {
-      if (params.types && params.types.length > 0 && !params.types.includes(m.type)) {
-        continue;
-      }
-      if (allowedNetTypes && !allowedNetTypes.has(m.type) && classifyHindsightNetwork(m.type, m.slot_key) !== targetNet) {
-        continue;
-      }
-      if (normUriPrefix && normUriPrefix !== 'viking://') {
-        const memUri = resolveVikingUri(m).toLowerCase();
-        if (!memUri.startsWith(normUriPrefix)) {
-          continue;
-        }
-      }
-      memoriesMap.set(m.id, m);
-    }
-
-    if (memoriesMap.size === 0) {
-      return 'No relevant memories found.';
-    }
-
-    const memoryEntitiesMap = new Map<string, Set<string>>();
-    const entRows = this.db.all<{ memory_id: string; entity: string }>(
-      `SELECT memory_id, entity FROM memory_entities WHERE memory_id IN (${placeholders})`,
-      allIds
-    );
-    for (const r of entRows) {
-      let s = memoryEntitiesMap.get(r.memory_id);
-      if (!s) {
-        s = new Set();
-        memoryEntitiesMap.set(r.memory_id, s);
-      }
-      s.add(r.entity.toLowerCase().trim());
-    }
-
-    const relRows = this.db.all<{ from_id: string; to_id: string; target_id: string }>(
-      `SELECT r.from_id, r.to_id, target.id as target_id
-       FROM memory_relations r
-       JOIN memories target ON (target.id = r.to_id OR target.id = r.from_id)
-       WHERE r.rel = 'contradicts'
-         AND target.status IN ('active', 'frozen')
-         AND (r.from_id IN (${placeholders}) OR r.to_id IN (${placeholders}))`,
-      [...allIds, ...allIds]
-    );
-    const contradictionsSet = new Set<string>();
-    for (const rel of relRows) {
-      if (allIdsSet.has(rel.from_id) && rel.target_id === rel.to_id) {
-        contradictionsSet.add(rel.from_id);
-      }
-      if (allIdsSet.has(rel.to_id) && rel.target_id === rel.from_id) {
-        contradictionsSet.add(rel.to_id);
-      }
-    }
-
-    const scored = fuseCandidates(
-      plan,
-      channelResults,
-      memoriesMap,
-      memoryEntitiesMap,
-      contradictionsSet,
-      strategy,
-      this.cfg,
+      budget: searchStrategy.dynamicBudgetTokens,
+      alreadyInjected: new Set(),
+      strategy: searchStrategy,
+      strategyVersion: stratVer,
       now,
-      associativeNeighbors
-    );
-
-    // 去除同槽位旧项与同哈希重复项
-    const seenSlots = new Set<string>();
-    const seenHashes = new Set<string>();
-    const deduped = scored.filter((sc) => {
-      const m = sc.memory;
-      if (seenHashes.has(m.hash)) return false;
-      if (m.slot_key) {
-        const sk = `${m.scope}:${m.workspace_id || ''}:${m.session_id || ''}:${m.slot_key}`;
-        if (seenSlots.has(sk)) return false;
-        seenSlots.add(sk);
-      }
-      seenHashes.add(m.hash);
-      return true;
+      cfg: recallCfg,
+      onlineBudgetMs: cfg.onlineBudgetMs,
     });
 
-    const filtered = deduped.slice(0, limit);
+    if (recallRes.items.length === 0) {
+      return 'No relevant memories found.';
+    }
+
+    const candidateMemories = recallRes.items.map((it) => it.memory);
+    const uriMap = resolveVikingUrisBatch(this.db, candidateMemories);
+    const allowedTypes = types && types.length > 0 ? new Set(types.map((t) => t.toLowerCase())) : null;
+
+    const filtered: MemoryRecord[] = [];
+    for (const m of candidateMemories) {
+      if (m.status !== 'active' && m.status !== 'frozen') continue;
+      if (allowedTypes && !allowedTypes.has(m.type.toLowerCase())) continue;
+      // 仅使用 classifyHindsightNetwork(m.type, m.slot_key) 过滤，防止 slot_key 重分类条目误入其他网络
+      if (targetNet && classifyHindsightNetwork(m.type, m.slot_key) !== targetNet) continue;
+      if (normUriPrefix && normUriPrefix !== 'viking://') {
+        const memUri = (uriMap.get(m.id) || resolveVikingUri(m)).toLowerCase();
+        if (!memUri.startsWith(normUriPrefix)) continue;
+      }
+      filtered.push(m);
+      if (filtered.length >= limit) break;
+    }
+
     if (filtered.length === 0) {
       return 'No relevant memories found.';
     }
 
-    // 格式化输出: 默认 L0 [TAG id] summary (c=..., u=...)，当 tier='L1' 时附带 OpenViking URI 与 L1 结构化概览
     const lines: string[] = [];
-    const useL1 = params.tier === 'L1';
-    for (let i = 0; i < filtered.length; i++) {
-      const item = filtered[i];
-      const m = item.memory;
+    for (const m of filtered) {
       const tag = TAG_MAP[m.type] || 'FACT';
-      if (useL1) {
-        const uri = resolveVikingUri(m);
+      if (requestedTier === 'L1') {
+        const uri = uriMap.get(m.id) || resolveVikingUri(m);
         const net = classifyHindsightNetwork(m.type, m.slot_key).toUpperCase();
-        const l1Text = buildInlineL1Overview(m, 170);
+        const l1Text = escapeXmlData(singleLine(redactSecrets(buildInlineL1Overview(m, 170)).text));
         lines.push(
           `[${tag} ${m.id}] (${net} · ${uri} · c=${m.confidence.toFixed(2)}, u=${m.utility.toFixed(2)}) ${l1Text}`
         );
+      } else if (requestedTier === 'L2') {
+        const cleanContent = escapeXmlData(singleLine(redactSecrets(m.content).text));
+        lines.push(
+          `[${tag} ${m.id}] ${cleanContent} (c=${m.confidence.toFixed(2)}, u=${m.utility.toFixed(2)})`
+        );
       } else {
-        const cleanSummary = redactSecrets(m.summary || m.content).text;
-        const line = `[${tag} ${m.id}] ${cleanSummary} (c=${m.confidence.toFixed(2)}, u=${m.utility.toFixed(2)})`;
-        lines.push(line);
+        const cleanSummary = escapeXmlData(singleLine(redactSecrets(m.summary || m.content).text));
+        lines.push(
+          `[${tag} ${m.id}] ${cleanSummary} (c=${m.confidence.toFixed(2)}, u=${m.utility.toFixed(2)})`
+        );
       }
     }
 
     let output = lines.join('\n');
-    while (lines.length > 0 && budgetTokens(output) > 800) {
+    while (lines.length > 0 && budgetTokens(output) > MAX_SEARCH_OUTPUT_TOKENS) {
       lines.pop();
       output = lines.join('\n');
     }
-    if (!lines.length) return 'Error: memory summaries exceed token limit (800 tokens).';
-
-    // Only returned references may receive feedback or outcome attribution.
-    for (let i = 0; i < lines.length; i++) {
-      const m = filtered[i].memory;
-      this.db.run(
-        `INSERT OR IGNORE INTO injections (
-          session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
-        ) VALUES (?, ?, ?, ?, 'tool', ?, ?, 'summary', ?, ?)`,
-        [sessionId, turn, m.id, m.content_rev, i + 1, m.summary_cost, stratVer, now]
-      );
+    if (!lines.length) {
+      return `Error: memory summaries exceed token limit (${MAX_SEARCH_OUTPUT_TOKENS} tokens).`;
     }
+
+    // 单事务原子记录实际返回的 tool 引用
+    this.db.transaction(() => {
+      for (let i = 0; i < lines.length; i++) {
+        const m = filtered[i];
+        this.db.run(
+          `INSERT OR IGNORE INTO injections (
+            session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
+          ) VALUES (?, ?, ?, ?, 'tool', ?, ?, ?, ?, ?)`,
+          [
+            sessionId,
+            turn,
+            m.id,
+            m.content_rev,
+            i + 1,
+            requestedTier === 'L2' ? m.token_cost : m.summary_cost,
+            requestedTier === 'L2' ? 'content' : 'summary',
+            stratVer,
+            now,
+          ]
+        );
+      }
+    });
 
     return output;
   }
@@ -272,20 +395,29 @@ export class MemoryTools {
    * 2. memory_expand (§6.6 + OpenViking L0/L1/L2 分层展开与 `viking://` 虚拟路径寻址)
    */
   public expand(
-    params: { id: string; tier?: VikingContextTier },
+    params: { id: string; tier?: VikingContextTier | string },
     agentCtx: { workspaceId: string; sessionId?: string; turn?: number }
   ): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    const rawId = (params.id || '').trim();
-    if (!rawId) return 'Error: memory id is required';
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const parsed = ExpandParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
 
-    const wsId = workspaceId(agentCtx.workspaceId);
+    const cfg = this.currentCfg();
+    const rawId = parsed.data.id;
+    const requestedTier: VikingContextTier = parsed.data.tier || 'L2';
+    const wsId = workspaceId(agentCtx.workspaceId || '');
+    const scopeCtx = {
+      workspaceId: wsId,
+      sessionId: agentCtx.sessionId,
+    };
+
     let mem: MemoryRecord | undefined;
     try {
-      mem = resolveMemoryByVikingUriOrId(this.db, rawId, {
-        workspaceId: wsId,
-        sessionId: agentCtx.sessionId,
-      });
+      mem = resolveMemoryByVikingUriOrId(this.db, rawId, scopeCtx);
     } catch (err: any) {
       return `Error: ${err?.message || 'Memory lookup failed'}`;
     }
@@ -293,19 +425,29 @@ export class MemoryTools {
     if (!mem) {
       return `Error: memory '${rawId}' not found or not in current scope.`;
     }
+    if (mem.workspace_id && this.isExcludedWorkspace(mem.workspace_id)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
     if (mem.status !== 'active' && mem.status !== 'frozen') {
       return `Error: memory '${rawId}' is not active.`;
     }
 
-    const requestedTier: VikingContextTier = params.tier || 'L2';
     if (requestedTier === 'L0' || requestedTier === 'L1') {
       const view = buildTieredMemoryView(mem);
-      const tierOut =
+      let tierOut =
         requestedTier === 'L0'
           ? `[${TAG_MAP[mem.type] || 'FACT'} ${mem.id}] [L0 ${view.uri}] ${view.l0Abstract}`
           : view.l1Overview;
+
+      if (budgetTokens(tierOut) > MAX_L0_L1_EXPAND_TOKENS) {
+        tierOut = truncateToTokenBudget(tierOut, MAX_L0_L1_EXPAND_TOKENS);
+        if (!tierOut || budgetTokens(tierOut) > MAX_L0_L1_EXPAND_TOKENS) {
+          return `Error: memory ${requestedTier} view exceeds token limit (${MAX_L0_L1_EXPAND_TOKENS} tokens).`;
+        }
+      }
+
       if (agentCtx.sessionId) {
-        const stratVer = getActiveStrategy(this.db, this.cfg).version || this.strategyVersion;
+        const stratVer = getActiveStrategy(this.db, cfg).version || this.strategyVersion;
         this.db.run(
           `INSERT OR IGNORE INTO injections (
             session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
@@ -316,19 +458,19 @@ export class MemoryTools {
       return tierOut;
     }
 
-    // 提取正文并脱敏
+    // L2 展开：提取正文并脱敏
     const cleanContent = redactSecrets(mem.content).text;
 
     // 最多 3 条证据
     const srcList = sources(this.db, mem.id, mem.content_rev).slice(0, 3);
     const srcLines = srcList.map((s) => {
       const sessShort = (s.session_id || '').slice(0, 8);
-      const excerpt = s.excerpt ? ` "${redactSecrets(s.excerpt).text.slice(0, 60)}"` : '';
+      const excerpt = s.excerpt ? ` "${singleLine(redactSecrets(s.excerpt).text).slice(0, 60)}"` : '';
       return `  - session ${sessShort} seq ${s.seq} (${s.kind})${excerpt}`;
     });
 
-    // 1-hop 因果与拓扑关联 (supersedes / derived_from / contradicts / related)
-    const relationScope = scopeFilterSQL({ workspaceId: wsId, sessionId: agentCtx.sessionId });
+    // 1-hop 因果与拓扑关联（强制受 scopeFilterSQL 隔离）
+    const relationScope = scopeFilterSQL(scopeCtx, 'm2');
     const relEdges = this.db.all<{
       from_id: string;
       to_id: string;
@@ -340,16 +482,17 @@ export class MemoryTools {
       `SELECT r.from_id, r.to_id, r.rel,
               m2.id as other_id, m2.summary as other_summary, m2.status as other_status
        FROM memory_relations r
-       JOIN (SELECT * FROM memories WHERE ${relationScope.sql}) m2
+       JOIN memories m2
          ON m2.id = CASE WHEN r.from_id = ? THEN r.to_id ELSE r.from_id END
-       WHERE r.from_id = ? OR r.to_id = ?
+       WHERE (r.from_id = ? OR r.to_id = ?)
+         AND (${relationScope.sql})
        ORDER BY r.created_at DESC
        LIMIT 4`,
-      [...relationScope.params, mem.id, mem.id, mem.id]
+      [mem.id, mem.id, mem.id, ...relationScope.params]
     );
     const relLines = relEdges.map((r) => {
       const dir = r.from_id === mem!.id ? `-> ${r.rel} ->` : `<- ${r.rel} <-`;
-      const sum = redactSecrets(r.other_summary || '').text.slice(0, 60);
+      const sum = singleLine(redactSecrets(r.other_summary || '').text).slice(0, 60);
       return `  - ${dir} [${r.other_id}] (${r.other_status}) ${sum}`;
     });
 
@@ -360,22 +503,45 @@ export class MemoryTools {
     }
     if (relLines.length > 0) {
       const withRels = `${res}\nRelations:\n${relLines.join('\n')}`;
-      if (budgetTokens(withRels) <= 1500) {
+      if (budgetTokens(withRels) <= MAX_L2_EXPAND_TOKENS) {
         res = withRels;
       }
     }
 
+    // 演化链溯源（带 scopeCtx 与 excludeWorkspaces 隔离）
+    try {
+      const trace = traceHindsightEvolution(this.db, mem, {
+        workspaceId: wsId,
+        sessionId: agentCtx.sessionId,
+        excludeWorkspaces: cfg.excludeWorkspaces,
+      });
+      if (trace.timeline.length > 1) {
+        const evoLines = trace.timeline
+          .filter((n) => n.relationToCurrent !== 'current')
+          .slice(-3)
+          .map(
+            (n) =>
+              `  - [${n.relationToCurrent}] ${n.id} (v${n.version}, ${n.status}) ${singleLine(n.summary).slice(0, 60)}`
+          );
+        if (evoLines.length > 0) {
+          const withEvo = `${res}\nEvolution:\n${evoLines.join('\n')}`;
+          if (budgetTokens(withEvo) <= MAX_L2_EXPAND_TOKENS) {
+            res = withEvo;
+          }
+        }
+      }
+    } catch {}
+
     // 约束总长度 <= 1500 tokens
-    if (budgetTokens(res) > 1500) {
-      // 优先削减证据
+    if (budgetTokens(res) > MAX_L2_EXPAND_TOKENS) {
       res = headerAndBody;
-      if (budgetTokens(res) > 1500) {
-        return `Error: memory content exceeds token limit (1500 tokens).`;
+      if (budgetTokens(res) > MAX_L2_EXPAND_TOKENS) {
+        return `Error: memory content exceeds token limit (${MAX_L2_EXPAND_TOKENS} tokens).`;
       }
     }
 
     if (agentCtx.sessionId) {
-      const stratVer = getActiveStrategy(this.db, this.cfg).version || this.strategyVersion;
+      const stratVer = getActiveStrategy(this.db, cfg).version || this.strategyVersion;
       this.db.run(
         `INSERT OR IGNORE INTO injections (
           session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
@@ -393,61 +559,100 @@ export class MemoryTools {
     params: { id: string; contentRev: number; helpful: boolean; note?: string },
     agentCtx: { workspaceId?: string; sessionId: string; turn?: number }
   ): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    const rawId = (params.id || '').trim();
-    const contentRev = Number(params.contentRev);
-    if (!rawId || !Number.isInteger(contentRev) || contentRev < 1) {
-      return 'Error: valid id and integer contentRev are required';
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const parsed = FeedbackParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
     }
 
-    let mem;
+    const cfg = this.currentCfg();
+    const { id: rawId, contentRev, helpful, note } = parsed.data;
+    const sessionId =
+      typeof agentCtx?.sessionId === 'string' && agentCtx.sessionId.trim()
+        ? agentCtx.sessionId.trim()
+        : 'default_session';
+    const turn = typeof agentCtx?.turn === 'number' && Number.isFinite(agentCtx.turn) ? agentCtx.turn : 0;
+
+    // 解析作用域并在 get() 中强制执行（若未显式传 workspaceId 则先尝试从 session_workspace_owners 反查）
+    const explicitWs =
+      agentCtx?.workspaceId !== undefined ? agentCtx.workspaceId : undefined;
+    const inferredWs =
+      explicitWs === undefined && sessionId !== 'default_session'
+        ? resolveSessionWorkspaceId(this.db, sessionId)
+        : '';
+    const effectiveScopeCtx =
+      explicitWs !== undefined
+        ? { workspaceId: workspaceId(explicitWs), sessionId }
+        : inferredWs
+          ? { workspaceId: workspaceId(inferredWs), sessionId }
+          : undefined;
+
+    let mem: MemoryRecord | undefined;
     try {
-      mem = get(
-        this.db,
-        rawId,
-        agentCtx.workspaceId !== undefined
-          ? { workspaceId: workspaceId(agentCtx.workspaceId), sessionId: agentCtx.sessionId }
-          : undefined
-      );
+      mem = get(this.db, rawId, effectiveScopeCtx);
     } catch (err: any) {
       return `Error: ${err?.message || 'Memory lookup failed'}`;
     }
+
     if (!mem) {
       return `Error: memory '${rawId}' not found`;
     }
+    // 防御：无 workspaceId 回退查库时仍须校验 session 私有隔离与 excludeWorkspaces
+    if (mem.scope === 'session' && mem.session_id && mem.session_id !== sessionId) {
+      return `Error: memory '${rawId}' not found`;
+    }
+    if (mem.workspace_id && this.isExcludedWorkspace(mem.workspace_id)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+
+    // 先验证本 session 确实注入/展开过该记忆，避免在未引用时泄露 mem.content_rev
+    const anyInj = this.db.get<{ content_rev: number }>(
+      'SELECT content_rev FROM injections WHERE session_id = ? AND memory_id = ? ORDER BY created_at DESC LIMIT 1',
+      [sessionId, mem.id]
+    );
+    if (!anyInj) {
+      return 'Error: memory was not referenced in this session';
+    }
+
     if (mem.content_rev !== contentRev) {
       return `Error: contentRev mismatch (current: ${mem.content_rev}, provided: ${contentRev})`;
     }
 
-    const sessionId = agentCtx.sessionId || 'default_session';
-    const turn = agentCtx.turn ?? 0;
     const now = Date.now();
-
-    // 检查本轮是否确实注入或展开过该引用
-    const inj = this.db.get<{ memory_id: string }>(
-      'SELECT memory_id FROM injections WHERE session_id = ? AND memory_id = ? AND content_rev = ?',
-      [sessionId, mem.id, contentRev]
-    );
-
-    if (!inj) {
-      return 'Error: memory was not referenced in this session';
-    }
-
-    // 同一引用只接受一次反馈：否则重复调用即可把效用刷到本地清理阈值，间接归档用户记忆
-    const feedbackKey = `${sessionId}:${mem.id}@${contentRev}`;
-    if (this.feedbackGiven.has(feedbackKey)) {
-      return 'Error: feedback already recorded for this memory in this session';
-    }
-    if (this.feedbackGiven.size >= 5000) this.feedbackGiven.clear();
-    this.feedbackGiven.add(feedbackKey);
-
-    // 立即更新 utility (w=1, r=±1)
-    const r = params.helpful ? 1 : -1;
+    const r = helpful ? 1 : -1;
     const target = (r + 1) / 2; // helpful -> 1, unhelpful -> 0
-    const lr = this.cfg.utilityLR || 0.1;
-    const newUtility = mem.utility + lr * 1.0 * (target - mem.utility);
+    const lr = cfg.utilityLR || 0.1;
+    const sanitizedNote = note
+      ? singleLine(redactSecrets(note.trim()).text).slice(0, 300)
+      : '';
+    const repairQuery = sanitizedNote || 'Negative tool feedback';
 
-    this.db.transaction(() => {
+    // 使用 SQLite 原子条件更新实现跨进程、持久化的单次反馈幂等保护（替代易失内存 Set）
+    const txResult = this.db.transaction((): 'ok' | 'not_referenced' | 'already_recorded' => {
+      const updInj = this.db.run(
+        `UPDATE injections
+         SET outcome = ?, used = 1
+         WHERE session_id = ? AND memory_id = ? AND content_rev = ? AND outcome IS NULL`,
+        [r, sessionId, mem!.id, contentRev]
+      );
+
+      if (Number(updInj.changes) === 0) {
+        const exactInj = this.db.get<{ outcome: number | null }>(
+          'SELECT outcome FROM injections WHERE session_id = ? AND memory_id = ? AND content_rev = ? LIMIT 1',
+          [sessionId, mem!.id, contentRev]
+        );
+        return exactInj ? 'already_recorded' : 'not_referenced';
+      }
+
+      const freshMem = this.db.get<{ utility: number }>(
+        'SELECT utility FROM memories WHERE id = ?',
+        [mem!.id]
+      );
+      const baseUtil = freshMem?.utility ?? mem!.utility;
+      const newUtility = baseUtil + lr * 1.0 * (target - baseUtil);
+
       this.db.run(
         `UPDATE memories
          SET utility = ?,
@@ -455,39 +660,34 @@ export class MemoryTools {
              fail_count = fail_count + ?,
              updated_at = ?
          WHERE id = ?`,
-        [
-          newUtility,
-          params.helpful ? 1 : 0,
-          params.helpful ? 0 : 1,
-          now,
-          mem.id,
-        ]
+        [newUtility, helpful ? 1 : 0, helpful ? 0 : 1, now, mem!.id]
       );
 
-      this.db.run(
-        `UPDATE injections
-         SET outcome = ?, used = 1
-         WHERE session_id = ? AND memory_id = ? AND content_rev = ?`,
-        [r, sessionId, mem.id, contentRev]
-      );
-
-      if (!params.helpful) {
+      if (!helpful) {
         try {
           enqueueRepairJobIfEligible(
             this.db,
             {
-              memoryId: mem.id,
+              memoryId: mem!.id,
               sessionId,
-              query: params.note || 'Negative tool feedback',
+              query: repairQuery,
               turn,
             },
-            this.cfg,
+            cfg,
             now
           );
         } catch {}
       }
+
+      return 'ok';
     });
 
+    if (txResult === 'not_referenced') {
+      return 'Error: memory was not referenced in this session';
+    }
+    if (txResult === 'already_recorded') {
+      return 'Error: feedback already recorded for this memory in this session';
+    }
     return 'ok';
   }
 
@@ -495,46 +695,78 @@ export class MemoryTools {
    * 4. memory_note (§6.6)
    */
   public note(
-    params: { content: string; kind: 'fact' | 'preference' | 'procedure' },
+    params: {
+      content: string;
+      type?: string;
+      kind?: 'fact' | 'preference' | 'procedure';
+      scope?: 'workspace' | 'session' | 'user';
+    },
     agentCtx: { workspaceId: string; sessionId: string; turn?: number }
   ): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    const rawContent = (params.content || '').trim();
-    if (rawContent.length < 8 || rawContent.length > 400) {
-      return 'Error: content length must be between 8 and 400 characters';
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const parsed = NoteParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
     }
 
+    const rawContent = parsed.data.content;
+    const rawType = parsed.data.type?.toLowerCase();
+    if (rawType === 'meta') {
+      return 'Error: meta memory type is not allowed';
+    }
+
+    let memType: MemoryType = 'semantic';
+    if (rawType) {
+      if (!(ALLOWED_NOTE_TYPES as readonly string[]).includes(rawType)) {
+        return `Error: invalid note type '${parsed.data.type}'. Allowed: ${ALLOWED_NOTE_TYPES.join(', ')}`;
+      }
+      memType = rawType as MemoryType;
+    } else if (parsed.data.kind) {
+      const kindMap: Record<'fact' | 'preference' | 'procedure', MemoryType> = {
+        fact: 'semantic',
+        preference: 'preference',
+        procedure: 'procedural',
+      };
+      memType = kindMap[parsed.data.kind];
+    }
+
+    const chosenScope: Scope = parsed.data.scope || 'workspace';
     const sessionId = agentCtx.sessionId || 'default_session';
-    const turn = agentCtx.turn ?? 0;
-    const turnKey = `${sessionId}:${turn}`;
-
-    // 每个 turn 最多调用 3 次
-    const currentCount = this.noteCallCounts.get(turnKey) || 0;
-    if (currentCount >= 3) {
-      return 'Error: memory_note call limit reached for this turn (max 3 calls)';
-    }
-    if (this.noteCallCounts.size > 500) {
-      const oldestKey = this.noteCallCounts.keys().next().value;
-      if (oldestKey) this.noteCallCounts.delete(oldestKey);
-    }
-    this.noteCallCounts.set(turnKey, currentCount + 1);
-
-    const typeMap: Record<string, MemoryType> = {
-      fact: 'semantic',
-      preference: 'preference',
-      procedure: 'procedural',
-    };
-    const memType = typeMap[params.kind] || 'semantic';
-
-    const wsId = workspaceId(agentCtx.workspaceId);
+    const turn = typeof agentCtx.turn === 'number' && Number.isFinite(agentCtx.turn) ? agentCtx.turn : 0;
     const now = Date.now();
+
+    // 速率限制：turn > 0 时按 turn 真 LRU 限流；turn === 0 / 不可用时退回 60s 滑动时间窗口限流（每 60s 最多 3 次）
+    if (turn > 0) {
+      const turnKey = `${sessionId}:${turn}`;
+      const currentCount = this.noteTurnCounts.get(turnKey) || 0;
+      if (currentCount >= MAX_NOTES_PER_WINDOW) {
+        return 'Error: memory_note call limit reached for this turn (max 3 calls)';
+      }
+      touchLruMap(this.noteTurnCounts, turnKey, currentCount + 1, MAX_RATE_LIMIT_ENTRIES);
+    } else {
+      const prev = this.noteWindowTimestamps.get(sessionId) || [];
+      const recent = prev.filter((ts) => now - ts < NOTE_WINDOW_MS);
+      if (recent.length >= MAX_NOTES_PER_WINDOW) {
+        touchLruMap(this.noteWindowTimestamps, sessionId, recent, MAX_RATE_LIMIT_ENTRIES);
+        return 'Error: memory_note call limit reached for this time window (max 3 calls per 60s)';
+      }
+      recent.push(now);
+      touchLruMap(this.noteWindowTimestamps, sessionId, recent, MAX_RATE_LIMIT_ENTRIES);
+    }
+
+    const wsId = chosenScope === 'user' ? undefined : workspaceId(agentCtx.workspaceId || '');
+    if ((chosenScope === 'workspace' || chosenScope === 'session') && !wsId) {
+      return 'Error: workspace scope is required for workspace/session notes';
+    }
 
     const insertRes = upsertCandidate(
       this.db,
       {
         type: memType,
         content: rawContent,
-        scope: 'workspace',
+        scope: chosenScope,
         workspaceId: wsId,
         sessionId,
         source_kind: 'assistant',
@@ -551,21 +783,26 @@ export class MemoryTools {
       return `Error: note rejected: ${insertRes.reason}`;
     }
 
-    return `saved as candidate ${(insertRes as any).id}`;
+    return `saved as candidate ${insertRes.id}`;
   }
 
   /**
-   * 5. memory_confirm (汲取自 tr1v3r/dsh-ltm)
+   * 5. memory_confirm (内部辅助方法，不再直接暴露为 DSH LLM 工具)
    */
   public confirm(
     params: { id: string },
     agentCtx: { workspaceId: string; sessionId?: string }
   ): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    const rawId = (params.id || '').trim();
-    if (!rawId) return 'Error: memory id is required';
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const parsed = ConfirmParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
 
-    const wsId = workspaceId(agentCtx.workspaceId);
+    const rawId = parsed.data.id;
+    const wsId = workspaceId(agentCtx.workspaceId || '');
     let mem: MemoryRecord | undefined;
     try {
       mem = get(this.db, rawId, { workspaceId: wsId, sessionId: agentCtx.sessionId });
@@ -581,18 +818,22 @@ export class MemoryTools {
   }
 
   /**
-   * 6. memory_merge (汲取自 tr1v3r/dsh-ltm)
+   * 6. memory_merge (内部辅助方法，不再直接暴露为 DSH LLM 工具)
    */
   public merge(
     params: { sourceId: string; targetId: string; reason?: string },
     agentCtx: { workspaceId: string; sessionId?: string }
   ): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    const srcId = (params.sourceId || '').trim();
-    const tgtId = (params.targetId || '').trim();
-    if (!srcId || !tgtId) return 'Error: sourceId and targetId are required';
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const parsed = MergeParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
 
-    const wsId = workspaceId(agentCtx.workspaceId);
+    const { sourceId: srcId, targetId: tgtId, reason } = parsed.data;
+    const wsId = workspaceId(agentCtx.workspaceId || '');
     let srcMem: MemoryRecord | undefined;
     let tgtMem: MemoryRecord | undefined;
     try {
@@ -605,101 +846,133 @@ export class MemoryTools {
     if (!srcMem) return `Error: source memory '${srcId}' not found.`;
     if (!tgtMem) return `Error: target memory '${tgtId}' not found.`;
 
-    const res = mergeMemories(this.db, srcMem.id, tgtMem.id, params.reason || 'manual_merge', 'llm');
+    const res = mergeMemories(this.db, srcMem.id, tgtMem.id, reason || 'manual_merge', 'llm');
     if (!res.success) return `Error: ${res.message}`;
     return res.message;
   }
 
   /**
-   * 7. core_read (汲取自 Letta/MemGPT 核心工作区)
+   * 7. core_read (内部辅助方法)
    */
   public coreRead(
     params: { block?: string },
     agentCtx: { workspaceId: string }
   ): string {
-    const wsId = workspaceId(agentCtx.workspaceId);
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    if (params.block) {
-      const entry = getCoreMemory(this.db, params.block, { workspaceId: wsId });
-      if (!entry) return `Core memory block '${params.block}' is empty.`;
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const parsed = CoreReadParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
+
+    const wsId = workspaceId(agentCtx.workspaceId || '');
+    if (parsed.data.block) {
+      const entry = getCoreMemory(this.db, parsed.data.block, { workspaceId: wsId });
+      if (!entry) return `Core memory block '${parsed.data.block}' is empty.`;
       return `[CORE MEMORY: ${entry.block.toUpperCase()}] (v${entry.version})\n${entry.content}`;
     }
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
     const all = getAllCoreMemories(this.db, { workspaceId: wsId });
     if (all.length === 0) return 'No core memory blocks configured.';
     return renderCoreMemoryMarkdown(all);
   }
 
   /**
-   * 8. core_set (汲取自 Letta/MemGPT 核心工作区自编辑)
+   * 8. core_set (内部辅助方法)
    */
   public coreSet(
     params: { block: string; content: string },
     agentCtx: { workspaceId: string; sessionId?: string }
   ): string {
-    const wsId = workspaceId(agentCtx.workspaceId);
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    if (!params.block || !params.content) {
-      return 'Error: both block and content are required';
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
     }
+    const parsed = CoreSetParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
+
+    const wsId = workspaceId(agentCtx.workspaceId || '');
     try {
-      const res = setCoreMemory(this.db, params.block, params.content, { workspaceId: wsId, sessionId: agentCtx.sessionId, actor: 'assistant' });
+      const res = setCoreMemory(this.db, parsed.data.block, parsed.data.content, {
+        workspaceId: wsId,
+        sessionId: agentCtx.sessionId,
+        actor: 'assistant',
+      });
       if (res.action === 'proposed') {
-        return `Core memory block '${params.block}' saved as candidate ${res.id}; pending user approval.`;
+        return `Core memory block '${parsed.data.block}' saved as candidate ${res.id}; pending user approval.`;
       }
-      return `Core memory block '${params.block}' ${res.action} successfully (id: ${res.id}).`;
+      return `Core memory block '${parsed.data.block}' ${res.action} successfully (id: ${res.id}).`;
     } catch (err: any) {
       return `Error: ${err?.message || 'Failed to set core memory'}`;
     }
   }
 
   /**
-   * 9. core_append (汲取自 Letta/MemGPT core_memory_append)
+   * 9. core_append (内部辅助方法)
    */
   public coreAppend(
     params: { block: string; text: string },
     agentCtx: { workspaceId: string; sessionId?: string }
   ): string {
-    const wsId = workspaceId(agentCtx.workspaceId);
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    if (!params.block || !params.text) {
-      return 'Error: both block and text are required';
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
     }
+    const parsed = CoreAppendParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
+
+    const wsId = workspaceId(agentCtx.workspaceId || '');
     try {
-      const res = appendCoreMemory(this.db, params.block, params.text, { workspaceId: wsId, sessionId: agentCtx.sessionId, actor: 'assistant' });
+      const res = appendCoreMemory(this.db, parsed.data.block, parsed.data.text, {
+        workspaceId: wsId,
+        sessionId: agentCtx.sessionId,
+        actor: 'assistant',
+      });
       if (res.action === 'proposed') {
-        return `Core memory block '${params.block}' append saved as candidate ${res.id}; pending user approval.`;
+        return `Core memory block '${parsed.data.block}' append saved as candidate ${res.id}; pending user approval.`;
       }
-      return `Appended to core memory block '${params.block}' successfully.`;
+      return `Appended to core memory block '${parsed.data.block}' successfully.`;
     } catch (err: any) {
       return `Error: ${err?.message || 'Failed to append to core memory'}`;
     }
   }
 
   /**
-   * 10. reconcile (汲取自 Mem0 智能调和)
+   * 10. reconcile (内部辅助方法，拦截 core:* 与 meta 类型)
    */
   public reconcile(
     params: { content: string; type?: string; slotKey?: string },
     agentCtx: { workspaceId: string; sessionId: string }
   ): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    const rawContent = (params.content || '').trim();
-    if (!rawContent) return 'Error: content is required for reconciliation';
-    if (rawContent.length > 2000) return 'Error: content too long for reconciliation (max 2000 characters)';
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const parsed = ReconcileParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
 
-    const wsId = workspaceId(agentCtx.workspaceId);
+    const rawType = (parsed.data.type || 'semantic').toLowerCase();
+    if (rawType === 'meta') {
+      return 'Error: meta memory type is not allowed for reconciliation.';
+    }
+    if (parsed.data.slotKey && parsed.data.slotKey.toLowerCase().startsWith('core:')) {
+      return 'Error: core:* slot_key is not allowed for reconciliation.';
+    }
+
+    const wsId = workspaceId(agentCtx.workspaceId || '');
     const sessionId = agentCtx.sessionId || 'default_session';
-    // 工具参数 kind 取值为 fact/preference/procedure，需映射到合法 MemoryType，否则会触发 DB CHECK 约束异常
-    const kindMap: Record<string, MemoryType> = { fact: 'semantic', procedure: 'procedural' };
-    const validTypes: MemoryType[] = ['episodic', 'semantic', 'procedural', 'belief', 'preference', 'goal', 'failure', 'meta'];
-    const rawType = String(params.type || 'semantic').toLowerCase();
-    const type: MemoryType = kindMap[rawType] || (validTypes.includes(rawType as MemoryType) ? (rawType as MemoryType) : 'semantic');
+    const type = normalizeMemoryType(rawType, 'semantic');
+    if (type === 'meta') {
+      return 'Error: meta memory type is not allowed for reconciliation.';
+    }
 
     const candInput = {
       type,
-      content: rawContent,
-      slot_key: params.slotKey,
+      content: parsed.data.content,
+      slot_key: parsed.data.slotKey,
       scope: 'workspace' as const,
       workspaceId: wsId,
       sessionId,
@@ -719,13 +992,23 @@ export class MemoryTools {
   /**
    * 11. doctor (记忆库健康度体检与冲突检测)
    */
-  public doctor(agentCtx: { workspaceId: string }, options?: { autoFix?: boolean }): string {
+  public doctor(
+    agentCtx: { workspaceId: string; sessionId?: string },
+    options?: { autoFix?: boolean }
+  ): string {
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
     if (options?.autoFix) {
       return this.heal(agentCtx);
     }
-    const wsId = workspaceId(agentCtx.workspaceId);
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    const report = auditMemoryHealth(this.db, { workspaceId: wsId });
+    const cfg = this.currentCfg();
+    const wsId = workspaceId(agentCtx.workspaceId || '');
+    const report = auditMemoryHealth(this.db, {
+      workspaceId: wsId,
+      sessionId: agentCtx.sessionId,
+      excludeWorkspaces: cfg.excludeWorkspaces,
+    });
     const lines = [
       `[Memory Health Doctor] Score: ${report.score}/100 (Grade ${report.grade})`,
       `Counts: active=${report.counts.active}, candidate=${report.counts.candidate}, frozen=${report.counts.frozen}, superseded=${report.counts.superseded}, archived=${report.counts.archived}, pinned=${report.counts.pinned}`,
@@ -733,7 +1016,7 @@ export class MemoryTools {
       `Near-Duplicates: ${report.duplicatePairs.length} | Active Contradictions: ${report.contradictions.length} | Stale Memories: ${report.staleMemories.length} | Orphans: ${report.orphanMemoriesCount ?? 0}`,
     ];
     if (report.duplicatePairs.length > 0) {
-      lines.push('Duplicate Pairs (can merge via memory_merge):');
+      lines.push('Duplicate Pairs (can merge via /memory merge):');
       for (const pair of report.duplicatePairs.slice(0, 5)) {
         lines.push(`  - ${pair.sourceId} -> ${pair.targetId} (sim=${pair.similarity}, reason=${pair.reason})`);
       }
@@ -748,12 +1031,19 @@ export class MemoryTools {
   }
 
   /**
-   * 11.5 heal (一键智能自愈修复：FTS5 重建 + 本地向量回填 + 冗余去重 + 矛盾消解 + A-Mem 双链织网)
+   * 11.5 heal (一键智能自愈修复)
    */
-  public heal(agentCtx: { workspaceId: string }): string {
-    const wsId = workspaceId(agentCtx.workspaceId);
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
-    const res = autoHealMemoryHealth(this.db, { workspaceId: wsId });
+  public heal(agentCtx: { workspaceId: string; sessionId?: string }): string {
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const cfg = this.currentCfg();
+    const wsId = workspaceId(agentCtx.workspaceId || '');
+    const res = autoHealMemoryHealth(this.db, {
+      workspaceId: wsId,
+      sessionId: agentCtx.sessionId,
+      excludeWorkspaces: cfg.excludeWorkspaces,
+    });
     return [
       `[Memory Auto-Heal Completed] Score: ${res.beforeScore} -> ${res.afterScore}/100 (Grade ${res.afterGrade})`,
       `Actions: ftsRebuilt=${res.ftsRebuilt}, embeddingsBackfilled=${res.embeddingsBackfilled}, duplicatesMerged=${res.duplicatesMerged}, contradictionsResolved=${res.contradictionsResolved}, linksWeaved=${res.linksWeaved}, coreBlocksSynced=${res.coreBlocksSynced ?? 0}`,
@@ -761,17 +1051,23 @@ export class MemoryTools {
   }
 
   /**
-   * 11.8 init (v0.4.0 工作区记忆自动初始化与冷启动扫描)
+   * 11.8 init (工作区记忆自动初始化与冷启动扫描)
    */
   public init(agentCtx: { workspaceId: string }, options?: { force?: boolean }): string {
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const cfg = this.currentCfg();
     const wsPath =
       agentCtx.workspaceId && fs.existsSync(agentCtx.workspaceId)
         ? agentCtx.workspaceId
         : process.cwd();
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) return 'Error: workspace is excluded by privacy configuration.';
+    if (this.isExcludedWorkspace(wsPath)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
     const res = autoBootstrapMemory(this.db, {
       workspacePath: wsPath,
-      cfg: this.cfg,
+      cfg,
       force: options?.force ?? false,
       includeBackfill: true,
     });
@@ -782,68 +1078,108 @@ export class MemoryTools {
   }
 
   /**
-   * 11.9 tree (汲取自 volcengine/OpenViking `viking://` 虚拟文件系统目录递归检索、子树混合搜索与 L0/L1/L2 分层浏览)
+   * 11.9 tree (OpenViking `viking://` 目录浏览与子树混合检索)
    */
   public tree(
-    params: { uri?: string; query?: string; tier?: VikingContextTier; limit?: number },
+    params: { uri?: string; query?: string; tier?: VikingContextTier | string; limit?: number },
     agentCtx: { workspaceId: string; sessionId?: string }
   ): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) {
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
       return 'Error: workspace is excluded by privacy configuration.';
     }
-    const wsId = workspaceId(agentCtx.workspaceId);
-    if (params.query && params.query.trim()) {
+    const parsed = TreeParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
+
+    const wsId = workspaceId(agentCtx.workspaceId || '');
+    if (parsed.data.query && parsed.data.query.trim()) {
       return findInVikingTree(this.db, {
-        query: params.query.trim(),
-        uri: params.uri,
+        query: parsed.data.query.trim(),
+        uri: parsed.data.uri,
         workspaceId: wsId,
         sessionId: agentCtx.sessionId,
-        tier: params.tier || 'L1',
-        limit: params.limit,
+        tier: parsed.data.tier || 'L1',
+        limit: parsed.data.limit,
       });
     }
     return browseVikingDirectory(this.db, {
-      uri: params.uri,
+      uri: parsed.data.uri,
       workspaceId: wsId,
       sessionId: agentCtx.sessionId,
-      tier: params.tier || 'L0',
-      limit: params.limit,
+      tier: parsed.data.tier || 'L0',
+      limit: parsed.data.limit,
     });
   }
 
   /**
-   * 11.95 diff (汲取自 volcengine/OpenViking Self-Evolving Context Diff Audit)
+   * 11.92 find (OpenViking 子树检索快捷入口)
    */
-  public diff(agentCtx: { workspaceId: string }): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) {
-      return 'Error: workspace is excluded by privacy configuration.';
-    }
-    const wsId = workspaceId(agentCtx.workspaceId);
-    return formatVikingEvolutionDiff(getVikingEvolutionDiff(this.db, { workspaceId: wsId }));
+  public find(
+    params: { query: string; uri?: string; tier?: VikingContextTier | string; limit?: number },
+    agentCtx: { workspaceId: string; sessionId?: string }
+  ): string {
+    return this.tree(
+      {
+        uri: params?.uri,
+        query: params?.query,
+        tier: params?.tier || 'L1',
+        limit: params?.limit,
+      },
+      agentCtx
+    );
   }
 
   /**
-   * 11.10 reflect (汲取自 vectorize-io/hindsight 四层认知网络盘点、证据密度置信度校准与心智模型合成)
+   * 11.95 diff (OpenViking Self-Evolving Context Diff Audit)
    */
-  public reflect(
-    params: { topic?: string; autoSynthesize?: boolean },
-    agentCtx: { workspaceId: string; sessionId?: string }
-  ): string {
-    if (agentCtx.workspaceId && isWorkspaceExcluded(agentCtx.workspaceId, this.cfg.excludeWorkspaces)) {
+  public diff(agentCtx: { workspaceId: string; sessionId?: string }): string {
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
       return 'Error: workspace is excluded by privacy configuration.';
     }
-    const wsId = workspaceId(agentCtx.workspaceId);
+    const cfg = this.currentCfg();
+    const wsId = workspaceId(agentCtx.workspaceId || '');
+    return formatVikingEvolutionDiff(
+      getVikingEvolutionDiff(this.db, {
+        workspaceId: wsId,
+        sessionId: agentCtx.sessionId,
+        excludeWorkspaces: cfg.excludeWorkspaces,
+      })
+    );
+  }
+
+  /**
+   * 11.10 reflect (默认只读：除非显式 privileged=true，否则绝不合成心智模型或改写置信度)
+   */
+  public reflect(
+    params: { topic?: string; autoSynthesize?: boolean; persistCalibration?: boolean },
+    agentCtx: { workspaceId: string; sessionId?: string },
+    options?: { privileged?: boolean }
+  ): string {
+    if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
+      return 'Error: workspace is excluded by privacy configuration.';
+    }
+    const parsed = ReflectParamsSchema.safeParse(params ?? {});
+    if (!parsed.success) {
+      return formatZodError(parsed.error);
+    }
+
+    const cfg = this.currentCfg();
+    const wsId = workspaceId(agentCtx.workspaceId || '');
+    const allowMutate = options?.privileged === true;
     const report = runHindsightReflect(this.db, {
       workspaceId: wsId,
       sessionId: agentCtx.sessionId,
-      topic: params.topic,
-      autoSynthesize: params.autoSynthesize !== false,
+      topic: parsed.data.topic,
+      autoSynthesize: allowMutate && parsed.data.autoSynthesize === true,
+      persistCalibration: allowMutate && parsed.data.persistCalibration === true,
+      excludeWorkspaces: cfg.excludeWorkspaces,
     });
     return formatHindsightReflectReport(report);
   }
 
   /**
-   * 12. 统一 memory 工具接口 (汲取自 LZMW/dsh-memory 单工具设计，节省提示词上下文)
+   * 12. 遗留统一工具调度入口 (仅供内部/测试调用，不再向 DSH LLM 注册)
    */
   public unified(
     params: {
@@ -877,7 +1213,9 @@ export class MemoryTools {
       sourceId?: string;
       targetId?: string;
       content?: string;
+      type?: string;
       kind?: 'fact' | 'preference' | 'procedure';
+      scope?: 'workspace' | 'session' | 'user';
       contentRev?: number;
       helpful?: boolean;
       note?: string;
@@ -891,12 +1229,15 @@ export class MemoryTools {
     },
     agentCtx: { workspaceId: string; sessionId: string; turn?: number }
   ): string {
+    if (!params || typeof params !== 'object' || typeof params.action !== 'string') {
+      return 'Error: action is required';
+    }
     const action = params.action;
     switch (action) {
       case 'search':
         return this.search(
           {
-            query: params.query || '',
+            query: params.query as string,
             limit: params.limit,
             types: params.types,
             network: params.network,
@@ -906,24 +1247,32 @@ export class MemoryTools {
           agentCtx
         );
       case 'expand':
-        return this.expand({ id: params.id || params.uri || '', tier: params.tier }, agentCtx);
+        return this.expand({ id: (params.id || params.uri) as string, tier: params.tier }, agentCtx);
       case 'note':
-        return this.note({ content: params.content || '', kind: params.kind || 'fact' }, agentCtx);
+        return this.note(
+          {
+            content: params.content as string,
+            type: params.type,
+            kind: params.kind,
+            scope: params.scope,
+          },
+          agentCtx
+        );
       case 'feedback':
         return this.feedback(
           {
-            id: params.id || '',
-            contentRev: params.contentRev || 1,
-            helpful: params.helpful ?? true,
+            id: params.id as string,
+            contentRev: params.contentRev as number,
+            helpful: params.helpful as boolean,
             note: params.note,
           },
           agentCtx
         );
       case 'confirm':
-        return this.confirm({ id: params.id || '' }, agentCtx);
+        return this.confirm({ id: params.id as string }, agentCtx);
       case 'merge':
         return this.merge(
-          { sourceId: params.sourceId || '', targetId: params.targetId || '', reason: params.reason },
+          { sourceId: params.sourceId as string, targetId: params.targetId as string, reason: params.reason },
           agentCtx
         );
       case 'core_read':
@@ -933,7 +1282,10 @@ export class MemoryTools {
       case 'core_append':
         return this.coreAppend({ block: params.block || 'project', text: params.text || params.content || '' }, agentCtx);
       case 'reconcile':
-        return this.reconcile({ content: params.content || '', type: params.kind || 'semantic', slotKey: params.slotKey }, agentCtx);
+        return this.reconcile(
+          { content: params.content as string, type: params.type || params.kind || 'semantic', slotKey: params.slotKey },
+          agentCtx
+        );
       case 'doctor':
         return this.doctor(agentCtx);
       case 'heal':
@@ -947,14 +1299,14 @@ export class MemoryTools {
         return this.tree(
           {
             uri: params.uri || (!params.query ? params.id : undefined),
-            query: params.uri ? params.query : undefined,
+            query: params.query,
             tier: params.tier,
             limit: params.limit,
           },
           agentCtx
         );
       case 'find':
-        return this.tree(
+        return this.find(
           {
             uri: params.uri,
             query: params.query || params.content || params.id || '',
@@ -966,7 +1318,7 @@ export class MemoryTools {
       case 'diff':
         return this.diff(agentCtx);
       case 'reflect':
-        return this.reflect({ topic: params.topic || params.query }, agentCtx);
+        return this.reflect({ topic: params.topic || params.query }, agentCtx, { privileged: false });
       default:
         return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal, init, tree, find, diff, reflect`;
     }

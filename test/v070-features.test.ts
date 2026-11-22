@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../src/core/db.js';
 import type { Db, MemoryRecord } from '../src/types.js';
 import { DEFAULTS } from '../src/config.js';
@@ -33,6 +33,10 @@ describe('v0.7.0 Algorithmic, Closed-Loop & Studio UI Upgrades', () => {
   beforeEach(() => {
     db = openDb(':memory:');
     clearRuntimeVectorCache();
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   it('1. persists 128D embeddings inline at write time and eliminates >120 scale vector blindspot + hierarchical path similarity', () => {
@@ -499,7 +503,7 @@ describe('v0.7.0 Algorithmic, Closed-Loop & Studio UI Upgrades', () => {
     }
   });
 
-  it('6. serves /core alias, status=live&excludeCore=1, strips binary embeddings, and enforces single-<button> Studio UI invariant', async () => {
+  it('6. serves /core alias, status=live&excludeCore=1, strips binary embeddings, and enforces Option A Studio UI semantic accessibility invariants', async () => {
     let routeHandler: any = null;
     registerWebRoutes(
       {
@@ -595,24 +599,34 @@ describe('v0.7.0 Algorithmic, Closed-Loop & Studio UI Upgrades', () => {
     const healRes = autoHealMemoryHealth(db, { workspaceId: ws, now: now + 50 });
     expect(healRes.coreBlocksSynced).toBeDefined();
 
-    // Verify strict single-<button> invariant across the entire src/client/ Studio UI codebase
-    const clientDir = path.resolve(process.cwd(), 'src/client');
-    const walkFiles = (dir: string): string[] => {
-      const out: string[] = [];
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) out.push(...walkFiles(full));
-        else if (/\.(tsx?|jsx?)$/.test(entry.name)) out.push(full);
-      }
-      return out;
-    };
-    const clientFiles = walkFiles(clientDir);
-    let totalButtonTags = 0;
-    for (const file of clientFiles) {
-      const src = fs.readFileSync(file, 'utf8');
-      const matches = src.match(/<button\b/g);
-      if (matches) totalButtonTags += matches.length;
-    }
-    expect(totalButtonTags).toBe(1);
+    // Verify Option A Studio UI semantic & accessibility invariants:
+    // 1. MemoryHeader.tsx exposes only 1 primary settings trigger button (模型配置 / Model Settings, zero manual CRUD/ops buttons)
+    const headerSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/client/components/MemoryHeader.tsx'),
+      'utf8'
+    );
+    const headerButtons = headerSrc.match(/<button\b/g) || [];
+    expect(headerButtons).toHaveLength(1);
+    expect(headerSrc).toContain('type="button"');
+    expect(headerSrc).toContain('onClick={onOpenConfig}');
+    expect(headerSrc).toContain('t.header.configButton');
+    expect(headerSrc).not.toMatch(/onClick=\{(?:handle|on)(?:Delete|Approve|Forget|Heal|Export|Import|Merge)/i);
+
+    const i18nSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/client/i18n.ts'),
+      'utf8'
+    );
+    expect(i18nSrc).toContain("configButton: '模型配置'");
+    expect(i18nSrc).toContain("configButton: 'Model Settings'");
+
+    // 2. LLMConfigModal.tsx uses real accessible <button type="button"> controls (and zero clickable <span aria-hidden="true"> close buttons)
+    const modalSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/client/components/LLMConfigModal.tsx'),
+      'utf8'
+    );
+    expect(modalSrc).toMatch(/<button[\s\S]*?type="button"[\s\S]*?className="dshm-sheet-close"[\s\S]*?aria-label=\{t\.modal\.closeAria\}/);
+    expect(modalSrc).toMatch(/<button[\s\S]*?type="button"[\s\S]*?className="dshm-key-action-btn"/);
+    expect(modalSrc).not.toMatch(/<span[^>]*\bonClick\s*=/);
+    expect(modalSrc).not.toMatch(/<span[^>]*aria-hidden="true"[^>]*\bonClick\s*=/);
   });
 });

@@ -3,6 +3,7 @@ import type { Db, MemoryRecord } from '../types.js';
 import { scopeFilterSQL } from '../core/scope.js';
 import { render } from '../retrieval/render.js';
 import { budgetTokens, estimateTokens } from '../core/tokens.js';
+import { getActiveStrategy } from '../evolution/strategy.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 
 export interface StableSectionState {
@@ -12,6 +13,53 @@ export interface StableSectionState {
   visibleRefs: Set<string>; // id@contentRev
   stableTokens: number;
   estimatedTokens: number;
+}
+
+export interface StableLayerResult {
+  text: string;
+  visibleRefs: Set<string>;
+  stableTokens: number;
+  estimatedTokens: number;
+}
+
+interface CachedStableLayer {
+  fingerprint: string;
+  result: StableLayerResult;
+}
+
+const MAX_STABLE_CACHE_ENTRIES = 64;
+
+function resolveStrategyVersion(db: Db, cfg: PluginConfig): number {
+  try {
+    return getActiveStrategy(db, cfg).version || 1;
+  } catch {
+    return 1;
+  }
+}
+
+function queryPinnedFingerprint(
+  db: Db,
+  strategyVersion: number,
+  maxStableTokens: number
+): string {
+  try {
+    const row = db.get<{
+      cnt: number;
+      max_updated: number;
+      max_version: number;
+      sum_rev: number;
+    }>(
+      `SELECT COUNT(*) AS cnt,
+              COALESCE(MAX(updated_at), 0) AS max_updated,
+              COALESCE(MAX(version), 0) AS max_version,
+              COALESCE(SUM(content_rev), 0) AS sum_rev
+       FROM memories
+       WHERE pinned = 1 AND status IN ('active', 'frozen')`
+    );
+    return `${row?.cnt ?? 0}:${row?.max_updated ?? 0}:${row?.max_version ?? 0}:${row?.sum_rev ?? 0}:v${strategyVersion}:b${maxStableTokens}`;
+  } catch {
+    return `uncached:${Date.now()}`;
+  }
 }
 
 /**
@@ -25,13 +73,14 @@ export function renderStableLayer(
   db: Db,
   ctx: { workspaceId: string; sessionId?: string },
   cfg: PluginConfig = DEFAULTS,
-  strategyVersion: number = 1
-): { text: string; visibleRefs: Set<string>; stableTokens: number; estimatedTokens: number } {
+  strategyVersion?: number
+): StableLayerResult {
   try {
     const maxStableTokens = Math.min(cfg.stableBudgetTokens ?? 600, cfg.hardBudgetTokens ?? 3200);
     if (maxStableTokens <= 0) {
       return { text: '', visibleRefs: new Set(), stableTokens: 0, estimatedTokens: 0 };
     }
+    const effectiveStrategyVersion = strategyVersion ?? resolveStrategyVersion(db, cfg);
     const scope = scopeFilterSQL({
       workspaceId: ctx.workspaceId,
       sessionId: ctx.sessionId || '',
@@ -55,8 +104,8 @@ export function renderStableLayer(
     const renderSuffix = (offset: number) => {
       const selected = sortedByUtil.slice(offset).sort((a, b) => a.id.localeCompare(b.id));
       const text = render(
-        selected.map(memory => ({ memory, form: 'content' as const })),
-        { strategyVersion, layer: 'stable', db, scopeCtx: ctx }
+        selected.map((memory) => ({ memory, form: 'content' as const })),
+        { strategyVersion: effectiveStrategyVersion, layer: 'stable', db, scopeCtx: ctx }
       );
       return { selected, text, tokens: budgetTokens(text) };
     };
@@ -90,21 +139,77 @@ export function renderStableLayer(
 }
 
 /**
- * 为指定 agent 实例注册 / 刷新稳定层 prompt section
+ * 为指定 agent 实例注册 / 刷新稳定层 prompt section（带快速 SQL 指纹缓存）
  */
 export class PromptSectionManager {
   private db: Db;
   private cfg: PluginConfig;
+  private getCfg?: () => PluginConfig;
   // agentId -> state
   private agentStates = new Map<string, StableSectionState>();
+  // `${workspaceId}|${sessionId}` -> cached stable render result keyed by pinned fingerprint
+  private renderCache = new Map<string, CachedStableLayer>();
 
-  constructor(db: Db, cfg: PluginConfig = DEFAULTS) {
+  constructor(db: Db, cfg: PluginConfig = DEFAULTS, getCfg?: () => PluginConfig) {
     this.db = db;
     this.cfg = cfg;
+    this.getCfg = getCfg;
   }
 
-  public buildStableSection(scopeCtx: { workspaceId: string; sessionId?: string }) {
-    return renderStableLayer(this.db, scopeCtx, this.cfg);
+  private currentCfg(): PluginConfig {
+    return this.getCfg ? this.getCfg() : this.cfg;
+  }
+
+  public buildStableSection(scopeCtx: { workspaceId: string; sessionId?: string }): StableLayerResult {
+    const liveCfg = this.currentCfg();
+    const maxStableTokens = Math.min(
+      liveCfg.stableBudgetTokens ?? 600,
+      liveCfg.hardBudgetTokens ?? 3200
+    );
+    const strategyVersion = resolveStrategyVersion(this.db, liveCfg);
+    const cacheKey = `${scopeCtx.workspaceId || ''}|${scopeCtx.sessionId || ''}`;
+    const fingerprint = queryPinnedFingerprint(this.db, strategyVersion, maxStableTokens);
+
+    const cached = this.renderCache.get(cacheKey);
+    if (cached && cached.fingerprint === fingerprint) {
+      // LRU refresh
+      this.renderCache.delete(cacheKey);
+      this.renderCache.set(cacheKey, cached);
+      return cached.result;
+    }
+
+    const result = renderStableLayer(this.db, scopeCtx, liveCfg, strategyVersion);
+    if (this.renderCache.size >= MAX_STABLE_CACHE_ENTRIES) {
+      const oldest = this.renderCache.keys().next().value;
+      if (oldest !== undefined) this.renderCache.delete(oldest);
+    }
+    this.renderCache.set(cacheKey, { fingerprint, result });
+    return result;
+  }
+
+  /**
+   * 仅同步稳定层内容与内存状态（供 system-prompt/assemble 复用），不触碰全局 section() 注册
+   */
+  public syncAssemblyState(
+    agent: any,
+    scopeCtx: { workspaceId: string; sessionId?: string }
+  ): StableSectionState {
+    const agentId = agent?.id || 'default_agent';
+    let state = this.agentStates.get(agentId);
+    if (!state) {
+      state = { visibleRefs: new Set(), stableTokens: 0, estimatedTokens: 0 };
+      this.agentStates.set(agentId, state);
+    }
+
+    const { text, visibleRefs, stableTokens, estimatedTokens } = this.buildStableSection(scopeCtx);
+    const hash = crypto.createHash('sha256').update(text).digest('hex');
+
+    state.lastHash = hash;
+    state.text = text;
+    state.visibleRefs = visibleRefs;
+    state.stableTokens = stableTokens;
+    state.estimatedTokens = estimatedTokens;
+    return state;
   }
 
   public updateSection(
@@ -119,11 +224,27 @@ export class PromptSectionManager {
     }
 
     const { text, visibleRefs, stableTokens, estimatedTokens } = this.buildStableSection(scopeCtx);
-
     const hash = crypto.createHash('sha256').update(text).digest('hex');
+    const hasHostSectionApi = Boolean(agent?.ctx?.systemPrompt?.section);
 
-    // 只有文本 hash 发生变化时才注销重注
-    if (hash === state.lastHash && state.disposer) {
+    // 当渲染为空时：撤销旧 section，绝不向宿主注册空的 memory-stable section
+    if (!text) {
+      if (state.disposer) {
+        try {
+          state.disposer();
+        } catch {}
+        state.disposer = undefined;
+      }
+      state.lastHash = hash;
+      state.text = '';
+      state.visibleRefs = new Set();
+      state.stableTokens = 0;
+      state.estimatedTokens = 0;
+      return state;
+    }
+
+    // 只有文本 hash 发生变化（或宿主 section 尚未注册）时才注销重注
+    if (hash === state.lastHash && (state.disposer || !hasHostSectionApi)) {
       state.text = text;
       state.visibleRefs = visibleRefs;
       state.stableTokens = stableTokens;
@@ -146,7 +267,7 @@ export class PromptSectionManager {
     state.estimatedTokens = 0;
 
     // 注册到 agent.ctx.systemPrompt
-    if (agent?.ctx?.systemPrompt?.section) {
+    if (hasHostSectionApi) {
       try {
         state.disposer = agent.ctx.systemPrompt.section({
           name: 'memory-stable',
@@ -163,7 +284,12 @@ export class PromptSectionManager {
         console.warn('[dsh-memory] Failed to register memory-stable section:', err?.message || err);
       }
     } else {
+      // assembly-only 路径：完整保留 visibleRefs、stableTokens、estimatedTokens 与 lastHash
+      state.lastHash = hash;
       state.text = text;
+      state.visibleRefs = visibleRefs;
+      state.stableTokens = stableTokens;
+      state.estimatedTokens = estimatedTokens;
     }
 
     return state;
@@ -196,5 +322,6 @@ export class PromptSectionManager {
     for (const [id] of this.agentStates) {
       this.disposeAgent(id);
     }
+    this.renderCache.clear();
   }
 }

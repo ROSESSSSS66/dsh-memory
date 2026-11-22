@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../../src/core/db.js';
 import { DEFAULTS, type PluginConfig } from '../../src/config.js';
 import {
@@ -27,6 +27,10 @@ describe('Consolidator (M3-T5)', () => {
         apiKeyEnv: '',
       },
     };
+  });
+
+  afterEach(() => {
+    db.close();
   });
 
   function setupSuccessMemory(sessionId: string, title: string): string {
@@ -141,7 +145,11 @@ describe('Consolidator (M3-T5)', () => {
           text: '本仓库测试报错时，先执行 pnpm build 重新生成 dist/，再执行测试；以测试通过验证修复。',
           confidence: 0.9,
           scope: 'workspace',
-          evidence: [{ seq: 1, quote: 'pnpm build && vitest run' }],
+          evidence: [
+            { seq: 1, quote: 'pnpm build && vitest run' },
+            { seq: 2, quote: 'pnpm build && vitest run' },
+            { seq: 3, quote: 'pnpm build && vitest run' },
+          ],
         },
       ],
     };
@@ -181,5 +189,48 @@ describe('Consolidator (M3-T5)', () => {
     const clusters = findConsolidationClusters(db, 'ws1', cfg);
     // 不满足 >= 3 个独立 session 的要求，不生成聚类
     expect(clusters).toHaveLength(0);
+  });
+
+  it('unstarves from hindsight.model.* relations, hashes clusterKey, bounds cluster size <= 10, and excludes negative-utility members', () => {
+    const ids: string[] = [];
+    for (let i = 1; i <= 14; i++) {
+      ids.push(setupSuccessMemory(`sess_${i}`, `案例 ${i}`));
+    }
+
+    // Add a Hindsight mental model derived_from all memories -> MUST NOT starve LLM consolidation!
+    const hsModelRes = upsertCandidate(db, {
+      type: 'belief',
+      content: 'Hindsight mental model summarizing vitest build issues.',
+      slot_key: 'hindsight.model.vitest_build',
+      scope: 'workspace',
+      workspaceId: 'ws1',
+      source_kind: 'system',
+      confidence: 0.8,
+      origin_kinds: ['system'],
+      sources: [{ session_id: 'hindsight', seq: 1, kind: 'system' }],
+      actor: 'system',
+    });
+    const hsModelId = (hsModelRes as any).id;
+    db.run("UPDATE memories SET status = 'active' WHERE id = ?", [hsModelId]);
+    for (const id of ids) {
+      db.run(
+        `INSERT OR IGNORE INTO memory_relations (from_id, to_id, rel, metadata, created_at)
+         VALUES (?, ?, 'derived_from', '{}', 2000)`,
+        [hsModelId, id]
+      );
+    }
+
+    // Mark one memory negative utility (< 0.5) -> must be excluded from clusters
+    const negId = ids[0];
+    db.run('UPDATE memories SET utility = 0.25 WHERE id = ?', [negId]);
+
+    const clusters = findConsolidationClusters(db, 'ws1', cfg);
+    expect(clusters.length).toBeGreaterThanOrEqual(2);
+    for (const c of clusters) {
+      expect(c.memories.length).toBeLessThanOrEqual(10);
+      expect(c.memories.some((m) => m.id === negId)).toBe(false);
+      // clusterKey must be hashed (cluster:<wsId>:<16-hex>)
+      expect(c.clusterKey).toMatch(/^cluster:[a-f0-9]{16}:[a-f0-9]{16}$/);
+    }
   });
 });

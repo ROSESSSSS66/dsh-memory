@@ -493,4 +493,120 @@ describe('Query-Triggered Memory Repair (§5.17, M6)', () => {
     expect(approveExpired.ok).toBe(false);
     expect(approveExpired.reason).toContain('expired');
   });
+
+  it('uses repair:<memoryId> key via enqueueJob without UNIQUE crash, delays last_repair_at until LLM dispatch, rolls back partial split, and cleans derived_from on reject', async () => {
+    const quote = '数据库连接池最大连接数设置为 50。';
+    const memId = seed('数据库连接池最大连接数设置为 50。', {
+      sources: [{ session_id: sess1, seq: 1, kind: 'user', excerpt: quote }],
+    });
+
+    // 1. Enqueue keyed by repair:<memoryId> and verify re-enqueueing after done job does NOT throw SQLITE_CONSTRAINT_UNIQUE
+    expect(
+      enqueueRepairJobIfEligible(db, { memoryId: memId, sessionId: sess1, query: 'q1', turn: 1 }, DEFAULTS, fixedNow)
+    ).toBe(true);
+    const jobRow = db.get<{ key: string }>(`SELECT key FROM jobs WHERE kind = 'repair'`);
+    expect(jobRow?.key).toBe(`repair:${memId}`);
+    db.run(`UPDATE jobs SET status = 'done', finished_at = ? WHERE kind = 'repair'`, [fixedNow]);
+    expect(
+      enqueueRepairJobIfEligible(db, { memoryId: memId, sessionId: sess1, query: 'q2', turn: 2 }, DEFAULTS, fixedNow + 1000)
+    ).toBe(true);
+
+    // 2. When executeRepair is skipped before LLM dispatch (offlineConsent=false), last_repair_at MUST remain NULL
+    const noConsentCfg: PluginConfig = {
+      ...testCfg,
+      privacy: { offlineConsent: false, allowedOfflineEndpoints: [] },
+    };
+    const skipRes = await executeRepair(
+      db,
+      { id: 201, key: `repair:${memId}`, payload: JSON.stringify({ memoryId: memId, sessionId: sess1, query: 'q', turn: 1 }) },
+      { fetchFn: createMockFetch({ action: 'keep', reason: 'ok', items: [] }) },
+      noConsentCfg,
+      fixedNow
+    );
+    expect(skipRes.action).toBe('failed');
+    expect(db.get<MemoryRecord>('SELECT last_repair_at FROM memories WHERE id = ?', [memId])?.last_repair_at).toBeNull();
+
+    // 3. Partial split rollback: two identical items collapse to 1 candidate id -> < 2 distinct candidates -> rolled back cleanly!
+    const dupSplitFetch = createMockFetch({
+      action: 'split',
+      reason: 'Split attempt producing duplicate items',
+      items: [
+        {
+          type: 'semantic',
+          text: '数据库连接池最大连接数固定设置为 50。',
+          confidence: 0.9,
+          scope: 'workspace',
+          evidence: [{ seq: 1, quote }],
+        },
+        {
+          type: 'semantic',
+          text: '数据库连接池最大连接数固定设置为 50。',
+          confidence: 0.9,
+          scope: 'workspace',
+          evidence: [{ seq: 1, quote }],
+        },
+      ],
+    });
+    const splitRes = await executeRepair(
+      db,
+      { id: 202, key: `repair:${memId}`, payload: JSON.stringify({ memoryId: memId, sessionId: sess1, query: 'q', turn: 1 }) },
+      { fetchFn: dupSplitFetch },
+      testCfg,
+      fixedNow
+    );
+    expect(splitRes.action).toBe('done');
+    expect(listRepairProposals(db)).toHaveLength(0);
+    expect(db.all("SELECT * FROM memories WHERE status = 'candidate'")).toHaveLength(0);
+    expect(db.all("SELECT * FROM memory_relations WHERE rel = 'derived_from'")).toHaveLength(0);
+
+    // 4. Cooldown re-check inside executeRepair blocks immediate second run
+    const cooldownRes = await executeRepair(
+      db,
+      { id: 203, key: `repair:${memId}`, payload: JSON.stringify({ memoryId: memId, sessionId: sess1, query: 'q', turn: 2 }) },
+      { fetchFn: createMockFetch({ action: 'keep', reason: 'ok', items: [] }) },
+      testCfg,
+      fixedNow + 1000
+    );
+    expect(cooldownRes).toMatchObject({ action: 'skipped', nonRetryable: true });
+
+    // 5. Rejecting a revise proposal deletes derived_from relation; malformed candidate_ids is handled safely
+    db.run('UPDATE memories SET last_repair_at = NULL WHERE id = ?', [memId]);
+    const reviseFetch = createMockFetch({
+      action: 'revise',
+      reason: 'Refine pool wording',
+      items: [
+        {
+          type: 'semantic',
+          text: '数据库连接池最大连接数严格设置为 50。',
+          confidence: 0.9,
+          scope: 'workspace',
+          evidence: [{ seq: 1, quote }],
+        },
+      ],
+    });
+    await executeRepair(
+      db,
+      { id: 204, key: `repair:${memId}`, payload: JSON.stringify({ memoryId: memId, sessionId: sess1, query: 'q', turn: 3 }) },
+      { fetchFn: reviseFetch },
+      testCfg,
+      fixedNow + 2000
+    );
+    const [prop] = listRepairProposals(db, 'candidate');
+    expect(db.all("SELECT * FROM memory_relations WHERE rel = 'derived_from'")).toHaveLength(1);
+    expect(rejectRepairProposal(db, prop.id, fixedNow + 3000)).toEqual({ ok: true });
+    expect(db.all("SELECT * FROM memory_relations WHERE rel = 'derived_from'")).toHaveLength(0);
+
+    // Malformed candidate_ids JSON does not throw
+    db.run(
+      `INSERT INTO repair_proposals (job_id, memory_id, content_rev, action, candidate_ids, reason, status, created_at, expires_at)
+       VALUES (205, ?, 1, 'revise', '{corrupt-json', 'bad', 'candidate', ?, ?)`,
+      [memId, fixedNow, fixedNow + 86400_000]
+    );
+    const badPropId = db.get<{ id: number }>('SELECT MAX(id) AS id FROM repair_proposals')!.id;
+    expect(approveRepairProposal(db, badPropId, 'user', fixedNow)).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('malformed candidate_ids'),
+    });
+    expect(listRepairProposals(db).find((p) => p.id === badPropId)?.candidateIds).toEqual([]);
+  });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import type { MemoryRecord, QueryPlan, StrategyConfig } from '../../src/types.js';
 import { fuseCandidates, DEFAULT_STRATEGY } from '../../src/retrieval/fuse.js';
 
@@ -106,7 +106,7 @@ describe('Zep Temporal Invalidation & Stanford Importance Scoring (fuse.ts)', ()
     expect(scored[0].score).toBeGreaterThan(scored[1].score);
   });
 
-  it('Zep Temporal Validity: Invalidation timestamp should heavily penalize freshness', () => {
+  it('Zep Temporal Validity: excludes expired/invalidated memories in normal queries, and penalizes freshness during temporalBrowse', () => {
     const validMem = createMockMemory({
       id: 'm_valid',
       content: '数据库连接配置：有效配置',
@@ -122,10 +122,19 @@ describe('Zep Temporal Invalidation & Stanford Importance Scoring (fuse.ts)', ()
       invalidated_at: fixedNow - 1000, // 已标记失效
     });
 
+    const expiredMem = createMockMemory({
+      id: 'm_expired',
+      content: '数据库连接配置：已过期临时规则',
+      created_at: fixedNow - 3600000,
+      updated_at: fixedNow - 3600000,
+      valid_to: fixedNow - 2000, // 已过期
+    });
+
     const channelResults = {
       lexical: [
         { id: validMem.id, channel: 'lexical' as const, rank: 1 },
         { id: invalidatedMem.id, channel: 'lexical' as const, rank: 1 },
+        { id: expiredMem.id, channel: 'lexical' as const, rank: 1 },
       ],
       entity: [],
       typed: [],
@@ -134,10 +143,36 @@ describe('Zep Temporal Invalidation & Stanford Importance Scoring (fuse.ts)', ()
       vector: [],
     };
 
-    const scored = fuseCandidates(
+    const memMap = new Map([
+      [validMem.id, validMem],
+      [invalidatedMem.id, invalidatedMem],
+      [expiredMem.id, expiredMem],
+    ]);
+
+    // 1. 普通非 temporalBrowse 查询：已失效/已过期记忆必须被直接排除
+    const scoredNormal = fuseCandidates(
       plan,
       channelResults,
-      new Map([[validMem.id, validMem], [invalidatedMem.id, invalidatedMem]]),
+      memMap,
+      new Map(),
+      new Set(),
+      DEFAULT_STRATEGY,
+      undefined,
+      fixedNow
+    );
+    expect(scoredNormal).toHaveLength(1);
+    expect(scoredNormal[0].memory.id).toBe(validMem.id);
+
+    // 2. temporalBrowse 历史浏览模式下：允许保留历史记录，但失效/过期项的新鲜度受到重罚，仍严格排在有效项之后
+    const browsePlan: QueryPlan = {
+      ...plan,
+      temporalBrowse: true,
+      timeRange: { from: fixedNow - 86400000, to: fixedNow },
+    };
+    const scoredBrowse = fuseCandidates(
+      browsePlan,
+      channelResults,
+      memMap,
       new Map(),
       new Set(),
       DEFAULT_STRATEGY,
@@ -145,8 +180,9 @@ describe('Zep Temporal Invalidation & Stanford Importance Scoring (fuse.ts)', ()
       fixedNow
     );
 
-    expect(scored).toHaveLength(2);
-    expect(scored[0].memory.id).toBe(validMem.id);
-    expect(scored[0].score).toBeGreaterThan(scored[1].score);
+    expect(scoredBrowse).toHaveLength(3);
+    expect(scoredBrowse[0].memory.id).toBe(validMem.id);
+    expect(scoredBrowse[0].score).toBeGreaterThan(scoredBrowse[1].score);
+    expect(scoredBrowse[0].score).toBeGreaterThan(scoredBrowse[2].score);
   });
 });

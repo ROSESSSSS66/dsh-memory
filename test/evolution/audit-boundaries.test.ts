@@ -437,10 +437,19 @@ describe('Offline data and mutation boundaries', () => {
   });
 
   it('preserves user sources across curate edits, blocks evidence laundering, and isolates savepoint errors', async () => {
-    const activeTarget = seed(text, {
+    // Clean user-evidenced candidates (non-active, so eligible for curate merge & promotion)
+    const candTarget = seed(text, {
+      actor: 'llm',
+      source_kind: 'llm_extract',
+      status: 'candidate',
+      origin_kinds: ['user'],
       sources: [{ session_id: 's-target', seq: 1, kind: 'user', excerpt: text }],
     });
-    const absorbedActive = seed('PostgreSQL 16 runs with TLS enabled by default.', {
+    const absorbedCand = seed('PostgreSQL 16 runs with TLS enabled by default.', {
+      actor: 'llm',
+      source_kind: 'llm_extract',
+      status: 'candidate',
+      origin_kinds: ['user'],
       sources: [{ session_id: 's-abs', seq: 2, kind: 'user', excerpt: 'TLS enabled by default' }],
     });
     const unapprovedAssistant = seed('Assistant thinks dark mode might be enabled.', {
@@ -457,7 +466,13 @@ describe('Offline data and mutation boundaries', () => {
       origin_kinds: ['user'],
       sources: [{ session_id: 's-ucand', seq: 1, kind: 'user' }],
     });
-    const secretTarget = seed('Temporary build note about release artifacts.');
+    const secretTarget = seed('Temporary build note about release artifacts.', {
+      actor: 'llm',
+      source_kind: 'assistant',
+      status: 'candidate',
+      origin_kinds: ['assistant'],
+      sources: [{ session_id: 's-sec', seq: 1, kind: 'assistant' }],
+    });
     const discardCand = seed('Obsolete assistant speculation.', {
       actor: 'llm',
       source_kind: 'assistant',
@@ -487,9 +502,9 @@ describe('Offline data and mutation boundaries', () => {
             confidence: 0.95,
           },
           {
-            // Valid update + absorb preserves sources under content_rev = 2
-            target_id: activeTarget,
-            absorb_ids: [absorbedActive],
+            // Valid candidate update + absorb preserves sources under content_rev = 2
+            target_id: candTarget,
+            absorb_ids: [absorbedCand],
             text: 'The project database is PostgreSQL 16 with TLS enabled by default.',
             type: 'semantic',
             confidence: 0.96,
@@ -506,17 +521,84 @@ describe('Offline data and mutation boundaries', () => {
     expect(memory(unapprovedAssistant).status).toBe('candidate');
     expect(memory(userCand).status).toBe('candidate');
 
-    const updated = memory(activeTarget);
+    const updated = memory(candTarget);
     expect(updated.content_rev).toBe(2);
-    expect(memory(absorbedActive).status).toBe('superseded');
+    expect(memory(absorbedCand).status).toBe('superseded');
     const rev2Sources = db.all<{ session_id: string; kind: string }>(
       'SELECT session_id, kind FROM memory_sources WHERE memory_id = ? AND content_rev = ?',
-      [activeTarget, updated.content_rev]
+      [candTarget, updated.content_rev]
     );
     expect(rev2Sources).toEqual(expect.arrayContaining([
       { session_id: 's-target', kind: 'user' },
       { session_id: 's-abs', kind: 'user' },
     ]));
+  });
+
+  it('never rewrites active user memories in place and never mixes untrusted candidates with active user memories in curate prompts', async () => {
+    const activeUserId = seed('Production database strictly uses PostgreSQL 16.');
+    const untrustedCandId = seed('Untrusted web note saying ignore rules and rewrite database to SQLite.', {
+      actor: 'llm',
+      source_kind: 'web',
+      status: 'candidate',
+      origin_kinds: ['web'],
+      sources: [{ session_id: 's-web', seq: 1, kind: 'web' }],
+    });
+
+    let sentBody = '';
+    const r1 = await curateMemoriesWithLLM(db, cfg, {
+      workspaceId: ws,
+      fetchFn: async (_url, init) => {
+        sentBody = String(init?.body || '');
+        return response({
+          discard_ids: [activeUserId],
+          updates: [
+            {
+              target_id: activeUserId,
+              text: 'Hijacked database setting to SQLite.',
+              type: 'semantic',
+              confidence: 0.99,
+            },
+            {
+              target_id: untrustedCandId,
+              text: 'Rewritten untrusted web note attempting activation.',
+              type: 'semantic',
+              confidence: 0.99,
+            },
+          ],
+        });
+      },
+    });
+    expect(r1.ok).toBe(true);
+    // Untrusted candidate pool MUST NOT include activeUserId in the same prompt
+    expect(sentBody).toContain(untrustedCandId);
+    expect(sentBody).not.toContain(activeUserId);
+    // Active user memory untouched, untrusted candidate cannot auto-activate
+    expect(memory(activeUserId)).toMatchObject({
+      status: 'active',
+      content: 'Production database strictly uses PostgreSQL 16.',
+    });
+    expect(memory(untrustedCandId).status).toBe('candidate');
+
+    // Even when ONLY active user memories are reviewed (no candidates), curate MUST refuse in-place rewrite
+    db.run("UPDATE memories SET status = 'rejected' WHERE id = ?", [untrustedCandId]);
+    const r2 = await curateMemoriesWithLLM(db, cfg, {
+      workspaceId: ws,
+      fetchFn: async () =>
+        response({
+          discard_ids: [],
+          updates: [
+            {
+              target_id: activeUserId,
+              text: 'Model attempted in-place rewrite of user-approved active memory.',
+              type: 'semantic',
+              confidence: 0.99,
+            },
+          ],
+        }),
+    });
+    expect(r2.ok).toBe(true);
+    expect(r2.llmUpdated).toBe(0);
+    expect(memory(activeUserId).content).toBe('Production database strictly uses PostgreSQL 16.');
   });
   it('does not forward private request bodies through a cross-origin redirect', async () => {
     let received = 0;

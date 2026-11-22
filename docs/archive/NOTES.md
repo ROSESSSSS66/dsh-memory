@@ -1,3 +1,9 @@
+> **[Archived Historical Baseline Document]**
+> `NOTES.md` is preserved in `docs/archive/` as a historical engineering baseline record from earlier development milestones.
+> For current architecture, configuration, tooling, and verification gates, refer to [README.md](../../README.md) and [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
+---
+
 # DSH Self-Evolving Memory · 实施随记 (NOTES.md)
 
 ## M0 探测记录与环境决策

@@ -8,10 +8,21 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
-    name: Typecheck, Test & Build
-    runs-on: ubuntu-latest
+    name: Verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -29,10 +40,38 @@ jobs:
         run: npm run typecheck
 
       - name: Run All Tests
+        if: matrix.os != 'ubuntu-latest'
         run: npm test
+
+      - name: Run All Tests with Coverage
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run test:coverage
 
       - name: Run Build
         run: npm run build
 
-      - name: Run Eval Gate (120 cases)
+      - name: Run Eval Gate (152 cases)
         run: npm run eval
+
+      - name: Verify Package Tarball
+        run: npm run pack:check
+
+      - name: Smoke-import dist/index.js
+        shell: bash
+        run: node --input-type=module -e 'import * as mod from "./dist/index.js"; if (mod.name !== "dsh-memory" || typeof mod.apply !== "function" || typeof mod.openDb !== "function") { throw new Error("dist/index.js missing expected exports"); } console.log("Smoke-import dist/index.js OK");'
+
+      - name: Smoke mock-load dist/client.js
+        shell: bash
+        run: node --input-type=module -e 'import fs from "node:fs"; import { createRequire } from "node:module"; import vm from "node:vm"; const req = createRequire(import.meta.url); const code = fs.readFileSync("./dist/client.js", "utf8"); vm.runInNewContext(code, {}, { filename: "dist/client.js" }); let loaded = null; const ctx = { window: { __ModuleLoader__: { load(spec) { loaded = spec; } } }, console }; vm.runInNewContext(code, ctx, { filename: "dist/client.js" }); if (!loaded || loaded.id !== "dsh-memory" || typeof loaded.factory !== "function") { throw new Error("dist/client.js failed to register with __ModuleLoader__"); } const exported = loaded.factory((id) => (id.startsWith("@deepseek-ai/") ? {} : req(id))); if (!exported || exported.name !== "dsh-memory" || typeof exported.apply !== "function") { throw new Error("dist/client.js factory returned invalid exports"); } console.log("Smoke mock-load dist/client.js OK");'
+
+      - name: Production Dependency Audit
+        if: matrix.os == 'ubuntu-latest'
+        run: npm audit --omit=dev --audit-level=high
+
+  gate:
+    name: Typecheck, Test & Build
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: All 3-OS Verification Checks Passed
+        run: echo "Typecheck, Test, Build, Eval v2, Pack & Smoke checks passed on Ubuntu, Windows, and macOS."

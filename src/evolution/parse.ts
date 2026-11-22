@@ -3,7 +3,6 @@ import type {
   EvidenceLedger,
   LLMTaskKind,
   RawMemoryItem,
-  RawEvidenceItem,
   ParseResult,
   RepairAction,
   JudgeOutput,
@@ -12,6 +11,7 @@ import type {
 } from './types.js';
 import { redactSecrets } from '../core/privacy.js';
 
+// 模型不得创建内部系统类型 'meta'
 const VALID_MEMORY_TYPES = new Set<MemoryType>([
   'episodic',
   'semantic',
@@ -20,24 +20,40 @@ const VALID_MEMORY_TYPES = new Set<MemoryType>([
   'preference',
   'goal',
   'failure',
-  'meta',
 ]);
 
-const VALID_SCOPES = new Set<Scope>(['global', 'workspace', 'session']);
+// 允许模型输出 'user' 或 'global' 并在 mapToCandidateInput 中安全降级为 'workspace'
+const VALID_SCOPES = new Set<Scope>(['global', 'user', 'workspace', 'session']);
 const VALID_SLOT_KEY_REGEX = /^[a-z0-9.:_-]+$/;
 const VALID_MEMORY_ID_REGEX = /^m_[a-z0-9_]{4,32}$/i;
 // core:* 为 Letta 常驻核心块保留命名空间，只能经用户/系统路径写入，模型输出不得占用
 const RESERVED_SLOT_PREFIX = 'core:';
 const WORKSPACE_PLACEHOLDER = '<workspace>';
 const MAX_WORKSPACE_GAP = 260;
+const MAX_WORKSPACE_PLACEHOLDERS = 4;
+const MAX_ITEMS_SCAN = 20;
 
 /**
  * 判定 quote 是否为 text 的连续子串，其中每个 <workspace> 占位符对应 1..260 个非换行字符。
- * 逐段线性扫描而非拼接正则：quote 由模型给出，多个占位符串联的 `[^\r\n]{1,260}` 会产生灾难性回溯，
- * 且该校验同步执行，任务超时与 AbortSignal 均无法打断。
+ * P0 安全硬约束：
+ * - 去除 <workspace> 后非占位文本长度必须 >= 8
+ * - 至少包含一段长度 >= 4 的非占位文本，彻底封堵 "<workspace>" / "a<workspace>" 匹配任意文本的绕过
+ * - 逐段线性扫描，杜绝回溯 ReDoS
  */
-function matchesWithWorkspaceGaps(text: string, quote: string): boolean {
+export function matchesWithWorkspaceGaps(text: string, quote: string): boolean {
+  const nonPlaceholder = quote.replaceAll(WORKSPACE_PLACEHOLDER, '').trim();
+  if (nonPlaceholder.length < 8) {
+    return false;
+  }
+
   const parts = quote.split(WORKSPACE_PLACEHOLDER);
+  if (parts.length - 1 > MAX_WORKSPACE_PLACEHOLDERS) {
+    return false;
+  }
+  if (!parts.some((p) => p.trim().length >= 4)) {
+    return false;
+  }
+
   // reach[i] = 1 表示已匹配的前缀可以结束于 text 偏移 i
   let reach = new Uint8Array(text.length + 1);
   for (let s = 0; s + parts[0].length <= text.length; s++) {
@@ -64,6 +80,62 @@ function matchesWithWorkspaceGaps(text: string, quote: string): boolean {
   return reach.includes(1);
 }
 
+/**
+ * 从带有前后杂文或包裹文本的字符串中，按 JSON 字符串转义规则提取最外层成对的 `{ ... }` JSON 对象。
+ */
+function extractBalancedJsonObject(input: string): string | null {
+  let searchFrom = 0;
+  while (searchFrom < input.length) {
+    const start = input.indexOf('{', searchFrom);
+    if (start === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let matchedEnd = -1;
+
+    for (let i = start; i < input.length; i++) {
+      const ch = input[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          matchedEnd = i;
+          break;
+        }
+      }
+    }
+
+    if (matchedEnd !== -1) {
+      const candidate = input.slice(start, matchedEnd + 1);
+      try {
+        const obj = JSON.parse(candidate);
+        if (typeof obj === 'object' && obj !== null && !Array.isArray(obj)) {
+          return candidate;
+        }
+      } catch {}
+    }
+
+    searchFrom = start + 1;
+  }
+
+  return null;
+}
+
 export interface ParseOptions {
   taskKind: LLMTaskKind;
   evidenceLedger: EvidenceLedger;
@@ -72,16 +144,38 @@ export interface ParseOptions {
 }
 
 /**
- * 剥离外部包裹的单个代码围栏，且严格拒绝代码围栏前后的杂文
+ * 清洗 LLM 原始输出以提取 JSON：
+ * 1) 剥离 UTF-8 BOM
+ * 2) 剥离推理模型生成的 <think>...</think> 思考块
+ * 3) 剥离单行或多行 Markdown 代码围栏
+ * 4) 若直接解析失败，按字符串转义感知提取最外层平衡的 { ... } JSON 对象
  */
 export function cleanJsonText(raw: string): string {
-  const trimmed = raw.trim();
-  // 仅匹配包裹整个文本的代码围栏
-  const fenceMatch = /^```(?:json)?\r?\n([\s\S]*?)\r?\n```$/i.exec(trimmed);
+  let cleaned = (raw || '').replace(/^\uFEFF/, '').trim();
+  // 移除 <think>...</think> 思考块（含未闭合前缀后的成对块）
+  cleaned = cleaned.replace(/<\s*think\s*>[\s\S]*?<\s*\/\s*think\s*>/gi, '').trim();
+
+  // 支持多行与单行代码围栏：```json\n{...}\n``` 或 ```json {...} ```
+  const fenceMatch = /^```(?:json)?[\t ]*(?:\r?\n)?([\s\S]*?)(?:\r?\n)?[\t ]*```$/i.exec(cleaned);
   if (fenceMatch) {
-    return fenceMatch[1].trim();
+    cleaned = fenceMatch[1].trim();
   }
-  return trimmed;
+
+  // 直接可解析为 JSON 对象时直接返回
+  try {
+    const direct = JSON.parse(cleaned);
+    if (typeof direct === 'object' && direct !== null && !Array.isArray(direct)) {
+      return cleaned;
+    }
+  } catch {
+    // 尝试提取最外层平衡的 { ... } JSON 对象
+    const extracted = extractBalancedJsonObject(cleaned);
+    if (extracted !== null) {
+      return extracted;
+    }
+  }
+
+  return cleaned;
 }
 
 /**
@@ -154,27 +248,26 @@ export function parseOutput(raw: string, options: ParseOptions): ParseResult {
     };
   }
 
-  // 任务特定的条数硬上限
-  if (options.taskKind === 'distill' && parsed.items.length > 5) {
-    return {
-      success: false,
-      error: 'distill_max_items_exceeded',
-    };
-  }
-  if (options.taskKind === 'reflect' && parsed.items.length > 2) {
-    return {
-      success: false,
-      error: 'reflect_max_items_exceeded',
-    };
-  }
-  if (options.taskKind === 'consolidate' && parsed.items.length > 1) {
-    return {
-      success: false,
-      error: 'consolidate_max_items_exceeded',
-    };
-  }
+  const droppedNotes: string[] = [];
+  const itemsToScan = parsed.items.length > MAX_ITEMS_SCAN
+    ? (() => {
+        droppedNotes.push(`items_truncated_from_${parsed.items.length}_to_${MAX_ITEMS_SCAN}`);
+        return parsed.items.slice(0, MAX_ITEMS_SCAN);
+      })()
+    : parsed.items;
 
-  const { validItems, droppedNotes } = validateMemoryItems(parsed.items, options);
+  const validated = validateMemoryItems(itemsToScan, options);
+  droppedNotes.push(...validated.droppedNotes);
+
+  // 超出任务配额时平滑截断多余条目，而非整批失败丢弃全部有效记忆
+  let validItems = validated.validItems;
+  if (options.taskKind === 'distill' && validItems.length > 5) {
+    droppedNotes.push(`distill_excess_items_sliced: kept 5 of ${validItems.length}`);
+    validItems = validItems.slice(0, 5);
+  } else if (options.taskKind === 'consolidate' && validItems.length > 1) {
+    droppedNotes.push(`consolidate_excess_items_sliced: kept 1 of ${validItems.length}`);
+    validItems = validItems.slice(0, 1);
+  }
 
   if (parsed.items.length > 0 && validItems.length === 0 && discardIds.length === 0) {
     return {
@@ -185,7 +278,7 @@ export function parseOutput(raw: string, options: ParseOptions): ParseResult {
   }
 
   // 映射为 CandidateInput
-  const candidateInputs = validItems.map(item =>
+  const candidateInputs = validItems.map((item) =>
     mapToCandidateInput(item, options.evidenceLedger, {
       taskKind: options.taskKind,
       workspaceId: options.workspaceId,
@@ -212,12 +305,32 @@ function validateMemoryItems(
   const validItems: RawMemoryItem[] = [];
   const droppedNotes: string[] = [];
 
+  // reflect 允许任意索引顺序，按类别配额限制：<=1 failure|procedural 且 <=1 belief
+  let reflectFailureOrProcCount = 0;
+  let reflectBeliefCount = 0;
+
   for (let i = 0; i < rawList.length; i++) {
     const rawItem = rawList[i];
-    const validationError = validateSingleItem(rawItem, i, options);
+    const validationError = validateSingleItem(rawItem, options);
     if (validationError) {
       droppedNotes.push(`item[${i}]: ${validationError}`);
       continue;
+    }
+
+    if (options.taskKind === 'reflect') {
+      if (rawItem.type === 'failure' || rawItem.type === 'procedural') {
+        if (reflectFailureOrProcCount >= 1) {
+          droppedNotes.push(`item[${i}]: reflect_excess_failure_or_procedural_sliced`);
+          continue;
+        }
+        reflectFailureOrProcCount++;
+      } else if (rawItem.type === 'belief') {
+        if (reflectBeliefCount >= 1) {
+          droppedNotes.push(`item[${i}]: reflect_excess_belief_sliced`);
+          continue;
+        }
+        reflectBeliefCount++;
+      }
     }
 
     validItems.push(rawItem as RawMemoryItem);
@@ -229,7 +342,7 @@ function validateMemoryItems(
 /**
  * 单条 MemoryItem 校验
  */
-function validateSingleItem(item: any, index: number, options: ParseOptions): string | null {
+function validateSingleItem(item: any, options: ParseOptions): string | null {
   if (typeof item !== 'object' || item === null || Array.isArray(item)) {
     return 'item_not_object';
   }
@@ -241,11 +354,8 @@ function validateSingleItem(item: any, index: number, options: ParseOptions): st
 
   // 任务特有类型约束
   if (options.taskKind === 'reflect') {
-    if (index === 0 && item.type !== 'failure' && item.type !== 'procedural') {
-      return `reflect_first_item_must_be_failure_or_procedural: ${item.type}`;
-    }
-    if (index === 1 && item.type !== 'belief') {
-      return `reflect_second_item_must_be_belief: ${item.type}`;
+    if (item.type !== 'failure' && item.type !== 'procedural' && item.type !== 'belief') {
+      return `reflect_invalid_type: ${item.type}`;
     }
   } else if (options.taskKind === 'consolidate') {
     if (item.type !== 'procedural') {
@@ -282,7 +392,12 @@ function validateSingleItem(item: any, index: number, options: ParseOptions): st
   }
 
   // 4. confidence
-  if (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) {
+  if (
+    typeof item.confidence !== 'number' ||
+    !Number.isFinite(item.confidence) ||
+    item.confidence < 0 ||
+    item.confidence > 1
+  ) {
     return `invalid_confidence: ${item.confidence}`;
   }
 
@@ -295,6 +410,8 @@ function validateSingleItem(item: any, index: number, options: ParseOptions): st
   if (!Array.isArray(item.evidence) || item.evidence.length === 0) {
     return 'evidence_missing_or_empty';
   }
+
+  const citedSessions = new Set<string>();
 
   for (let j = 0; j < item.evidence.length; j++) {
     const ev = item.evidence[j];
@@ -323,15 +440,30 @@ function validateSingleItem(item: any, index: number, options: ParseOptions): st
       return `evidence[${j}]_seq_not_in_ledger: ${ev.seq}`;
     }
 
-    // 严格检查 quote 是否为该编号实际发送的脱敏文本的连续子串（区分大小写）
-    if (!entry.redacted_text.includes(trimmedQuote)) {
-      const matchedWithWorkspacePlaceholder =
-        trimmedQuote.includes(WORKSPACE_PLACEHOLDER) &&
-        matchesWithWorkspaceGaps(entry.redacted_text, trimmedQuote);
-      if (!matchedWithWorkspacePlaceholder) {
-        return `evidence[${j}]_quote_not_substring_of_seq_${ev.seq}`;
-      }
+    // 同时支持匹配原始脱敏片段与带行前缀的完整渲染行（如 [T#1] tool=... / [E#1] (...)）
+    const candidateTexts = [entry.redacted_text];
+    if (entry.rendered_line && entry.rendered_line !== entry.redacted_text) {
+      candidateTexts.push(entry.rendered_line);
     }
+
+    const quoteMatched = candidateTexts.some(
+      (sourceText) =>
+        sourceText.includes(trimmedQuote) ||
+        (trimmedQuote.includes(WORKSPACE_PLACEHOLDER) &&
+          matchesWithWorkspaceGaps(sourceText, trimmedQuote))
+    );
+    if (!quoteMatched) {
+      return `evidence[${j}]_quote_not_substring_of_seq_${ev.seq}`;
+    }
+
+    if (entry.session_id) {
+      citedSessions.add(entry.session_id);
+    }
+  }
+
+  // consolidate 必须引用覆盖 >= 3 个独立 session 的证据
+  if (options.taskKind === 'consolidate' && citedSessions.size < 3) {
+    return `consolidate_requires_at_least_3_distinct_sessions: got ${citedSessions.size}`;
   }
 
   return null;
@@ -413,7 +545,7 @@ function parseRepairOutput(parsed: any, options: ParseOptions): ParseResult {
     };
   }
 
-  const candidateInputs = validItems.map(item =>
+  const candidateInputs = validItems.map((item) =>
     mapToCandidateInput(item, options.evidenceLedger, {
       taskKind: 'repair',
       workspaceId: options.workspaceId,
@@ -444,7 +576,12 @@ function parseJudgeOutput(parsed: any): ParseResult {
     return { success: false, error: `invalid_judge_verdict: ${parsed.verdict}` };
   }
 
-  if (typeof parsed.score !== 'number' || !Number.isFinite(parsed.score) || parsed.score < 0 || parsed.score > 1) {
+  if (
+    typeof parsed.score !== 'number' ||
+    !Number.isFinite(parsed.score) ||
+    parsed.score < 0 ||
+    parsed.score > 1
+  ) {
     return { success: false, error: `invalid_judge_score: ${parsed.score}` };
   }
 
@@ -487,28 +624,64 @@ function parseJudgeOutput(parsed: any): ParseResult {
 
 /**
  * 解析 B-6 离线记忆治理输出 (curate-v1)
+ * 要求至少包含合法的 discard_ids 数组或 updates 数组之一，拒绝无关垃圾 JSON 静默返回空成功。
  */
 function parseCurateOutput(parsed: any): ParseResult {
-  const rawDiscards = Array.isArray(parsed.discard_ids) ? parsed.discard_ids : [];
-  const discardIds = Array.from(
-    new Set<string>(
-      rawDiscards
-        .filter((id: unknown): id is string => typeof id === 'string' && VALID_MEMORY_ID_REGEX.test(id.trim()))
-        .map((id: string) => id.trim())
-    )
-  ).slice(0, 30);
+  const hasDiscardArray = Array.isArray(parsed.discard_ids);
+  const hasUpdatesArray = Array.isArray(parsed.updates);
+  if (!hasDiscardArray && !hasUpdatesArray) {
+    return {
+      success: false,
+      error: 'curate_missing_discard_ids_and_updates',
+    };
+  }
 
-  const rawUpdates = Array.isArray(parsed.updates) ? parsed.updates : [];
+  const droppedNotes: string[] = [];
+
+  const rawDiscards = hasDiscardArray ? parsed.discard_ids : [];
+  const discardSet = new Set<string>();
+  for (let i = 0; i < rawDiscards.length; i++) {
+    const rawId = rawDiscards[i];
+    if (typeof rawId !== 'string' || !VALID_MEMORY_ID_REGEX.test(rawId.trim())) {
+      droppedNotes.push(`discard_ids[${i}]: invalid_memory_id`);
+      continue;
+    }
+    discardSet.add(rawId.trim());
+  }
+  const discardIds = Array.from(discardSet).slice(0, 30);
+  if (discardSet.size > 30) {
+    droppedNotes.push(`discard_ids_sliced_from_${discardSet.size}_to_30`);
+  }
+
+  const rawUpdates = hasUpdatesArray ? parsed.updates : [];
   const updates: CurateUpdateItem[] = [];
+  if (rawUpdates.length > 15) {
+    droppedNotes.push(`updates_sliced_from_${rawUpdates.length}_to_15`);
+  }
 
-  for (const u of rawUpdates.slice(0, 15)) {
-    if (!u || typeof u !== 'object') continue;
+  const scanUpdates = rawUpdates.slice(0, 15);
+  for (let i = 0; i < scanUpdates.length; i++) {
+    const u = scanUpdates[i];
+    if (!u || typeof u !== 'object' || Array.isArray(u)) {
+      droppedNotes.push(`updates[${i}]: not_object`);
+      continue;
+    }
     const targetId = typeof u.target_id === 'string' ? u.target_id.trim() : '';
-    if (!VALID_MEMORY_ID_REGEX.test(targetId)) continue;
+    if (!VALID_MEMORY_ID_REGEX.test(targetId)) {
+      droppedNotes.push(`updates[${i}]: invalid_target_id`);
+      continue;
+    }
 
     const text = typeof u.text === 'string' ? u.text.trim() : '';
-    if (text.length < 8 || text.length > 800) continue;
-    if (redactSecrets(text).hasSensitive) continue;
+    if (text.length < 8 || text.length > 800) {
+      droppedNotes.push(`updates[${i}]: text_length_out_of_range: ${text.length}`);
+      continue;
+    }
+    const priv = redactSecrets(text);
+    if (priv.hasSensitive) {
+      droppedNotes.push(`updates[${i}]: text_contains_sensitive_data: ${priv.detectedKinds.join(',')}`);
+      continue;
+    }
 
     // type / slot_key 缺省或非法时保持 undefined，由应用方沿用目标记忆原值（不得静默改型或清空槽位）
     const type: MemoryType | undefined =
@@ -530,12 +703,16 @@ function parseCurateOutput(parsed: any): ParseResult {
         : 0.85;
 
     const absorbIds = Array.isArray(u.absorb_ids)
-      ? u.absorb_ids
-          .filter(
-            (id: unknown): id is string =>
-              typeof id === 'string' && VALID_MEMORY_ID_REGEX.test(id.trim()) && id.trim() !== targetId
+      ? Array.from(
+          new Set<string>(
+            u.absorb_ids
+              .filter(
+                (id: unknown): id is string =>
+                  typeof id === 'string' && VALID_MEMORY_ID_REGEX.test(id.trim()) && id.trim() !== targetId
+              )
+              .map((id: string) => id.trim())
           )
-          .map((id: string) => id.trim())
+        )
       : [];
 
     updates.push({
@@ -559,11 +736,14 @@ function parseCurateOutput(parsed: any): ParseResult {
     items: [],
     discardIds,
     curateResult,
+    droppedNotes,
   };
 }
 
 /**
  * 将校验通过的 RawMemoryItem 映射为存储层的 CandidateInput
+ * 注：writer.ts 对 actor === 'llm' 已统一执行 * 0.8 折扣，此处仅对 repair 叠加额外的 * 0.7 折扣，
+ * 使最终落盘置信度严格为 raw * 0.8 (distill/reflect/consolidate) 与 raw * 0.56 (repair)，消除双重 0.8 折扣。
  */
 export function mapToCandidateInput(
   item: RawMemoryItem,
@@ -574,15 +754,14 @@ export function mapToCandidateInput(
     sessionId?: string;
   }
 ): CandidateInput {
-  // confidence 折扣：一般乘 0.8，B-4 再乘 0.7
-  let confidence = item.confidence * 0.8;
+  let confidence = item.confidence;
   if (options.taskKind === 'repair') {
     confidence = confidence * 0.7;
   }
   confidence = Math.max(0, Math.min(1, confidence));
 
   // 映射证据到真实 sources
-  const sources = item.evidence.map(ev => {
+  const sources = item.evidence.map((ev) => {
     const entry = evidenceLedger.get(ev.seq)!;
     return {
       session_id: entry.session_id,

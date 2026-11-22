@@ -176,19 +176,34 @@ describe('M2-T3 End-to-End Acceptance Integration', () => {
   });
 
   it('验收项 5: 临时把数据库文件改名，让插件无法打开 → 插件初始化优雅降级，DSH 照常对话', async () => {
-    // 传递一个指向无效/无权限目录的 dbPath 模拟无法打开
-    const mockCtx = {
-      tools: { register: () => {} },
-      commands: { register: () => {} },
-      on: () => {},
-    };
+    // 在临时目录中创建普通文件作为父目录，跨 Windows/Linux/macOS 确定性触发 SQLite 打开失败
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-db-degrade-'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const blocker = path.join(tmpDir, 'not-a-dir');
+      fs.writeFileSync(blocker, 'x');
 
-    // apply 应正常捕获并打印降级提示，不抛出异常
-    await expect(
-      apply(mockCtx, {
-        dbPath: 'Z:\\invalid_drive_path_cannot_open\\memory.db',
-      })
-    ).resolves.toBeUndefined();
+      const mockCtx = {
+        tools: { register: () => {} },
+        commands: { register: () => {} },
+        on: () => {},
+      };
+
+      // apply 应正常捕获并打印降级提示，不抛出异常
+      await expect(
+        apply(mockCtx, {
+          dbPath: path.join(blocker, 'memory.db'),
+          autoBootstrap: false,
+        })
+      ).resolves.toBeUndefined();
+
+      expect(warnSpy).toHaveBeenCalled();
+      const warnOutput = warnSpy.mock.calls.map((args) => args.join(' ')).join('\n');
+      expect(warnOutput).toContain('gracefully degraded');
+    } finally {
+      warnSpy.mockRestore();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('cleans up visibility, listeners, handlers, and DB when disposed mid-apply or on registration failure', async () => {
