@@ -1,33 +1,37 @@
+import type { PluginConfig } from '../config.js';
 import {
-  hydrateMemoryRow,
+  isWorkspaceExcluded,
+  memoryPrivacyFilterSQL,
+  memoryWorkspaceIds,
+} from '../core/privacy.js';
+import { workspaceId as normalizeWorkspaceId, resolveWorkspaceCwd } from '../core/scope.js';
+import { estimateTokens } from '../core/tokens.js';
+import { hasUntrustedOrigin, hasUserEvidence } from '../core/trust.js';
+import { removeCachedRuntimeEmbedding } from '../core/vector.js';
+import { addRelation, saveVersionSnapshot, upsertCandidate } from '../core/writer.js';
+import {
   type Db,
-  type RawEvent,
+  hydrateMemoryRow,
   type MemoryRecord,
   type MemoryRow,
   type OriginKind,
+  type RawEvent,
 } from '../types.js';
-import type { PluginConfig } from '../config.js';
-import type { EvidenceLedger } from './types.js';
+import { callOfflineLLM } from './llm.js';
+import { parseOutput } from './parse.js';
 import {
   PROMPT_DISTILL,
   packPromptWithinBudget,
   renderTranscript,
   truncateTextToTokenBudget,
 } from './prompts.js';
-import { parseOutput } from './parse.js';
-import { callOfflineLLM } from './llm.js';
 import { reconcileCandidate } from './reconciler.js';
-import { upsertCandidate, addRelation, saveVersionSnapshot } from '../core/writer.js';
-import { removeCachedRuntimeEmbedding } from '../core/vector.js';
-import { estimateTokens } from '../core/tokens.js';
-import { isWorkspaceExcluded, memoryPrivacyFilterSQL, memoryWorkspaceIds } from '../core/privacy.js';
-import { resolveWorkspaceCwd, workspaceId as normalizeWorkspaceId } from '../core/scope.js';
 import {
   getUnchangedReviewedMemory,
   isProtectedFromModelDiscard,
   sameMemoryOwner,
 } from './review-snapshot.js';
-import { hasUntrustedOrigin, hasUserEvidence } from '../core/trust.js';
+import type { EvidenceLedger } from './types.js';
 
 export interface DistillBatchOptions {
   sessionId?: string;
@@ -394,10 +398,10 @@ export async function distillSession(
     const nextSingleFails = prevSingleFails + 1;
     if (nextSingleFails >= 2) {
       db.transaction(() => {
-        db.run(
-          `UPDATE raw_events SET processed = 2 WHERE session_id = ? AND seq = ?`,
-          [targetSessionId, minSeq]
-        );
+        db.run(`UPDATE raw_events SET processed = 2 WHERE session_id = ? AND seq = ?`, [
+          targetSessionId,
+          minSeq,
+        ]);
         db.run(
           `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
           [
@@ -481,7 +485,9 @@ export async function distillSession(
         const item = batchTainted
           ? {
               ...rawItem,
-              origin_kinds: Array.from(new Set<OriginKind>([...rawItem.origin_kinds, ...batchUntrustedOrigins])),
+              origin_kinds: Array.from(
+                new Set<OriginKind>([...rawItem.origin_kinds, ...batchUntrustedOrigins])
+              ),
             }
           : rawItem;
 
@@ -521,7 +527,9 @@ export async function distillSession(
               !batchTainted &&
               !hasUntrustedOrigin(newMemory) &&
               hasUserEvidence(db, newMemory) &&
-              !item.origin_kinds.some((kind) => kind === 'web' || kind === 'tool' || kind === 'system');
+              !item.origin_kinds.some(
+                (kind) => kind === 'web' || kind === 'tool' || kind === 'system'
+              );
             if (oldMem.status === 'active' && !canActivate) continue;
 
             const slotConflict =

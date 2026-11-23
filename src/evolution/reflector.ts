@@ -1,19 +1,19 @@
-import type { Db, RawEvent } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import type { EvidenceLedger } from './types.js';
-import { jobFailure, type JobRecord, type JobHandlerResult } from '../jobs/types.js';
+import { redactSecrets } from '../core/privacy.js';
+import { resolveWorkspaceCwd, workspaceId } from '../core/scope.js';
+import { estimateTokens } from '../core/tokens.js';
+import { upsertCandidate } from '../core/writer.js';
+import { type JobHandlerResult, type JobRecord, jobFailure } from '../jobs/types.js';
+import type { Db, RawEvent } from '../types.js';
+import { callOfflineLLM } from './llm.js';
+import { parseOutput } from './parse.js';
 import {
   PROMPT_REFLECT,
   packPromptWithinBudget,
   renderTranscript,
   truncateTextToTokenBudget,
 } from './prompts.js';
-import { parseOutput } from './parse.js';
-import { callOfflineLLM } from './llm.js';
-import { upsertCandidate } from '../core/writer.js';
-import { workspaceId, resolveWorkspaceCwd } from '../core/scope.js';
-import { estimateTokens } from '../core/tokens.js';
-import { redactSecrets } from '../core/privacy.js';
+import type { EvidenceLedger } from './types.js';
 
 export interface ReflectPayload {
   sessionId?: string;
@@ -51,10 +51,7 @@ function estimateReflectPromptTokens(
  * 3) 所有错误事件 (is_error=1) 及其紧邻前后事件
  * 4) 从后向前补齐剩余预算内的最近上下文
  */
-function selectBoundedReflectEvents(
-  events: RawEvent[],
-  maxTranscriptTokens: number
-): RawEvent[] {
+function selectBoundedReflectEvents(events: RawEvent[], maxTranscriptTokens: number): RawEvent[] {
   if (events.length === 0 || maxTranscriptTokens <= 0) return [];
 
   // 一次性预渲染计算单行 token 成本，全程 O(N)
@@ -128,7 +125,11 @@ function selectBoundedReflectEvents(
     }
     // 若仍超预算，从最早事件开始裁剪直到只剩至少 1 条
     let remaining = keepMask.filter(Boolean).length;
-    for (let i = 0; i < selectedIndices.length - 1 && totalCost > maxTranscriptTokens && remaining > 1; i++) {
+    for (
+      let i = 0;
+      i < selectedIndices.length - 1 && totalCost > maxTranscriptTokens && remaining > 1;
+      i++
+    ) {
       if (keepMask[i]) {
         keepMask[i] = false;
         totalCost -= renderedCost[selectedIndices[i]];
@@ -223,7 +224,8 @@ export async function runReflectJob(
   }
 
   const hasValidTurn = typeof turn === 'number' && Number.isInteger(turn) && turn >= 1;
-  const hasTriggerSeq = typeof triggerSeq === 'number' && Number.isInteger(triggerSeq) && triggerSeq >= 1;
+  const hasTriggerSeq =
+    typeof triggerSeq === 'number' && Number.isInteger(triggerSeq) && triggerSeq >= 1;
 
   if (!sessionId || (!hasValidTurn && !hasTriggerSeq && !sig)) {
     return { action: 'failed', error: 'missing_session_or_turn', nonRetryable: true };
@@ -313,7 +315,12 @@ export async function runReflectJob(
   const nonEmptyEventWs = events.find((ev) => ev.workspace_id)?.workspace_id || '';
   const cwdWs = cwd && !/^[0-9a-f]{16}$/i.test(cwd) ? workspaceId(cwd) : cwd || '';
   const wsId =
-    nonEmptyEventWs || sessionOwnerRows[0]?.workspace_id || sigWorkspaceId || payloadWs || cwdWs || '';
+    nonEmptyEventWs ||
+    sessionOwnerRows[0]?.workspace_id ||
+    sigWorkspaceId ||
+    payloadWs ||
+    cwdWs ||
+    '';
   const realCwd =
     (cwd && cwd.trim() && !/^[0-9a-f]{16}$/i.test(cwd.trim())
       ? cwd.trim()

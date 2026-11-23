@@ -1,7 +1,7 @@
-import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import type { JobKind, JobRecord, JobHandler, JobHandlerResult } from './types.js';
 import { redactSecrets } from '../core/privacy.js';
+import type { Db } from '../types.js';
+import type { JobHandler, JobHandlerResult, JobKind, JobRecord } from './types.js';
 
 export type AbortReason = 'timeout' | 'shutdown';
 
@@ -149,11 +149,7 @@ export class JobRunner {
     return tracked;
   }
 
-  private async executeNextJob(
-    db: Db,
-    cfg: PluginConfig,
-    customNow?: number
-  ): Promise<boolean> {
+  private async executeNextJob(db: Db, cfg: PluginConfig, customNow?: number): Promise<boolean> {
     if (this.abortReason === 'shutdown') {
       return false;
     }
@@ -300,10 +296,10 @@ export class JobRunner {
 
     // 5. 根据执行结果更新 job 状态
     if (result.action === 'done') {
-      db.run(
-        `UPDATE jobs SET status = 'done', error = NULL, finished_at = ? WHERE id = ?`,
-        [finishedTime, job.id]
-      );
+      db.run(`UPDATE jobs SET status = 'done', error = NULL, finished_at = ? WHERE id = ?`, [
+        finishedTime,
+        job.id,
+      ]);
       clearSkipCount(db, job.id);
     } else if (result.action === 'skipped') {
       const cleanErr = redactSecrets(result.reason).text;
@@ -335,10 +331,11 @@ export class JobRunner {
     } else if (result.action === 'failed') {
       const cleanErr = redactSecrets(result.error).text;
       if (result.nonRetryable || newAttempts >= MAX_JOB_ATTEMPTS) {
-        db.run(
-          `UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`,
-          [cleanErr, finishedTime, job.id]
-        );
+        db.run(`UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`, [
+          cleanErr,
+          finishedTime,
+          job.id,
+        ]);
         clearSkipCount(db, job.id);
       } else {
         const backoff = getBackoffMs(newAttempts);
@@ -350,10 +347,11 @@ export class JobRunner {
     } else if (result.action === 'retry') {
       const cleanErr = redactSecrets(result.error).text;
       if (newAttempts >= MAX_JOB_ATTEMPTS) {
-        db.run(
-          `UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`,
-          [cleanErr, finishedTime, job.id]
-        );
+        db.run(`UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`, [
+          cleanErr,
+          finishedTime,
+          job.id,
+        ]);
         clearSkipCount(db, job.id);
       } else {
         const backoff = getBackoffMs(newAttempts);
@@ -397,10 +395,6 @@ export async function abortAndAwaitRunningJob(
   return defaultJobRunner.abortAndAwaitRunningJob(graceMs, reason);
 }
 
-export async function runNextJob(
-  db: Db,
-  cfg: PluginConfig,
-  now?: number
-): Promise<boolean> {
+export async function runNextJob(db: Db, cfg: PluginConfig, now?: number): Promise<boolean> {
   return defaultJobRunner.runNextJob(db, cfg, now);
 }

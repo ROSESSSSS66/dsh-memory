@@ -3,7 +3,7 @@ import net from 'node:net';
 import { URL } from 'node:url';
 
 const LOOPBACK_DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*localhost$/i;
-const SAFE_HOST_CHARS_RE = /^[a-zA-Z0-9.:\[\]-]+$/;
+const SAFE_HOST_CHARS_RE = /^[a-zA-Z0-9.:[\]-]+$/;
 const PORT_DIGITS_RE = /^\d{1,5}$/;
 
 export function getHeader(req: IncomingMessage | undefined, name: string): string | undefined {
@@ -51,7 +51,10 @@ function isLoopbackIp(ip: string): boolean {
 }
 
 function isLoopbackHostname(hostname: string): boolean {
-  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  const h = hostname
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
   if (!h) return false;
   return isLoopbackDomain(h) || isLoopbackIp(h);
 }

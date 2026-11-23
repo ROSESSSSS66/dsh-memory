@@ -1,11 +1,7 @@
-import type { Db, MemoryType, Scope } from '../../types.js';
 import { DEFAULTS } from '../../config.js';
-import { tokenSet, jaccard, extractEntities } from '../text.js';
-import {
-  computeLocalEmbedding,
-  cosineSimilarity,
-  getOrComputeEmbedding,
-} from '../vector.js';
+import type { Db, MemoryType, Scope } from '../../types.js';
+import { extractEntities, jaccard, tokenSet } from '../text.js';
+import { computeLocalEmbedding, cosineSimilarity, getOrComputeEmbedding } from '../vector.js';
 import type { WriterLimits } from './validate.js';
 
 interface WeaveCandidateRow {
@@ -40,11 +36,7 @@ export interface WeaveResult {
  * - 利用 ix_mem_weave(scope, workspace_id, status, utility DESC, updated_at DESC) 走索引查询，消除 COALESCE 全表扫描
  * - 批量从 memory_entities 加载候选实体，避免在 BEGIN IMMEDIATE 事务内重复执行 24 次正则抽取
  */
-export function weaveRelatedMemoryIds(
-  db: Db,
-  input: WeaveInput,
-  cfg?: WriterLimits
-): WeaveResult {
+export function weaveRelatedMemoryIds(db: Db, input: WeaveInput, cfg?: WriterLimits): WeaveResult {
   const { scope, workspace_id, session_id, type, rawContent, rawSummary, slotKey, hash } = input;
   const dupJaccard = cfg?.dupJaccard ?? DEFAULTS.dupJaccard;
 
@@ -139,11 +131,7 @@ export function weaveRelatedMemoryIds(
     const entBonus = Math.min(1, sharedEnts / 2);
     const affinity = 0.45 * vecSim + 0.35 * jaccardSim + 0.2 * entBonus;
 
-    if (
-      jaccardSim >= dupJaccard ||
-      affinity >= 0.48 ||
-      (sharedEnts >= 2 && vecSim >= 0.42)
-    ) {
+    if (jaccardSim >= dupJaccard || affinity >= 0.48 || (sharedEnts >= 2 && vecSim >= 0.42)) {
       scoredRelations.push({ id: cand.id, affinity: Math.max(jaccardSim, affinity) });
     }
   }

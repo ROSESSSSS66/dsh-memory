@@ -1,66 +1,67 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Db, MemoryRecord, MemoryStatus, MemoryType } from '../types.js';
+import { DEFAULTS, type PluginConfig } from '../config.js';
+import { autoBootstrapMemory } from '../core/bootstrap.js';
+import {
+  getAllCoreMemories,
+  getCoreMemory,
+  renderCoreMemoryMarkdown,
+  setCoreMemory,
+} from '../core/core-memory.js';
+import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
+import { formatHindsightReflectReport, runHindsightReflect } from '../core/hindsight.js';
+import {
+  atomicWriteFileSync,
+  exportMemoryBank,
+  exportToMarkdown,
+  importFromMarkdown,
+  importMemoryBank,
+  resolveTrashDir,
+  restoreFromTrash,
+} from '../core/markdown.js';
+import { workspaceId } from '../core/scope.js';
 import {
   get,
-  list,
-  stats,
-  history,
   getGraphData,
   getSubgraph,
+  history,
+  list,
   renderMermaidGraph,
+  stats,
 } from '../core/store.js';
 import {
+  browseVikingDirectory,
+  exportVikingContextTree,
+  findInVikingTree,
+  formatVikingEvolutionDiff,
+  getVikingEvolutionDiff,
+  importVikingContextTree,
+  resolveMemoryByVikingUriOrId,
+} from '../core/viking.js';
+import {
   approveCandidate,
-  rollback as rollbackVersion,
   confirmMemory,
   mergeMemories,
   restoreMemory,
-  pin as writerPin,
-  unpin as writerUnpin,
+  rollback as rollbackVersion,
   freeze as writerFreeze,
+  pin as writerPin,
   unfreeze as writerUnfreeze,
+  unpin as writerUnpin,
 } from '../core/writer.js';
-import {
-  exportToMarkdown,
-  importFromMarkdown,
-  restoreFromTrash,
-  resolveTrashDir,
-  exportMemoryBank,
-  importMemoryBank,
-  atomicWriteFileSync,
-} from '../core/markdown.js';
-import {
-  getCoreMemory,
-  getAllCoreMemories,
-  setCoreMemory,
-  renderCoreMemoryMarkdown,
-} from '../core/core-memory.js';
-import { reconcileAndUpsert } from '../evolution/reconciler.js';
-import { auditMemoryHealth, autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
-import { autoBootstrapMemory } from '../core/bootstrap.js';
-import {
-  runHindsightReflect,
-  formatHindsightReflectReport,
-} from '../core/hindsight.js';
-import {
-  resolveMemoryByVikingUriOrId,
-  browseVikingDirectory,
-  findInVikingTree,
-  getVikingEvolutionDiff,
-  formatVikingEvolutionDiff,
-  exportVikingContextTree,
-  importVikingContextTree,
-} from '../core/viking.js';
-import { workspaceId } from '../core/scope.js';
-import { runBackfill } from '../ingest/backfill.js';
 import { generateDataset } from '../eval/gen-dataset.js';
 import { runEvalSuite } from '../eval/runner.js';
-import { getLedgerUsage } from '../evolution/ledger.js';
 import { runStrategyEvolution } from '../evolution/lab.js';
-import { listStrategies, rollbackStrategy, initDefaultStrategy } from '../evolution/strategy.js';
-import { approveRepairProposal, rejectRepairProposal, listRepairProposals } from '../evolution/repair.js';
+import { getLedgerUsage } from '../evolution/ledger.js';
 import { exportDatabaseFile, importDatabaseFile } from '../evolution/maintenance.js';
+import { reconcileAndUpsert } from '../evolution/reconciler.js';
+import {
+  approveRepairProposal,
+  listRepairProposals,
+  rejectRepairProposal,
+} from '../evolution/repair.js';
+import { initDefaultStrategy, listStrategies, rollbackStrategy } from '../evolution/strategy.js';
+import { runBackfill } from '../ingest/backfill.js';
 import {
   forgetWithTrash,
   getMemoryDetail,
@@ -68,11 +69,8 @@ import {
   queryInjectionTelemetry7d,
   VALID_MEMORY_TYPES,
 } from '../service/index.js';
-import { DEFAULTS, type PluginConfig } from '../config.js';
-import {
-  isWorkspaceOrMappedExcluded,
-  resolveWorkspaceDir,
-} from './scope-resolver.js';
+import type { Db, MemoryRecord, MemoryStatus, MemoryType } from '../types.js';
+import { isWorkspaceOrMappedExcluded, resolveWorkspaceDir } from './scope-resolver.js';
 
 export interface CommandContext {
   workspaceId: string;
@@ -112,7 +110,12 @@ export function tokenizeCommandArgs(
     if (quote) {
       if (ch === quote) {
         quote = null;
-      } else if (quote === '"' && ch === '\\' && i + 1 < input.length && (input[i + 1] === '"' || input[i + 1] === '\\')) {
+      } else if (
+        quote === '"' &&
+        ch === '\\' &&
+        i + 1 < input.length &&
+        (input[i + 1] === '"' || input[i + 1] === '\\')
+      ) {
         // 仅在双引号内转义 \" 与 \\（当后面紧跟 " 或 \），不破坏 Windows 路径分隔符如 \Users
         if (input[i + 1] === '"') {
           current += '"';
@@ -163,11 +166,7 @@ interface CommandEntry {
   aliases?: string[];
   usage: string;
   allowWhenExcluded?: boolean;
-  execute: (
-    self: MemoryCommands,
-    rest: string[],
-    ctx: CommandContext
-  ) => CommandResult;
+  execute: (self: MemoryCommands, rest: string[], ctx: CommandContext) => CommandResult;
 }
 
 const COMMAND_TABLE: readonly CommandEntry[] = [
@@ -289,7 +288,11 @@ const COMMAND_TABLE: readonly CommandEntry[] = [
     usage: 'reflect [topic] [--no-synth]',
     execute: (self, rest, ctx) => {
       const cfg = self.getLiveConfig();
-      const topic = rest.filter((r) => !r.startsWith('-')).join(' ').trim() || undefined;
+      const topic =
+        rest
+          .filter((r) => !r.startsWith('-'))
+          .join(' ')
+          .trim() || undefined;
       const report = runHindsightReflect(self.getDb(), {
         workspaceId: ctx.workspaceId,
         sessionId: ctx.sessionId,
@@ -317,7 +320,12 @@ const COMMAND_TABLE: readonly CommandEntry[] = [
     name: 'list',
     usage: 'list [type] [status] [page]',
     execute: (self, rest, ctx) => {
-      const listFilter: { type?: MemoryType; status?: MemoryStatus; limit?: number; offset?: number } = {};
+      const listFilter: {
+        type?: MemoryType;
+        status?: MemoryStatus;
+        limit?: number;
+        offset?: number;
+      } = {};
       for (const arg of rest) {
         const low = arg.toLowerCase();
         if (STRICT_POSITIVE_INT_RE.test(low)) {
@@ -386,7 +394,10 @@ const COMMAND_TABLE: readonly CommandEntry[] = [
       const content = rest.slice(1).join(' ').trim();
       const wsId = workspaceId(ctx.workspaceId);
       if (block && content) {
-        const res = setCoreMemory(self.getDb(), block, content, { workspaceId: wsId, actor: 'user' });
+        const res = setCoreMemory(self.getDb(), block, content, {
+          workspaceId: wsId,
+          actor: 'user',
+        });
         return okResult(`Core memory block '${block}' ${res.action} successfully (id: ${res.id}).`);
       }
       if (block) {
@@ -681,7 +692,10 @@ const COMMAND_TABLE: readonly CommandEntry[] = [
       const propRow = self
         .getDb()
         .get<{ memory_id: string }>('SELECT memory_id FROM repair_proposals WHERE id = ?', [pId]);
-      if (propRow && !get(self.getDb(), propRow.memory_id, { workspaceId: wsId, sessionId: ctx.sessionId })) {
+      if (
+        propRow &&
+        !get(self.getDb(), propRow.memory_id, { workspaceId: wsId, sessionId: ctx.sessionId })
+      ) {
         return errResult(
           `Failed to approve repair proposal #${pId}: Proposal #${pId} not found in current scope.`
         );
@@ -705,7 +719,10 @@ const COMMAND_TABLE: readonly CommandEntry[] = [
       const propRow = self
         .getDb()
         .get<{ memory_id: string }>('SELECT memory_id FROM repair_proposals WHERE id = ?', [pId]);
-      if (propRow && !get(self.getDb(), propRow.memory_id, { workspaceId: wsId, sessionId: ctx.sessionId })) {
+      if (
+        propRow &&
+        !get(self.getDb(), propRow.memory_id, { workspaceId: wsId, sessionId: ctx.sessionId })
+      ) {
         return errResult(
           `Failed to reject repair proposal #${pId}: Proposal #${pId} not found in current scope.`
         );
@@ -1066,9 +1083,7 @@ export class MemoryCommands {
         `  - Session: ${s.session_id} | seq: ${s.seq} | kind: ${s.kind}${s.excerpt ? ` | excerpt: "${s.excerpt}"` : ''}`
     );
     const relLines = detail.relations.map((r) =>
-      r.direction === 'outgoing'
-        ? `  - [${r.rel}] -> ${r.to_id}`
-        : `  - [${r.rel}] <- ${r.from_id}`
+      r.direction === 'outgoing' ? `  - [${r.rel}] -> ${r.to_id}` : `  - [${r.rel}] <- ${r.from_id}`
     );
 
     const lines = [

@@ -11,22 +11,22 @@ import type {
   VikingContextTier,
 } from '../types.js';
 import { hydrateMemoryRow } from '../types.js';
-import { workspaceId, scopeFilterSQL, resolveWorkspaceCwd } from './scope.js';
-import { get, sources } from './store.js';
-import { redactSecrets, isWorkspaceExcluded } from './privacy.js';
-import { extractEntities, segment, tokenSet, isTokenMatch } from './text.js';
-import { budgetTokens } from './tokens.js';
-import { computeLocalEmbedding, cosineSimilarity, getOrComputeEmbedding } from './vector.js';
+import { classifyHindsightNetwork } from './hindsight.js';
 import {
-  serializeMemoryToMarkdown,
-  parseMemoryMarkdown,
   atomicWriteFileSync,
   isPathInsideRoot,
-  safeReadTextFileSync,
+  parseMemoryMarkdown,
   safeFilenameId,
+  safeReadTextFileSync,
+  serializeMemoryToMarkdown,
 } from './markdown.js';
-import { upsertCandidate, pin, freeze } from './writer.js';
-import { classifyHindsightNetwork } from './hindsight.js';
+import { isWorkspaceExcluded, redactSecrets } from './privacy.js';
+import { resolveWorkspaceCwd, scopeFilterSQL, workspaceId } from './scope.js';
+import { get, sources } from './store.js';
+import { extractEntities, isTokenMatch, segment, tokenSet } from './text.js';
+import { budgetTokens } from './tokens.js';
+import { computeLocalEmbedding, cosineSimilarity, getOrComputeEmbedding } from './vector.js';
+import { freeze, pin, upsertCandidate } from './writer.js';
 
 export const VIKING_CATEGORY_DESCRIPTIONS: Record<VikingCategory, string> = {
   core: 'Letta/OpenViking 常驻核心工作台记忆 (human / persona / project)',
@@ -100,11 +100,7 @@ export function classifyVikingCategory(
   if (memory.slot_key && memory.slot_key.startsWith('core:')) {
     return 'core';
   }
-  if (
-    memory.scope === 'user' &&
-    memory.slot_key &&
-    memory.slot_key.startsWith('user.profile')
-  ) {
+  if (memory.scope === 'user' && memory.slot_key && memory.slot_key.startsWith('user.profile')) {
     return 'profile';
   }
   if (memory.slot_key && memory.slot_key.startsWith('hindsight.model.')) {
@@ -242,10 +238,7 @@ export function resolveVikingUri(
       return `${domainPrefix}/${category}/hindsight/${shortId}`;
     }
 
-    const cleanSlot = memory.slot_key
-      .split('.')
-      .map(sanitizePathSegment)
-      .filter(Boolean);
+    const cleanSlot = memory.slot_key.split('.').map(sanitizePathSegment).filter(Boolean);
     if (cleanSlot.length > 0) {
       return `${domainPrefix}/${category}/${cleanSlot.join('/')}`;
     }
@@ -430,7 +423,13 @@ export function buildTieredMemoryView(
  */
 export function normalizeVikingUriInput(raw?: string | null): string {
   const trimmed = (raw || '').trim();
-  if (!trimmed || trimmed === '/' || trimmed === 'viking://' || trimmed === 'viking://~' || trimmed === 'viking://~/') {
+  if (
+    !trimmed ||
+    trimmed === '/' ||
+    trimmed === 'viking://' ||
+    trimmed === 'viking://~' ||
+    trimmed === 'viking://~/'
+  ) {
     return 'viking://';
   }
 
@@ -563,7 +562,12 @@ function matchesVikingSubtree(
     if (parsed.category === 'preferences' && parsed.explicitWorkspaceDomain) {
       if (item.record.scope !== 'workspace') return false;
     }
-    return matchesSubFilterBoundary(item.uri, parsed.category, item.record.slot_key, parsed.subFilter);
+    return matchesSubFilterBoundary(
+      item.uri,
+      parsed.category,
+      item.record.slot_key,
+      parsed.subFilter
+    );
   }
 
   return false;
@@ -615,14 +619,16 @@ function enforceTokenCap(
     kept.pop();
   }
 
-  const fallback =
-    remaining > 0 ? `${header}\n... (+${totalCount} more)` : header;
+  const fallback = remaining > 0 ? `${header}\n... (+${totalCount} more)` : header;
   return budgetTokens(fallback) <= maxTokens
     ? fallback
     : `${fallback.slice(0, Math.min(fallback.length, 400))}...`;
 }
 
-function capSingleOutputToTokens(text: string, maxTokens: number = MAX_VIKING_OUTPUT_TOKENS): string {
+function capSingleOutputToTokens(
+  text: string,
+  maxTokens: number = MAX_VIKING_OUTPUT_TOKENS
+): string {
   if (budgetTokens(text) <= maxTokens) return text;
   let cut = text;
   const suffix = '\n... (truncated to token limit)';
@@ -740,11 +746,7 @@ export function resolveMemoryByVikingUriOrId(
 
   // 3. 将 category 谓词下推至 SQL WHERE，消除 LIMIT 300 饥饿，并使用批量确定性 URI 精确匹配
   const catFilter = parsedTarget.category ? categoryFilterSQL(parsedTarget.category) : null;
-  const whereParts = [
-    `(${scope.sql})`,
-    `status IN ('active', 'frozen')`,
-    `type != 'meta'`,
-  ];
+  const whereParts = [`(${scope.sql})`, `status IN ('active', 'frozen')`, `type != 'meta'`];
   const params: unknown[] = [...scope.params];
   if (catFilter) {
     whereParts.push(catFilter.sql);
@@ -904,11 +906,7 @@ export function browseVikingDirectory(
 
   // 2. 子目录或单节点浏览：先下推 categoryFilterSQL 至 WHERE，避免 LIMIT 截断
   const parsedTarget = parseVikingTarget(targetUri, options.uri);
-  const whereParts = [
-    `(${scope.sql})`,
-    `status IN ('active', 'frozen')`,
-    `type != 'meta'`,
-  ];
+  const whereParts = [`(${scope.sql})`, `status IN ('active', 'frozen')`, `type != 'meta'`];
   const params: unknown[] = [...scope.params];
   if (parsedTarget.category) {
     const catFilter = categoryFilterSQL(parsedTarget.category);
@@ -952,10 +950,7 @@ export function browseVikingDirectory(
   }
 
   // 若精确命中单条叶子节点且请求 L2（或精确匹配单条 URI），直接展示分层详情
-  if (
-    matched.length === 1 &&
-    (tier === 'L2' || canonUri(matched[0].uri) === canonUri(targetUri))
-  ) {
+  if (matched.length === 1 && (tier === 'L2' || canonUri(matched[0].uri) === canonUri(targetUri))) {
     const hit = matched[0];
     const srcList = sources(db, hit.record.id, hit.record.content_rev);
     const view = buildTieredMemoryView(hit.record, {
@@ -1497,15 +1492,9 @@ export function findInVikingTree(
   const parsedTarget = parseVikingTarget(targetUri, options.uri);
 
   const scope = scopeFilterSQL({ workspaceId: wsId, sessionId: options.sessionId }, 'm');
-  const catFilter = parsedTarget.category
-    ? categoryFilterSQL(parsedTarget.category, 'm')
-    : null;
+  const catFilter = parsedTarget.category ? categoryFilterSQL(parsedTarget.category, 'm') : null;
 
-  const baseWhereParts = [
-    `(${scope.sql})`,
-    `m.status IN ('active', 'frozen')`,
-    `m.type != 'meta'`,
-  ];
+  const baseWhereParts = [`(${scope.sql})`, `m.status IN ('active', 'frozen')`, `m.type != 'meta'`];
   const baseParams: unknown[] = [...scope.params];
   if (catFilter) {
     baseWhereParts.push(catFilter.sql);
@@ -1577,7 +1566,8 @@ export function findInVikingTree(
   const qVec = computeLocalEmbedding(rawQuery);
   const qLower = rawQuery.toLowerCase();
 
-  const scored: Array<{ record: MemoryRecord; uri: string; entities: string[]; score: number }> = [];
+  const scored: Array<{ record: MemoryRecord; uri: string; entities: string[]; score: number }> =
+    [];
 
   for (const r of rows) {
     const ents = entitiesByMem.get(r.id) || [];
@@ -1603,10 +1593,7 @@ export function findInVikingTree(
     if (matchedCount === 0 && exactSub === 0 && vecSim < 0.52) continue;
 
     const score =
-      0.48 * Math.max(lexCov, exactSub) +
-      0.34 * vecSim +
-      0.1 * r.utility +
-      0.08 * r.confidence;
+      0.48 * Math.max(lexCov, exactSub) + 0.34 * vecSim + 0.1 * r.utility + 0.08 * r.confidence;
     scored.push({ record: r, uri, entities: ents, score });
   }
 
@@ -1850,7 +1837,8 @@ export function getVikingEvolutionDiff(
             uri,
             network: classifyHindsightNetwork(r.type, r.slot_key),
             version: r.version,
-            fromSummary: redactSecrets(String(snap.summary || snap.content || '').slice(0, 80)).text,
+            fromSummary: redactSecrets(String(snap.summary || snap.content || '').slice(0, 80))
+              .text,
             toSummary: buildL0Abstract(r),
             reason: prevVer.reason,
             updatedAt: r.updated_at,

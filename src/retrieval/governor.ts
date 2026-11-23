@@ -1,10 +1,10 @@
-import type { Db, MemoryRecord, VikingContextTier } from '../types.js';
-import type { ScoredCandidate } from './fuse.js';
+import { jaccard, tokenSet } from '../core/text.js';
 import { budgetTokens, estimateTokens } from '../core/tokens.js';
-import { tokenSet, jaccard } from '../core/text.js';
 import { cosineSimilarity, getOrComputeEmbedding } from '../core/vector.js';
 import { buildInlineL1Overview } from '../core/viking.js';
-import { render, renderLine, wrapRenderedLines, type RenderLineOptions } from './render.js';
+import type { Db, MemoryRecord, VikingContextTier } from '../types.js';
+import type { ScoredCandidate } from './fuse.js';
+import { type RenderLineOptions, render, renderLine, wrapRenderedLines } from './render.js';
 
 const TARGET_L1_MAX_CHARS = 220;
 
@@ -22,8 +22,7 @@ export function computeHybridOverlap(
   const lexSim = jaccard(aTokens, bTokens);
   if (!aVec || !bVec) return lexSim;
   const vecSim = Math.max(0, cosineSimilarity(aVec, bVec));
-  const scaledVec =
-    sameType && vecSim >= 0.58 ? 0.95 * vecSim : vecSim >= 0.8 ? 0.8 * vecSim : 0;
+  const scaledVec = sameType && vecSim >= 0.58 ? 0.95 * vecSim : vecSim >= 0.8 ? 0.8 * vecSim : 0;
   return Math.max(lexSim, scaledVec);
 }
 
@@ -113,10 +112,7 @@ function approxShortCode(id: string): string {
  * - 懒缓存单候选 L2/L1/L0 渲染行与 budgetTokens，将 MMR 循环内的 O(K²) 全量渲染优化为 O(K) 增量追踪
  * - Step 6 严格复核实测渲染块，先原地 L2 -> L1 -> L0 渐进降级，仍超限再弹出
  */
-export function governWithResult(
-  cands: ScoredCandidate[],
-  opts: GovernOptions
-): GovernResult {
+export function governWithResult(cands: ScoredCandidate[], opts: GovernOptions): GovernResult {
   const droppedReasons: Record<string, string> = {};
 
   if (!cands || cands.length === 0 || opts.budget <= 0 || opts.maxItems <= 0) {
@@ -227,7 +223,8 @@ export function governWithResult(
 
   const selected: SelectedItem[] = [];
   const selectedLines: string[] = [];
-  const selectedFeatures: Array<{ tokens: Set<string>; vec: Float32Array | null; type: string }> = [];
+  const selectedFeatures: Array<{ tokens: Set<string>; vec: Float32Array | null; type: string }> =
+    [];
 
   // 预计算空包裹层预算开销，结合行级懒缓存实现 O(K) 增量预算评估
   const wrapperBudget = budgetTokens(wrapRenderedLines([''], strategyVersion, layer));
@@ -473,9 +470,6 @@ export function governWithResult(
 /**
  * Token 预算装箱 (§5.7) — 保留既有返回 SelectedItem[] 签名以完全兼容既有调用方
  */
-export function govern(
-  cands: ScoredCandidate[],
-  opts: GovernOptions
-): SelectedItem[] {
+export function govern(cands: ScoredCandidate[], opts: GovernOptions): SelectedItem[] {
   return governWithResult(cands, opts).items;
 }

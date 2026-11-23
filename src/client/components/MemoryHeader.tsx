@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import { getMessages } from '../i18n.js';
 import type { UiLocale, WorkspaceOption } from '../types.js';
 
@@ -20,7 +20,10 @@ export interface MemoryHeaderProps {
 
 function formatWorkspaceLabel(ws: WorkspaceOption, countLabel: (n: number) => string): string {
   const base = ws.path
-    ? ws.path.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || ws.workspaceId
+    ? ws.path
+        .replace(/[/\\]+$/, '')
+        .split(/[/\\]/)
+        .pop() || ws.workspaceId
     : ws.workspaceId;
   return `${base} (${countLabel(ws.activeMemories)})`;
 }
@@ -42,11 +45,7 @@ export function MemoryHeader({
 }: MemoryHeaderProps) {
   const t = getMessages(locale);
 
-  const statusText = offline
-    ? t.header.offline
-    : loading
-      ? t.header.loading
-      : t.header.running;
+  const statusText = offline ? t.header.offline : loading ? t.header.loading : t.header.running;
 
   const dotClass = offline
     ? 'dshm-status-dot dshm-status-dot--offline'
@@ -54,9 +53,7 @@ export function MemoryHeader({
       ? 'dshm-status-dot dshm-status-dot--loading'
       : 'dshm-status-dot';
 
-  const showWorkspaceSelector = Boolean(
-    workspaces && workspaces.length > 1 && onSelectWorkspace
-  );
+  const showWorkspaceSelector = Boolean(workspaces && workspaces.length > 1 && onSelectWorkspace);
 
   return (
     <header className="dshm-studio-header">
@@ -108,9 +105,7 @@ export function MemoryHeader({
             value={selectedWorkspaceId}
             onChange={(e) => onSelectWorkspace(e.target.value)}
           >
-            {!selectedWorkspaceId ? (
-              <option value="">{t.header.defaultWorkspace}</option>
-            ) : null}
+            {!selectedWorkspaceId ? <option value="">{t.header.defaultWorkspace}</option> : null}
             {workspaces.map((ws) => (
               <option key={ws.workspaceId} value={ws.workspaceId}>
                 {formatWorkspaceLabel(ws, t.header.workspaceCount)}
@@ -134,15 +129,11 @@ export function MemoryHeader({
             className="dshm-config-btn-dot"
             aria-hidden="true"
             style={{
-              background: llmConfigured
-                ? 'var(--dshm-valley-green)'
-                : 'var(--dshm-accent)',
+              background: llmConfigured ? 'var(--dshm-valley-green)' : 'var(--dshm-accent)',
             }}
           />
           <span>{t.header.configButton}</span>
-          {llmModelName ? (
-            <span className="dshm-config-btn-model">{llmModelName}</span>
-          ) : null}
+          {llmModelName ? <span className="dshm-config-btn-model">{llmModelName}</span> : null}
         </button>
       </div>
     </header>

@@ -363,8 +363,7 @@ const ZH_MESSAGES: UiMessages = {
     },
     dshHostDefaultModel: '宿主默认模型',
     consentLabel: '授权后台慢环外发数据',
-    consentDesc:
-      '开启后，后台提炼与冲突消解可将脱敏文本发送至以下模型端点；关闭后仅在本地运行。',
+    consentDesc: '开启后，后台提炼与冲突消解可将脱敏文本发送至以下模型端点；关闭后仅在本地运行。',
     baseUrlLabel: '接口地址 (Base URL)',
     baseUrlPlaceholderDsh: '当前使用 DSH 宿主内置通道（输入地址可切换自定义接口）',
     baseUrlPlaceholderCustom: 'https://api.deepseek.com/v1',
@@ -449,8 +448,7 @@ const EN_MESSAGES: UiMessages = {
   },
   banners: {
     offlineTitle: 'Unable to reach memory service',
-    offlineDetail: (detail) =>
-      `Live sync paused (${detail}). Local storage remains intact.`,
+    offlineDetail: (detail) => `Live sync paused (${detail}). Local storage remains intact.`,
     retry: 'Retry',
     pendingRepairs: (count) =>
       count === 1 ? '1 pending repair proposal' : `${count} pending repair proposals`,
@@ -663,8 +661,7 @@ const EN_MESSAGES: UiMessages = {
     statusTestWarn: (error) => `Saved · connectivity notice: ${error}`,
     statusSaveErr: (error) => `Save failed: ${error}`,
     validationInvalidCalls: 'Daily calls cap must be an integer between 1 and 10000',
-    validationInvalidTokens:
-      'Daily token cap must be an integer between 1000 and 100000000',
+    validationInvalidTokens: 'Daily token cap must be an integer between 1000 and 100000000',
     validationInvalidDim: 'Vector dimension must be an integer between 0 and 8192',
     footerHint: 'Esc or click outside to close',
   },

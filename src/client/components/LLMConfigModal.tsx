@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback, useId } from 'react';
+import type React from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { getMessages } from '../i18n.js';
 import type {
   ConfigSavePayload,
@@ -69,10 +70,7 @@ export interface LLMConfigModalProps {
   returnFocusRef?: React.RefObject<HTMLElement | null>;
   onClose: () => void;
   onSave: (payload: ConfigSavePayload) => Promise<void>;
-  onTestConnection?: (
-    payload: LLMTestPayload,
-    signal?: AbortSignal
-  ) => Promise<LLMTestResult>;
+  onTestConnection?: (payload: LLMTestPayload, signal?: AbortSignal) => Promise<LLMTestResult>;
 }
 
 const PRESETS: Array<{
@@ -206,14 +204,12 @@ export function LLMConfigModal({
   const [dailyCalls, setDailyCalls] = useState('40');
   const [dailyTokens, setDailyTokens] = useState('200000');
 
-  const [embeddingProvider, setEmbeddingProvider] =
-    useState<EmbeddingProviderType>('none');
+  const [embeddingProvider, setEmbeddingProvider] = useState<EmbeddingProviderType>('none');
   const [embeddingBaseURL, setEmbeddingBaseURL] = useState('');
   const [embeddingModel, setEmbeddingModel] = useState('');
   const [embeddingDim, setEmbeddingDim] = useState('0');
   const [embeddingApiKey, setEmbeddingApiKey] = useState('');
-  const [clearEmbeddingKeyRequested, setClearEmbeddingKeyRequested] =
-    useState(false);
+  const [clearEmbeddingKeyRequested, setClearEmbeddingKeyRequested] = useState(false);
   const [embeddingApiKeyEnv, setEmbeddingApiKeyEnv] = useState('');
 
   const [dirty, setDirty] = useState(false);
@@ -316,18 +312,14 @@ export function LLMConfigModal({
       setStatusTone('muted');
       if (typeof document !== 'undefined') {
         previouslyFocusedRef.current =
-          document.activeElement instanceof HTMLElement
-            ? document.activeElement
-            : null;
+          document.activeElement instanceof HTMLElement ? document.activeElement : null;
       }
       const frame =
         typeof requestAnimationFrame === 'function'
           ? requestAnimationFrame(() => {
               const sheet = sheetRef.current;
               if (!sheet) return;
-              const firstFocusable = sheet.querySelector<HTMLElement>(
-                FOCUSABLE_SELECTOR
-              );
+              const firstFocusable = sheet.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
               if (firstFocusable) {
                 firstFocusable.focus();
               } else {
@@ -390,9 +382,7 @@ export function LLMConfigModal({
 
     const emb = config.embedding;
     const nextEmbBaseUrl = emb?.baseURL || '';
-    setEmbeddingProvider(
-      emb?.provider === 'openai-compatible' ? 'openai-compatible' : 'none'
-    );
+    setEmbeddingProvider(emb?.provider === 'openai-compatible' ? 'openai-compatible' : 'none');
     setEmbeddingBaseURL(nextEmbBaseUrl);
     lastEmbOriginRef.current = getOrigin(nextEmbBaseUrl);
     setEmbeddingModel(emb?.model || '');
@@ -456,8 +446,7 @@ export function LLMConfigModal({
             model: cur.useDshLlm ? trimmedModel : trimmedModel || 'deepseek-chat',
             apiKeyEnv: trimmedApiKeyEnv,
             apiKey: trimmedApiKey !== '' ? trimmedApiKey : undefined,
-            clearApiKey:
-              cur.clearKeyRequested && trimmedApiKey === '' ? true : undefined,
+            clearApiKey: cur.clearKeyRequested && trimmedApiKey === '' ? true : undefined,
             protocol: cur.protocol,
           },
           privacy: {
@@ -470,9 +459,7 @@ export function LLMConfigModal({
             apiKeyEnv: trimmedEmbApiKeyEnv,
             apiKey: trimmedEmbApiKey !== '' ? trimmedEmbApiKey : undefined,
             clearApiKey:
-              cur.clearEmbeddingKeyRequested && trimmedEmbApiKey === ''
-                ? true
-                : undefined,
+              cur.clearEmbeddingKeyRequested && trimmedEmbApiKey === '' ? true : undefined,
             dim: dimVal,
           },
           dailyLLMCalls: callsVal,
@@ -481,8 +468,7 @@ export function LLMConfigModal({
       } catch (err: unknown) {
         if (seq !== saveSeqRef.current) return false;
         setSaving(false);
-        const msg =
-          err instanceof Error && err.message ? err.message : String(err ?? '');
+        const msg = err instanceof Error && err.message ? err.message : String(err ?? '');
         setStatusText(t.modal.statusSaveErr(msg));
         setStatusTone('err');
         return false;
@@ -510,9 +496,7 @@ export function LLMConfigModal({
       }
 
       const canVerify =
-        verifyAfter &&
-        Boolean(onTestConnection) &&
-        (cur.useDshLlm || Boolean(trimmedBaseUrl));
+        verifyAfter && Boolean(onTestConnection) && (cur.useDshLlm || Boolean(trimmedBaseUrl));
 
       if (canVerify && onTestConnection) {
         const controller = new AbortController();
@@ -541,9 +525,7 @@ export function LLMConfigModal({
             return true;
           }
           if (testRes.ok) {
-            setStatusText(
-              t.modal.statusTestOk(testRes.latencyMs ?? 0, testRes.model)
-            );
+            setStatusText(t.modal.statusTestOk(testRes.latencyMs ?? 0, testRes.model));
             setStatusTone('ok');
             return true;
           }
@@ -560,10 +542,7 @@ export function LLMConfigModal({
           ) {
             return true;
           }
-          const msg =
-            err instanceof Error && err.message
-              ? err.message
-              : String(err ?? '');
+          const msg = err instanceof Error && err.message ? err.message : String(err ?? '');
           setStatusText(t.modal.statusTestWarn(msg));
           setStatusTone('err');
           return true;
@@ -574,9 +553,7 @@ export function LLMConfigModal({
         }
       }
 
-      setStatusText(
-        cur.useDshLlm ? t.modal.statusSavedDsh : t.modal.statusSavedOk
-      );
+      setStatusText(cur.useDshLlm ? t.modal.statusSavedDsh : t.modal.statusSavedOk);
       setStatusTone('ok');
       return true;
     },
@@ -609,11 +586,7 @@ export function LLMConfigModal({
         if (!sheet) return;
         const focusables = Array.from(
           sheet.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
-        ).filter(
-          (el) =>
-            el.offsetParent !== null ||
-            el.getClientRects().length > 0
-        );
+        ).filter((el) => el.offsetParent !== null || el.getClientRects().length > 0);
         if (focusables.length === 0) {
           e.preventDefault();
           sheet.focus();
@@ -657,11 +630,7 @@ export function LLMConfigModal({
 
   const handleBaseUrlChange = (nextVal: string) => {
     const nextOrigin = getOrigin(nextVal);
-    if (
-      lastOriginRef.current &&
-      nextOrigin &&
-      nextOrigin !== lastOriginRef.current
-    ) {
+    if (lastOriginRef.current && nextOrigin && nextOrigin !== lastOriginRef.current) {
       // P0 Leak Fix: wipe staged API key whenever endpoint origin changes
       setApiKey('');
       setClearKeyRequested(false);
@@ -676,11 +645,7 @@ export function LLMConfigModal({
 
   const handleEmbeddingBaseUrlChange = (nextVal: string) => {
     const nextOrigin = getOrigin(nextVal);
-    if (
-      lastEmbOriginRef.current &&
-      nextOrigin &&
-      nextOrigin !== lastEmbOriginRef.current
-    ) {
+    if (lastEmbOriginRef.current && nextOrigin && nextOrigin !== lastEmbOriginRef.current) {
       setEmbeddingApiKey('');
       setClearEmbeddingKeyRequested(false);
     }
@@ -693,11 +658,7 @@ export function LLMConfigModal({
 
   const modalContent = (
     <div className="dshm-portal-root" data-dsh-claude-quiet="">
-      <div
-        className="dshm-backdrop"
-        data-dsh-claude-quiet=""
-        onClick={() => void handleClose()}
-      >
+      <div className="dshm-backdrop" data-dsh-claude-quiet="" onClick={() => void handleClose()}>
         <div
           ref={sheetRef}
           className="dshm-sheet"
@@ -773,8 +734,7 @@ export function LLMConfigModal({
                 </option>
                 {PRESETS.map((p) => (
                   <option key={p.key} value={p.key}>
-                    {t.modal.presets[p.key] || p.key} ·{' '}
-                    {p.model || t.modal.dshHostDefaultModel}
+                    {t.modal.presets[p.key] || p.key} · {p.model || t.modal.dshHostDefaultModel}
                   </option>
                 ))}
               </select>
@@ -797,9 +757,7 @@ export function LLMConfigModal({
                     spellCheck={false}
                     onChange={(e) => handleBaseUrlChange(e.target.value)}
                     placeholder={
-                      useDshLlm
-                        ? t.modal.baseUrlPlaceholderDsh
-                        : t.modal.baseUrlPlaceholderCustom
+                      useDshLlm ? t.modal.baseUrlPlaceholderDsh : t.modal.baseUrlPlaceholderCustom
                     }
                   />
                 </div>
@@ -819,15 +777,9 @@ export function LLMConfigModal({
                       markDirty();
                     }}
                   >
-                    <option value="chat/completions">
-                      {t.modal.protocols.chatCompletions}
-                    </option>
-                    <option value="responses">
-                      {t.modal.protocols.responses}
-                    </option>
-                    <option value="messages">
-                      {t.modal.protocols.messages}
-                    </option>
+                    <option value="chat/completions">{t.modal.protocols.chatCompletions}</option>
+                    <option value="responses">{t.modal.protocols.responses}</option>
+                    <option value="messages">{t.modal.protocols.messages}</option>
                   </select>
                 </div>
               </div>
@@ -851,9 +803,7 @@ export function LLMConfigModal({
                   markDirty();
                 }}
                 placeholder={
-                  useDshLlm
-                    ? t.modal.modelPlaceholderDsh
-                    : t.modal.modelPlaceholderCustom
+                  useDshLlm ? t.modal.modelPlaceholderDsh : t.modal.modelPlaceholderCustom
                 }
               />
             </div>
@@ -877,17 +827,13 @@ export function LLMConfigModal({
                         <span>
                           {clearKeyRequested
                             ? t.modal.apiKeyClearing
-                            : t.modal.apiKeySaved(
-                                config.offlineLLM.apiKeyMasked || '****'
-                              )}
+                            : t.modal.apiKeySaved(config.offlineLLM.apiKeyMasked || '****')}
                         </span>
                         <button
                           type="button"
                           className="dshm-key-action-btn"
                           aria-label={
-                            clearKeyRequested
-                              ? t.modal.apiKeyUndoBtn
-                              : t.modal.apiKeyClearAria
+                            clearKeyRequested ? t.modal.apiKeyUndoBtn : t.modal.apiKeyClearAria
                           }
                           onClick={() => {
                             setClearKeyRequested((prev) => !prev);
@@ -895,9 +841,7 @@ export function LLMConfigModal({
                             markDirty();
                           }}
                         >
-                          {clearKeyRequested
-                            ? t.modal.apiKeyUndoBtn
-                            : t.modal.apiKeyClearBtn}
+                          {clearKeyRequested ? t.modal.apiKeyUndoBtn : t.modal.apiKeyClearBtn}
                         </button>
                       </span>
                     ) : null}
@@ -924,10 +868,7 @@ export function LLMConfigModal({
 
                 <div className="dshm-field-col">
                   <div className="dshm-settings-label-row">
-                    <label
-                      htmlFor={apiKeyEnvId}
-                      className="dshm-settings-label"
-                    >
+                    <label htmlFor={apiKeyEnvId} className="dshm-settings-label">
                       {t.modal.apiKeyEnvLabel}
                     </label>
                   </div>
@@ -952,10 +893,7 @@ export function LLMConfigModal({
               <div className="dshm-field-grid-2">
                 <div className="dshm-field-col">
                   <div className="dshm-settings-label-row">
-                    <label
-                      htmlFor={dailyCallsId}
-                      className="dshm-settings-label"
-                    >
+                    <label htmlFor={dailyCallsId} className="dshm-settings-label">
                       {t.modal.dailyCallsLabel}
                     </label>
                   </div>
@@ -976,10 +914,7 @@ export function LLMConfigModal({
 
                 <div className="dshm-field-col">
                   <div className="dshm-settings-label-row">
-                    <label
-                      htmlFor={dailyTokensId}
-                      className="dshm-settings-label"
-                    >
+                    <label htmlFor={dailyTokensId} className="dshm-settings-label">
                       {t.modal.dailyTokensLabel}
                     </label>
                   </div>
@@ -1020,10 +955,7 @@ export function LLMConfigModal({
 
               <div className="dshm-modal-details-body">
                 <div className="dshm-field-col">
-                  <label
-                    htmlFor={embProviderId}
-                    className="dshm-settings-label"
-                  >
+                  <label htmlFor={embProviderId} className="dshm-settings-label">
                     {t.modal.embeddingProviderLabel}
                   </label>
                   <select
@@ -1032,27 +964,20 @@ export function LLMConfigModal({
                     value={embeddingProvider}
                     onChange={(e) => {
                       const next =
-                        e.target.value === 'openai-compatible'
-                          ? 'openai-compatible'
-                          : 'none';
+                        e.target.value === 'openai-compatible' ? 'openai-compatible' : 'none';
                       setEmbeddingProvider(next);
                       markDirty();
                     }}
                   >
                     <option value="none">{t.modal.embeddingProviderNone}</option>
-                    <option value="openai-compatible">
-                      {t.modal.embeddingProviderOpenai}
-                    </option>
+                    <option value="openai-compatible">{t.modal.embeddingProviderOpenai}</option>
                   </select>
                 </div>
 
                 {embeddingProvider === 'openai-compatible' ? (
                   <>
                     <div className="dshm-field-col">
-                      <label
-                        htmlFor={embBaseUrlId}
-                        className="dshm-settings-label"
-                      >
+                      <label htmlFor={embBaseUrlId} className="dshm-settings-label">
                         {t.modal.embeddingBaseUrlLabel}
                       </label>
                       <input
@@ -1061,19 +986,14 @@ export function LLMConfigModal({
                         spellCheck={false}
                         className="dshm-field-input dshm-field-input--mono"
                         value={embeddingBaseURL}
-                        onChange={(e) =>
-                          handleEmbeddingBaseUrlChange(e.target.value)
-                        }
+                        onChange={(e) => handleEmbeddingBaseUrlChange(e.target.value)}
                         placeholder={t.modal.embeddingBaseUrlPlaceholder}
                       />
                     </div>
 
                     <div className="dshm-field-grid-ratio">
                       <div className="dshm-field-col">
-                        <label
-                          htmlFor={embModelId}
-                          className="dshm-settings-label"
-                        >
+                        <label htmlFor={embModelId} className="dshm-settings-label">
                           {t.modal.embeddingModelLabel}
                         </label>
                         <input
@@ -1091,10 +1011,7 @@ export function LLMConfigModal({
                       </div>
 
                       <div className="dshm-field-col">
-                        <label
-                          htmlFor={embDimId}
-                          className="dshm-settings-label"
-                        >
+                        <label htmlFor={embDimId} className="dshm-settings-label">
                           {t.modal.embeddingDimLabel}
                         </label>
                         <input
@@ -1116,10 +1033,7 @@ export function LLMConfigModal({
                     <div className="dshm-field-grid-key">
                       <div className="dshm-field-col">
                         <div className="dshm-settings-label-row">
-                          <label
-                            htmlFor={embApiKeyId}
-                            className="dshm-settings-label"
-                          >
+                          <label htmlFor={embApiKeyId} className="dshm-settings-label">
                             {t.modal.embeddingApiKeyLabel}
                           </label>
                           {config?.embedding?.hasApiKey ? (
@@ -1133,9 +1047,7 @@ export function LLMConfigModal({
                               <span>
                                 {clearEmbeddingKeyRequested
                                   ? t.modal.apiKeyClearing
-                                  : t.modal.apiKeySaved(
-                                      config.embedding.apiKeyMasked || '****'
-                                    )}
+                                  : t.modal.apiKeySaved(config.embedding.apiKeyMasked || '****')}
                               </span>
                               <button
                                 type="button"
@@ -1146,9 +1058,7 @@ export function LLMConfigModal({
                                     : t.modal.apiKeyClearAria
                                 }
                                 onClick={() => {
-                                  setClearEmbeddingKeyRequested(
-                                    (prev) => !prev
-                                  );
+                                  setClearEmbeddingKeyRequested((prev) => !prev);
                                   setEmbeddingApiKey('');
                                   markDirty();
                                 }}
@@ -1181,10 +1091,7 @@ export function LLMConfigModal({
                       </div>
 
                       <div className="dshm-field-col">
-                        <label
-                          htmlFor={embApiKeyEnvId}
-                          className="dshm-settings-label"
-                        >
+                        <label htmlFor={embApiKeyEnvId} className="dshm-settings-label">
                           {t.modal.embeddingApiKeyEnvLabel}
                         </label>
                         <input

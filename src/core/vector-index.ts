@@ -1,9 +1,5 @@
 import type { Db, Scope } from '../types.js';
-import {
-  computeLocalEmbedding,
-  decodeEmbeddingBlob,
-  DEFAULT_LOCAL_VECTOR_DIM,
-} from './vector.js';
+import { computeLocalEmbedding, DEFAULT_LOCAL_VECTOR_DIM, decodeEmbeddingBlob } from './vector.js';
 
 export interface VectorIndexEntryMeta {
   id: string;
@@ -244,9 +240,7 @@ function readPartitionStamp(
   workspaceId: string,
   sessionId: string
 ): PartitionStamp {
-  let row:
-    | { cnt: number; max_rid: number; max_upd: number }
-    | undefined;
+  let row: { cnt: number; max_rid: number; max_upd: number } | undefined;
 
   if (scopeKind === 'shared') {
     // Hits COVERING INDEX ix_mem_weave(scope, workspace_id, status, utility, updated_at) — zero table heap reads
@@ -304,7 +298,10 @@ function stampsEqual(a: PartitionStamp, b: PartitionStamp): boolean {
   );
 }
 
-function detachPartitionLocations(mgr: WorkspaceVectorIndexManager, partition: PartitionMatrix): void {
+function detachPartitionLocations(
+  mgr: WorkspaceVectorIndexManager,
+  partition: PartitionMatrix
+): void {
   for (const matrix of partition.matrices.values()) {
     for (let i = 0; i < matrix.count; i++) {
       const id = matrix.ids[i];
@@ -473,7 +470,8 @@ function loadPartition(
 
     let vec = decodeEmbeddingBlob(row.embedding);
     if (!vec) {
-      const text = `${row.summary || ''}\n${row.content || ''}${row.slot_key ? `\n${row.slot_key}` : ''}`.trim();
+      const text =
+        `${row.summary || ''}\n${row.content || ''}${row.slot_key ? `\n${row.slot_key}` : ''}`.trim();
       if (!text) continue;
       vec = computeLocalEmbedding(text, DEFAULT_LOCAL_VECTOR_DIM);
     }
@@ -559,8 +557,10 @@ export function searchWorkspaceVectors(
 
   const limit = Math.max(1, options.limit ?? 20);
   const minScore = options.minScore ?? -Infinity;
-  const allowedTypes = options.allowedTypes && options.allowedTypes.size > 0 ? options.allowedTypes : undefined;
-  const excludeIds = options.excludeIds && options.excludeIds.size > 0 ? options.excludeIds : undefined;
+  const allowedTypes =
+    options.allowedTypes && options.allowedTypes.size > 0 ? options.allowedTypes : undefined;
+  const excludeIds =
+    options.excludeIds && options.excludeIds.size > 0 ? options.excludeIds : undefined;
 
   const mgr = getOrCreateManager(db);
   const versionSnap = readDbVersionSnapshot(db);
@@ -863,13 +863,7 @@ export function upsertVectorIndexEntry(
 
   const inserted = upsertIntoPartition(mgr, targetPartition, meta.id, meta.type, vec);
   if (inserted) {
-    syncPartitionAfterHook(
-      db,
-      targetPartition,
-      meta.id,
-      meta,
-      wasInTargetPartition ? 0 : 1
-    );
+    syncPartitionAfterHook(db, targetPartition, meta.id, meta, wasInTargetPartition ? 0 : 1);
   }
 }
 
@@ -910,7 +904,8 @@ export function syncVectorInLoadedIndex(db: Db, id: string, vec: Float32Array): 
     if (partition) {
       const oldMat = partition.matrices.get(existingLoc.dim);
       const existingSlot = oldMat?.idToSlot.get(id);
-      const existingType = existingSlot !== undefined && oldMat ? oldMat.types[existingSlot] : 'semantic';
+      const existingType =
+        existingSlot !== undefined && oldMat ? oldMat.types[existingSlot] : 'semantic';
       if (existingLoc.dim !== vec.length && oldMat) {
         removeFromDimMatrix(oldMat, id);
         mgr.idToLocation.delete(id);

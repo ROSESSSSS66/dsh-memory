@@ -12,11 +12,13 @@ export const MemoryRefItemSchema = z.object({
 export const MemoryRefsSchema = z.array(MemoryRefItemSchema).min(1);
 
 const StateSchema = z.object({
-  visibleInjections: z.array(z.object({
-    messageId: z.string().min(1),
-    seq: z.number().int().nonnegative(),
-    refs: MemoryRefsSchema,
-  })),
+  visibleInjections: z.array(
+    z.object({
+      messageId: z.string().min(1),
+      seq: z.number().int().nonnegative(),
+      refs: MemoryRefsSchema,
+    })
+  ),
   invalidReferenceEvents: z.number().int().nonnegative(),
 });
 
@@ -31,28 +33,50 @@ export function emptyMemoryVisibility(): MemoryVisibilityState {
 }
 
 const surfaceTypes = new Set([
-  'user/message', 'assistant/message', 'system/message', 'developer/message', 'tool/result',
+  'user/message',
+  'assistant/message',
+  'system/message',
+  'developer/message',
+  'tool/result',
 ]);
 
 /** Fold committed surface events only. Compaction lifecycle events never remove visibility. */
-export function foldMemoryVisibility(state: MemoryVisibilityState, event: any): MemoryVisibilityState {
-  if (!surfaceTypes.has(event?.type) || !Number.isSafeInteger(event.seq) || event.seq < 0) return state;
+export function foldMemoryVisibility(
+  state: MemoryVisibilityState,
+  event: any
+): MemoryVisibilityState {
+  if (!surfaceTypes.has(event?.type) || !Number.isSafeInteger(event.seq) || event.seq < 0)
+    return state;
   let visible = state.visibleInjections;
   const op = event.surfaceOp;
-  if (op?.op === 'replace' && Number.isSafeInteger(op.startSeq) && Number.isSafeInteger(op.endSeq) &&
-      op.startSeq >= 0 && op.startSeq <= op.endSeq && Array.isArray(event.sourceEventSeqs)) {
-    const covered = new Set(event.sourceEventSeqs.filter((seq: unknown) => Number.isSafeInteger(seq)));
-    visible = visible.filter(entry =>
-      !(entry.seq >= op.startSeq && entry.seq <= op.endSeq && covered.has(entry.seq))
+  if (
+    op?.op === 'replace' &&
+    Number.isSafeInteger(op.startSeq) &&
+    Number.isSafeInteger(op.endSeq) &&
+    op.startSeq >= 0 &&
+    op.startSeq <= op.endSeq &&
+    Array.isArray(event.sourceEventSeqs)
+  ) {
+    const covered = new Set(
+      event.sourceEventSeqs.filter((seq: unknown) => Number.isSafeInteger(seq))
+    );
+    visible = visible.filter(
+      (entry) => !(entry.seq >= op.startSeq && entry.seq <= op.endSeq && covered.has(entry.seq))
     );
   }
 
   const source = event.data?.source;
   let invalidReferenceEvents = state.invalidReferenceEvents;
-  const isDshMemory = source?.kind === 'dsh-memory' || (source?.kind === 'plugin' && source?.plugin === 'dsh-memory');
+  const isDshMemory =
+    source?.kind === 'dsh-memory' || (source?.kind === 'plugin' && source?.plugin === 'dsh-memory');
   if (event.type === 'user/message' && isDshMemory) {
     const rawRefs = source?.memoryRefs;
-    if (typeof event.data?.id !== 'string' || !event.data.id || !Array.isArray(rawRefs) || rawRefs.length === 0) {
+    if (
+      typeof event.data?.id !== 'string' ||
+      !event.data.id ||
+      !Array.isArray(rawRefs) ||
+      rawRefs.length === 0
+    ) {
       invalidReferenceEvents++;
     } else {
       // 逐条校验 memoryRefs：单条坏引用仅累加计数，保留同批次其余合法引用
@@ -69,12 +93,16 @@ export function foldMemoryVisibility(state: MemoryVisibilityState, event: any): 
       if (invalidCount > 0) {
         invalidReferenceEvents += invalidCount;
       }
-      if (validRefs.length > 0 && !visible.some(entry => entry.seq === event.seq)) {
+      if (validRefs.length > 0 && !visible.some((entry) => entry.seq === event.seq)) {
         visible = [...visible, { messageId: event.data.id, seq: event.seq, refs: validRefs }];
       }
     }
   }
-  if (visible === state.visibleInjections && invalidReferenceEvents === state.invalidReferenceEvents) return state;
+  if (
+    visible === state.visibleInjections &&
+    invalidReferenceEvents === state.invalidReferenceEvents
+  )
+    return state;
   return { visibleInjections: visible, invalidReferenceEvents };
 }
 

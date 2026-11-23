@@ -1,15 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import { workspaceId, resolveWorkspaceCwd } from '../core/scope.js';
-import { isWorkspaceExcluded, type LookupFn } from '../core/privacy.js';
-import {
-  backfillMissingEmbeddings,
-  backfillRemoteEmbeddingsAsync,
-} from '../core/vector.js';
 import { autoHealMemoryHealth, weaveZettelkastenLinks } from '../core/health.js';
+import { isWorkspaceExcluded, type LookupFn } from '../core/privacy.js';
+import { resolveWorkspaceCwd, workspaceId } from '../core/scope.js';
+import { backfillMissingEmbeddings, backfillRemoteEmbeddingsAsync } from '../core/vector.js';
 import { syncAutonomousVikingTree } from '../core/viking.js';
+import { checkSentinelAndRollback } from '../evolution/lab.js';
 import {
   archiveColdMemories,
   autoPinMemories,
@@ -21,7 +18,7 @@ import {
   getBackupTimestamp,
   pruneInvalidMemories,
 } from '../evolution/maintenance.js';
-import { checkSentinelAndRollback } from '../evolution/lab.js';
+import type { Db } from '../types.js';
 import { listActiveWorkspaces } from './scope-guard.js';
 
 export interface UnifiedMaintenanceOptions {
@@ -178,7 +175,8 @@ export async function runUnifiedMaintenance(
   };
 
   const rawWsIdInput = typeof options.workspaceId === 'string' ? options.workspaceId.trim() : '';
-  const rawWsPathInput = typeof options.workspacePath === 'string' ? options.workspacePath.trim() : '';
+  const rawWsPathInput =
+    typeof options.workspacePath === 'string' ? options.workspacePath.trim() : '';
   const targetWsId = rawWsIdInput
     ? workspaceId(rawWsIdInput)
     : rawWsPathInput

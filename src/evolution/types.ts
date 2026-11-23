@@ -1,4 +1,4 @@
-import type { MemoryType, Scope, OriginKind, CandidateInput } from '../types.js';
+import type { CandidateInput, MemoryType, OriginKind, Scope } from '../types.js';
 
 export interface EvidenceLedgerEntry {
   seq: number; // 1..N request-local

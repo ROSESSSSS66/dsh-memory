@@ -1,10 +1,6 @@
-import type { Db, VikingCategory } from '../../../types.js';
 import type { PluginConfig } from '../../../config.js';
+import { runHindsightReflect, traceHindsightEvolution } from '../../../core/hindsight.js';
 import { scopeFilterSQL } from '../../../core/scope.js';
-import {
-  runHindsightReflect,
-  traceHindsightEvolution,
-} from '../../../core/hindsight.js';
 import {
   browseVikingDirectory,
   findInVikingTree,
@@ -12,12 +8,8 @@ import {
   resolveMemoryByVikingUriOrId,
   VIKING_CATEGORY_DESCRIPTIONS,
 } from '../../../core/viking.js';
-import {
-  buildPrivacyWhereSQL,
-  resolveWebScope,
-  sendJson,
-  type WebScope,
-} from '../http.js';
+import type { Db, VikingCategory } from '../../../types.js';
+import { buildPrivacyWhereSQL, resolveWebScope, sendJson, type WebScope } from '../http.js';
 import type { RouteEntry } from '../router.js';
 import { NO_ACTIVE_WORKSPACE_SENTINEL } from './core-memory.js';
 

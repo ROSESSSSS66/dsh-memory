@@ -1,5 +1,5 @@
-import { hydrateMemoryRow, type Db, type MemoryRecord, type MemoryRow } from '../types.js';
 import { hasUserEvidence } from '../core/trust.js';
+import { type Db, hydrateMemoryRow, type MemoryRecord, type MemoryRow } from '../types.js';
 
 /**
  * 模型发起的 discard / supersede / 原地 curate 均不得修改或淘汰以下受保护记忆：
@@ -13,7 +13,9 @@ export function isProtectedFromModelDiscard(db: Db, memory: MemoryRecord): boole
   }
   return (
     memory.status === 'active' &&
-    (memory.approved_by === 'user' || memory.approved_by === 'system' || hasUserEvidence(db, memory))
+    (memory.approved_by === 'user' ||
+      memory.approved_by === 'system' ||
+      hasUserEvidence(db, memory))
   );
 }
 

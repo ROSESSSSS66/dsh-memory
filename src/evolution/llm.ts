@@ -1,19 +1,19 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import type { LLMTaskKind } from './types.js';
-import { reserve, settle, cancel } from './ledger.js';
 import {
   assertSafeOutboundEndpoint,
   isOfflineEndpointAllowed,
   isSafeApiKeyEnvName,
   isWorkspaceExcluded,
-  redactSecrets,
   type LookupFn,
+  redactSecrets,
 } from '../core/privacy.js';
 import { estimateTokens } from '../core/tokens.js';
+import type { Db } from '../types.js';
+import { cancel, reserve, settle } from './ledger.js';
+import type { LLMTaskKind } from './types.js';
 
 const MAX_LLM_RESPONSE_BYTES = 2 * 1024 * 1024; // 2 MB hard cap
 const MAX_ERROR_BODY_BYTES = 16 * 1024; // 16 KB cap for diagnostic error inspection
@@ -179,9 +179,7 @@ export async function readBoundedText(
         if (done) break;
         if (!value) continue;
         const chunk =
-          value instanceof Uint8Array
-            ? value
-            : new Uint8Array(value as ArrayBufferLike);
+          value instanceof Uint8Array ? value : new Uint8Array(value as ArrayBufferLike);
         totalBytes += chunk.byteLength;
         if (totalBytes > maxBytes) {
           try {
@@ -316,9 +314,7 @@ export function unquoteScalar(raw: string): string {
   const hashIdx = s.indexOf(' #');
   const tabHashIdx = s.indexOf('\t#');
   const commentIdx =
-    hashIdx >= 0 && tabHashIdx >= 0
-      ? Math.min(hashIdx, tabHashIdx)
-      : Math.max(hashIdx, tabHashIdx);
+    hashIdx >= 0 && tabHashIdx >= 0 ? Math.min(hashIdx, tabHashIdx) : Math.max(hashIdx, tabHashIdx);
   return (commentIdx >= 0 ? s.slice(0, commentIdx) : s).trim();
 }
 
@@ -338,10 +334,7 @@ function isPlaceholderModel(model?: string): boolean {
 export function isOpenAIReasoningModel(model: string): boolean {
   const m = (model || '').trim();
   if (!m) return false;
-  return (
-    /(?:^|\/)(?:o1|o3|o4)(?:$|[-._])/i.test(m) ||
-    /(?:^|\/)gpt-5(?:$|[-._])/i.test(m)
-  );
+  return /(?:^|\/)(?:o1|o3|o4)(?:$|[-._])/i.test(m) || /(?:^|\/)gpt-5(?:$|[-._])/i.test(m);
 }
 
 export function isReasoningModel(model: string): boolean {
@@ -655,9 +648,7 @@ export function resolveDshHostLlmFallback(
     return {
       baseURL: 'https://api.deepseek.com/v1',
       apiKey: procDeepSeekKey,
-      model: !isPlaceholderModel(preferredModel)
-        ? preferredModel
-        : envModel || 'deepseek-chat',
+      model: !isPlaceholderModel(preferredModel) ? preferredModel : envModel || 'deepseek-chat',
       protocol: 'chat/completions',
     };
   }
@@ -686,7 +677,10 @@ export function resolveDshHostLlmFallback(
     const apiKey = keyEnv && isSafeApiKeyEnvName(keyEnv) ? (diskEnv[keyEnv] || '').trim() : '';
     if (!apiKey) return null;
     const protocol = mapDshPiAiProtocol(p.api);
-    const normalizedUrl = normalizeProviderBaseUrl(p.baseURL, p.api || protocol || 'openai-completions');
+    const normalizedUrl = normalizeProviderBaseUrl(
+      p.baseURL,
+      p.api || protocol || 'openai-completions'
+    );
     const preferredModel = (currentModel || '').trim();
     // 仅当 provider 与 defaultModelInfo.provider 一致时才附带默认模型名，防止跨厂商张冠李戴
     const matchedDefaultModel =
@@ -875,7 +869,11 @@ export function buildProtocolPayload(
  * - 跳过过短或根路径（< 3 字符）防止误伤普通英文单词
  * - 先匿名化 cwd -> <workspace>，再匿名化 os.homedir() -> <home>
  */
-export function anonymizeWorkspacePaths(text: string, cwd?: string, homeDir: string = os.homedir()): string {
+export function anonymizeWorkspacePaths(
+  text: string,
+  cwd?: string,
+  homeDir: string = os.homedir()
+): string {
   if (!text) return text;
   let result = text;
 
@@ -891,7 +889,11 @@ export function anonymizeWorkspacePaths(text: string, cwd?: string, homeDir: str
     return variants;
   };
 
-  const replaceWithBoundaries = (input: string, variants: string[], placeholder: string): string => {
+  const replaceWithBoundaries = (
+    input: string,
+    variants: string[],
+    placeholder: string
+  ): string => {
     let out = input;
     for (const v of variants) {
       const escaped = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -987,15 +989,15 @@ export function extractResponseUsage(
     typeof usage.prompt_tokens === 'number'
       ? usage.prompt_tokens
       : typeof usage.input_tokens === 'number'
-      ? usage.input_tokens
-      : undefined;
+        ? usage.input_tokens
+        : undefined;
 
   const outTokens =
     typeof usage.completion_tokens === 'number'
       ? usage.completion_tokens
       : typeof usage.output_tokens === 'number'
-      ? usage.output_tokens
-      : undefined;
+        ? usage.output_tokens
+        : undefined;
 
   if (typeof inTokens === 'number' && typeof outTokens === 'number') {
     return { prompt_tokens: inTokens, completion_tokens: outTokens };
@@ -1079,7 +1081,9 @@ export async function callOfflineLLM(
     return { ok: false, error: err?.message || 'invalid_base_url' };
   }
 
-  if (!isOfflineEndpointAllowed(endpointUrl, effectiveAllowedEndpoints, cfg.privacy.offlineConsent)) {
+  if (
+    !isOfflineEndpointAllowed(endpointUrl, effectiveAllowedEndpoints, cfg.privacy.offlineConsent)
+  ) {
     return { ok: false, error: 'endpoint_not_allowed' };
   }
 
@@ -1089,8 +1093,11 @@ export async function callOfflineLLM(
   }
 
   // 2. 脱敏与路径匿名化（<workspace> & <home>）
-  let sanitizedSystem = anonymizeWorkspacePaths(redactSecrets(params.systemPrompt).text, params.cwd);
-  let sanitizedUser = anonymizeWorkspacePaths(redactSecrets(params.userPrompt).text, params.cwd);
+  const sanitizedSystem = anonymizeWorkspacePaths(
+    redactSecrets(params.systemPrompt).text,
+    params.cwd
+  );
+  const sanitizedUser = anonymizeWorkspacePaths(redactSecrets(params.userPrompt).text, params.cwd);
 
   // 3. 输入上界计算与校验（覆盖 system + user + provider 包装约 200 tokens）
   const estimatedInput = estimateTokens(sanitizedSystem + sanitizedUser) + 200;
@@ -1118,7 +1125,13 @@ export async function callOfflineLLM(
   // 宿主兜底时只用与端点成对的宿主密钥：此前为自定义端点保存的密钥不属于这个端点
   let apiKey = usingHostFallback ? hostFallbackKey : cfg.offlineLLM.apiKey || '';
   const keyEnv = (cfg.offlineLLM.apiKeyEnv || '').trim();
-  if (!apiKey && !usingHostFallback && keyEnv && isSafeApiKeyEnvName(keyEnv) && process.env[keyEnv]) {
+  if (
+    !apiKey &&
+    !usingHostFallback &&
+    keyEnv &&
+    isSafeApiKeyEnvName(keyEnv) &&
+    process.env[keyEnv]
+  ) {
     apiKey = process.env[keyEnv]!;
   }
 
@@ -1339,9 +1352,7 @@ export async function callOfflineLLM(
           ledgerId,
           status: usage ? 'failed' : 'unknown',
           ok: 0,
-          ...(usage
-            ? { inTokens: usage.prompt_tokens, outTokens: usage.completion_tokens }
-            : {}),
+          ...(usage ? { inTokens: usage.prompt_tokens, outTokens: usage.completion_tokens } : {}),
           note: 'provider_error_body',
         });
         return { ok: false, error: 'provider_error_body', ledgerId };
@@ -1354,9 +1365,7 @@ export async function callOfflineLLM(
           ledgerId,
           status: usage ? 'failed' : 'unknown',
           ok: 0,
-          ...(usage
-            ? { inTokens: usage.prompt_tokens, outTokens: usage.completion_tokens }
-            : {}),
+          ...(usage ? { inTokens: usage.prompt_tokens, outTokens: usage.completion_tokens } : {}),
           note: truncated ? 'missing_choice_content_truncated' : 'missing_choice_content',
         });
 
@@ -1454,7 +1463,6 @@ export async function callOfflineLLM(
           return { ok: false, error: 'job_deadline_exceeded', ledgerId };
         }
       }
-      continue;
     } finally {
       clearTimeout(timeoutTimer);
       if (params.signal) {

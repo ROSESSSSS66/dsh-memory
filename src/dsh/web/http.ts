@@ -1,15 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { URL } from 'node:url';
-import type { Db } from '../../types.js';
 import type { PluginConfig } from '../../config.js';
-import { workspaceId } from '../../core/scope.js';
 import { isWorkspaceExcluded, memoryPrivacyFilterSQL } from '../../core/privacy.js';
+import { workspaceId } from '../../core/scope.js';
 import {
   assertWorkspaceAllowed,
   expandExcludedWorkspaceIds,
   listActiveWorkspaces,
   WorkspaceExcludedError,
 } from '../../service/index.js';
+import type { Db } from '../../types.js';
 import { securityHeaders } from './security.js';
 
 export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
@@ -102,13 +102,7 @@ export function readBodyJson(
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += buf.length;
       if (size > maxBytes) {
-        fail(
-          new HttpError(
-            413,
-            'body_too_large',
-            `Request body exceeds ${maxBytes} bytes`
-          )
-        );
+        fail(new HttpError(413, 'body_too_large', `Request body exceeds ${maxBytes} bytes`));
         return;
       }
       chunks.push(buf);
@@ -142,9 +136,12 @@ export function readBodyJson(
       fail(new HttpError(499, 'request_aborted', 'Request aborted by client'));
     };
 
-    let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
-      fail(new HttpError(408, 'request_timeout', 'Request body read timed out'));
-    }, Math.max(100, timeoutMs));
+    let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(
+      () => {
+        fail(new HttpError(408, 'request_timeout', 'Request body read timed out'));
+      },
+      Math.max(100, timeoutMs)
+    );
     timer.unref?.();
 
     req.on('data', onData);

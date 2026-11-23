@@ -1,7 +1,7 @@
 import type { Db } from '../../types.js';
-import { tokenSet, jaccard, extractEntities } from '../text.js';
 import { workspaceId } from '../scope.js';
-import { getOrComputeEmbedding, cosineSimilarity } from '../vector.js';
+import { extractEntities, jaccard, tokenSet } from '../text.js';
+import { cosineSimilarity, getOrComputeEmbedding } from '../vector.js';
 import { addRelation } from '../writer.js';
 import { buildHealthScopeFilter } from './audit.js';
 
@@ -82,10 +82,7 @@ export function areScopesCompatibleForWeaving(
  * 扫描同作用域内的活跃记忆，基于 128D 本地向量余弦 + 实体共现 + 词汇 Jaccard + 槽位命名空间亲和度
  * 为孤岛/弱连通节点自动编织 related 边，并严格执行工作区、会话与隐私隔离边界。
  */
-export function weaveZettelkastenLinks(
-  db: Db,
-  options: WeaveOptions | string = {}
-): WeaveResult {
+export function weaveZettelkastenLinks(db: Db, options: WeaveOptions | string = {}): WeaveResult {
   const opts: WeaveOptions = typeof options === 'string' ? { workspaceId: options } : options;
   const now = opts.now ?? Date.now();
   const maxNewLinks = opts.maxNewLinks ?? 60;

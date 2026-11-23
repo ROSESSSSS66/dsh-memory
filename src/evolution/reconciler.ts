@@ -1,24 +1,29 @@
-import {
-  hydrateMemoryRow,
-  type Db,
-  type CandidateInput,
-  type MemoryRecord,
-  type MemoryRow,
-  type ReconcileDecision,
-  type Scope,
-  type UpsertResult,
-} from '../types.js';
-import { tokenSet, jaccard, contentHash, extractEntities, segment } from '../core/text.js';
-import { scopeFilterSQL, workspaceId as resolveWorkspaceId } from '../core/scope.js';
-import { upsertCandidate, saveVersionSnapshot, addRelation, invalidateMemory } from '../core/writer.js';
-import { resolveFixedSlot } from '../ingest/rules.js';
+import { workspaceId as resolveWorkspaceId, scopeFilterSQL } from '../core/scope.js';
+import { contentHash, extractEntities, jaccard, segment, tokenSet } from '../core/text.js';
+import { hasUntrustedOrigin, isUntrustedSourceKind } from '../core/trust.js';
 import {
   computeLocalEmbedding,
   cosineSimilarity,
   getOrComputeEmbedding,
   removeCachedRuntimeEmbedding,
 } from '../core/vector.js';
-import { hasUntrustedOrigin, isUntrustedSourceKind } from '../core/trust.js';
+import {
+  addRelation,
+  invalidateMemory,
+  saveVersionSnapshot,
+  upsertCandidate,
+} from '../core/writer.js';
+import { resolveFixedSlot } from '../ingest/rules.js';
+import {
+  type CandidateInput,
+  type Db,
+  hydrateMemoryRow,
+  type MemoryRecord,
+  type MemoryRow,
+  type ReconcileDecision,
+  type Scope,
+  type UpsertResult,
+} from '../types.js';
 import { sameMemoryOwner } from './review-snapshot.js';
 
 const NEGATION_PATTERNS = [
@@ -260,7 +265,8 @@ export function reconcileCandidate(
   const candVec = computeLocalEmbedding(rawContent);
 
   const candidateMemories =
-    options?.existingMemories ?? fetchReconcileCandidates(db, rawContent, candEntities, wsId, sessId);
+    options?.existingMemories ??
+    fetchReconcileCandidates(db, rawContent, candEntities, wsId, sessId);
 
   let bestDupMatch: MemoryRecord | null = null;
   let maxDupJaccard = 0;
@@ -311,7 +317,11 @@ export function reconcileCandidate(
   // A: 极高相似度 (Jaccard >= 0.85 或 Hybrid >= 0.88)
   if (bestDupMatch && (maxDupJaccard >= 0.85 || maxDupHybridSim >= 0.88)) {
     if (isNegation) {
-      if (bestDupMatch.pinned === 0 && bestDupMatch.status === 'active' && sameMemoryOwner(bestDupMatch, ownerStub)) {
+      if (
+        bestDupMatch.pinned === 0 &&
+        bestDupMatch.status === 'active' &&
+        sameMemoryOwner(bestDupMatch, ownerStub)
+      ) {
         return {
           action: 'DELETE',
           targetId: bestDupMatch.id,
@@ -419,7 +429,8 @@ export function applyReconciliation(
 ): UpsertResult {
   // 推演规范槽位时使用浅拷贝，绝不原地修改调用方的 candidate
   const rawContent = (candidate.content || '').trim();
-  const inferredSlotKey = !candidate.slot_key && rawContent ? resolveFixedSlot(rawContent).slotKey : null;
+  const inferredSlotKey =
+    !candidate.slot_key && rawContent ? resolveFixedSlot(rawContent).slotKey : null;
   const effectiveCandidate: CandidateInput =
     inferredSlotKey && !candidate.slot_key
       ? { ...candidate, slot_key: inferredSlotKey }

@@ -59,11 +59,7 @@ export class MemoryErrorBoundary extends React.Component<
             {this.state.errorMessage ? (
               <p className="dshm-error-detail">{this.state.errorMessage}</p>
             ) : null}
-            <button
-              type="button"
-              className="dshm-error-retry"
-              onClick={this.handleReset}
-            >
+            <button type="button" className="dshm-error-retry" onClick={this.handleReset}>
               {t.errorBoundary.retry}
             </button>
           </div>

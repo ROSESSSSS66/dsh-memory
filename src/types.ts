@@ -16,14 +16,7 @@ export type MemoryStatus =
   | 'rejected'
   | 'frozen';
 
-export type SourceKind =
-  | 'user'
-  | 'assistant'
-  | 'tool'
-  | 'web'
-  | 'llm_extract'
-  | 'rule'
-  | 'system';
+export type SourceKind = 'user' | 'assistant' | 'tool' | 'web' | 'llm_extract' | 'rule' | 'system';
 
 export type OriginKind = 'user' | 'assistant' | 'tool' | 'web' | 'system';
 
@@ -46,7 +39,7 @@ export type HindsightNetwork = 'world' | 'experience' | 'observation' | 'opinion
 export interface HindsightDisposition {
   skepticism: number; // 0..1: 对单源/工具/低证据结论的怀疑权重
   literalism: number; // 0..1: 偏向精确槽位/显式规则的程度
-  empathy: number;    // 0..1: 对用户偏好与习惯信号的放大权重
+  empathy: number; // 0..1: 对用户偏好与习惯信号的放大权重
 }
 
 /**
@@ -346,4 +339,3 @@ export interface MarkdownFrontmatter {
   created_at?: string;
   updated_at?: string;
 }
-

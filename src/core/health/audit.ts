@@ -1,8 +1,8 @@
 import type { Db } from '../../types.js';
-import { tokenSet, jaccard } from '../text.js';
-import { workspaceId, scopeFilterSQL } from '../scope.js';
 import { memoryPrivacyFilterSQL } from '../privacy.js';
-import { getOrComputeEmbedding, cosineSimilarity } from '../vector.js';
+import { scopeFilterSQL, workspaceId } from '../scope.js';
+import { jaccard, tokenSet } from '../text.js';
+import { cosineSimilarity, getOrComputeEmbedding } from '../vector.js';
 
 export interface DuplicatePairItem {
   sourceId: string;
@@ -150,10 +150,7 @@ function parseSnapshotSources(
   return [];
 }
 
-function detectStaleModels(
-  db: Db,
-  filter: { sql: string; params: unknown[] }
-): string[] {
+function detectStaleModels(db: Db, filter: { sql: string; params: unknown[] }): string[] {
   const modelRows = db.all<{ id: string }>(
     `SELECT id FROM memories
      WHERE status IN ('active', 'frozen')
@@ -590,8 +587,7 @@ export function auditMemoryHealth(
       const rawVecSim = vecA && vecB ? cosineSimilarity(vecA, vecB) : 0;
 
       // 当规范化槽位相等但原始 slot_key 字面不同时，必须满足最低内容相似度门槛才认定为同槽位冗余
-      const sameSlot =
-        rawSameSlot || (normSameSlot && (sim >= 0.35 || rawVecSim >= 0.7));
+      const sameSlot = rawSameSlot || (normSameSlot && (sim >= 0.35 || rawVecSim >= 0.7));
       if (normSameSlot && !sameSlot) continue;
 
       if (!sameSlot) {

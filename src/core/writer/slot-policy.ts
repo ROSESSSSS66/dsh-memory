@@ -1,10 +1,10 @@
 import {
-  hydrateMemoryRow,
-  parseOriginKinds,
   type Db,
+  hydrateMemoryRow,
   type MemoryRecord,
   type MemoryRow,
   type OriginKind,
+  parseOriginKinds,
   type Scope,
 } from '../../types.js';
 import { primeRuntimeVectorCache, removeCachedRuntimeEmbedding } from '../vector.js';
@@ -125,10 +125,7 @@ export function findActiveSlotOccupant(
  * 记录版本快照，将旧记录置为 superseded 并写入 valid_to/invalidated_at，
  * 建立 supersedes 关系，并在事务提交后淘汰旧记录向量缓存。
  */
-export function supersedeActiveSlot(
-  db: Db,
-  params: SupersedeSlotParams
-): SupersedeSlotResult {
+export function supersedeActiveSlot(db: Db, params: SupersedeSlotParams): SupersedeSlotResult {
   const {
     scope,
     workspaceId,

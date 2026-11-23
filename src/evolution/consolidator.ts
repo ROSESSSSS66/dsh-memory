@@ -1,15 +1,15 @@
 import { createHash } from 'node:crypto';
-import { hydrateMemoryRow, type Db, type MemoryRecord, type MemoryRow } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import type { EvidenceLedger } from './types.js';
-import { tokenSet, jaccard, extractEntities } from '../core/text.js';
-import { redactSecrets, memoryWorkspaceIds, canSendMemoriesOffline } from '../core/privacy.js';
+import { canSendMemoriesOffline, memoryWorkspaceIds, redactSecrets } from '../core/privacy.js';
 import { workspaceId as normalizeWsId, resolveWorkspaceCwd } from '../core/scope.js';
+import { extractEntities, jaccard, tokenSet } from '../core/text.js';
 import { sourceKindToOriginKind } from '../core/trust.js';
-import { PROMPT_CONSOLIDATE, packPromptWithinBudget } from './prompts.js';
-import { parseOutput } from './parse.js';
-import { callOfflineLLM } from './llm.js';
 import { upsertCandidate } from '../core/writer.js';
+import { type Db, hydrateMemoryRow, type MemoryRecord, type MemoryRow } from '../types.js';
+import { callOfflineLLM } from './llm.js';
+import { parseOutput } from './parse.js';
+import { PROMPT_CONSOLIDATE, packPromptWithinBudget } from './prompts.js';
+import type { EvidenceLedger } from './types.js';
 
 const MAX_CLUSTER_RECORDS = 500;
 const MAX_SINGLE_CLUSTER_SIZE = 10;
@@ -411,7 +411,10 @@ text: ${m.content}`,
       `${PROMPT_CONSOLIDATE.version}\n${cluster.clusterKey}\n${finalRendered.renderedItems}\n${finalRendered.evidenceTranscript}`
     )
     .digest('hex');
-  if (db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [noopKey])?.value === fingerprint) {
+  if (
+    db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [noopKey])?.value ===
+    fingerprint
+  ) {
     return { success: true, clusterKey: cluster.clusterKey };
   }
 

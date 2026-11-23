@@ -1,24 +1,146 @@
 import crypto from 'node:crypto';
 import { DEFAULTS } from '../config.js';
 
-export const CJK_CHAR_REGEX = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-export const CJK_SEGMENT_REGEX = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
+export const CJK_CHAR_REGEX =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+export const CJK_SEGMENT_REGEX =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
 const NON_CJK_WORD_CHAR_REGEX = /[\p{L}\p{N}_.\-/@:]/u;
 const HAS_ALNUM_REGEX = /[\p{L}\p{N}]/u;
 
 export const STOPWORDS = new Set([
   // 中文停用词
-  '的', '了', '是', '在', '我', '你', '他', '她', '它', '这', '那', '就', '也', '都', '和', '与', '或', '但', '吗', '呢', '吧', '啊',
+  '的',
+  '了',
+  '是',
+  '在',
+  '我',
+  '你',
+  '他',
+  '她',
+  '它',
+  '这',
+  '那',
+  '就',
+  '也',
+  '都',
+  '和',
+  '与',
+  '或',
+  '但',
+  '吗',
+  '呢',
+  '吧',
+  '啊',
   // 英文停用词（扩展覆盖常见自然问句功能词、代词与助动词）
-  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'am', 'be', 'been', 'being',
-  'to', 'of', 'in', 'on', 'for', 'and', 'or', 'but', 'with', 'from', 'by', 'at', 'as', 'into', 'about', 'over', 'after', 'before',
-  'this', 'that', 'these', 'those', 'it', 'its',
-  'i', 'me', 'my', 'we', 'us', 'our', 'you', 'your', 'he', 'him', 'his', 'she', 'her', 'they', 'them', 'their',
-  'can', 'could', 'will', 'would', 'shall', 'should', 'may', 'might', 'must',
-  'do', 'does', 'did', 'done', 'have', 'has', 'had', 'having',
-  'what', 'which', 'who', 'whom', 'whose', 'where', 'when', 'why', 'how',
-  'please', 'help', 'tell', 'remember', 'know', 'need', 'want', 'just', 'very', 'really', 'also', 'then', 'than', 'so', 'if', 'not', 'no', 'yes',
-  'any', 'some', 'all', 'each', 'more', 'most', 'such', 'only', 'own', 'same', 'too', 'there', 'here',
+  'the',
+  'a',
+  'an',
+  'is',
+  'are',
+  'was',
+  'were',
+  'am',
+  'be',
+  'been',
+  'being',
+  'to',
+  'of',
+  'in',
+  'on',
+  'for',
+  'and',
+  'or',
+  'but',
+  'with',
+  'from',
+  'by',
+  'at',
+  'as',
+  'into',
+  'about',
+  'over',
+  'after',
+  'before',
+  'this',
+  'that',
+  'these',
+  'those',
+  'it',
+  'its',
+  'i',
+  'me',
+  'my',
+  'we',
+  'us',
+  'our',
+  'you',
+  'your',
+  'he',
+  'him',
+  'his',
+  'she',
+  'her',
+  'they',
+  'them',
+  'their',
+  'can',
+  'could',
+  'will',
+  'would',
+  'shall',
+  'should',
+  'may',
+  'might',
+  'must',
+  'do',
+  'does',
+  'did',
+  'done',
+  'have',
+  'has',
+  'had',
+  'having',
+  'what',
+  'which',
+  'who',
+  'whom',
+  'whose',
+  'where',
+  'when',
+  'why',
+  'how',
+  'please',
+  'help',
+  'tell',
+  'remember',
+  'know',
+  'need',
+  'want',
+  'just',
+  'very',
+  'really',
+  'also',
+  'then',
+  'than',
+  'so',
+  'if',
+  'not',
+  'no',
+  'yes',
+  'any',
+  'some',
+  'all',
+  'each',
+  'more',
+  'most',
+  'such',
+  'only',
+  'own',
+  'same',
+  'too',
+  'there',
+  'here',
 ]);
 
 /**
@@ -29,11 +151,7 @@ export const STOPWORDS = new Set([
  */
 export function normalize(s: string): string {
   if (!s) return '';
-  return s
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .trim();
+  return s.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 const SEP_SPLIT_REGEX = /[/.\-_@:]+/;
@@ -332,12 +450,36 @@ export function contentHash(type: string, content: string): string {
 }
 
 const GENERIC_E_WORDS = new Set([
-  'example', 'examples', 'enable', 'enabled', 'enabling', 'engine', 'export', 'exports',
-  'execute', 'executed', 'express', 'extract', 'expected', 'explore', 'extends', 'external',
-  'element', 'elements', 'endpoint', 'endpoints', 'encoding', 'encrypt', 'entries', 'environment',
+  'example',
+  'examples',
+  'enable',
+  'enabled',
+  'enabling',
+  'engine',
+  'export',
+  'exports',
+  'execute',
+  'executed',
+  'express',
+  'extract',
+  'expected',
+  'explore',
+  'extends',
+  'external',
+  'element',
+  'elements',
+  'endpoint',
+  'endpoints',
+  'encoding',
+  'encrypt',
+  'entries',
+  'environment',
 ]);
 
-export function extractEntities(s: string, maxEntities: number = DEFAULTS.maxEntitiesPerText): string[] {
+export function extractEntities(
+  s: string,
+  maxEntities: number = DEFAULTS.maxEntitiesPerText
+): string[] {
   if (!s || maxEntities <= 0) return [];
 
   // 分类抽取并按配额均衡收集，防止大量文件路径挤爆错误码/主机名/标识符配额
@@ -348,13 +490,14 @@ export function extractEntities(s: string, maxEntities: number = DEFAULTS.maxEnt
   const sNoUrls = s.replace(/\b[a-z][a-z0-9+.-]{1,15}:\/\/[^\s'"<>()]+/gi, ' ');
 
   // 1. 文件路径（非回溯分段写法）
-  const pathRegex1 = /(?:[a-zA-Z]:)?(?:[\w.\-]+)?(?:[\/\\][\w.\-]+)+\.\w{1,8}\b/g;
-  const pathRegex2 = /\b[\w\-]+\.(ts|tsx|js|mjs|cjs|py|json|ya?ml|toml|md|sql|rs|go|java|cs|cpp|h)\b/g;
+  const pathRegex1 = /(?:[a-zA-Z]:)?(?:[\w.-]+)?(?:[/\\][\w.-]+)+\.\w{1,8}\b/g;
+  const pathRegex2 =
+    /\b[\w-]+\.(ts|tsx|js|mjs|cjs|py|json|ya?ml|toml|md|sql|rs|go|java|cs|cpp|h)\b/g;
   while ((m = pathRegex1.exec(sNoUrls)) !== null) buckets[0].push(m[0]);
   while ((m = pathRegex2.exec(sNoUrls)) !== null) buckets[0].push(m[0]);
 
   // 2. 包名
-  const pkgRegex = /@[\w\-]+\/[\w\-.]+/g;
+  const pkgRegex = /@[\w-]+\/[\w\-.]+/g;
   while ((m = pkgRegex.exec(s)) !== null) buckets[1].push(m[0]);
 
   // 3. 反引号包裹的命令或标识符
@@ -385,7 +528,7 @@ export function extractEntities(s: string, maxEntities: number = DEFAULTS.maxEnt
 
   // 6. 主机名（扩展 .corp / .internal / .local / .app / .cloud / 常见 ccTLD）
   const hostRegex =
-    /\b(?:[a-z0-9\-]+\.)+(?:com|cn|io|ai|dev|org|net|xyz|app|cloud|corp|internal|local|lan|sh|gg|co|uk|jp|de|fr)\b/gi;
+    /\b(?:[a-z0-9-]+\.)+(?:com|cn|io|ai|dev|org|net|xyz|app|cloud|corp|internal|local|lan|sh|gg|co|uk|jp|de|fr)\b/gi;
   while ((m = hostRegex.exec(s)) !== null) buckets[5].push(m[0]);
 
   // 轮询配额（首轮每类最多取 6 个，余量按序补满至 maxEntities）

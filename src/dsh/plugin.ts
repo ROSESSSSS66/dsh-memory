@@ -1,17 +1,19 @@
-import path from 'node:path';
-import os from 'node:os';
 import fs from 'node:fs';
-import { DEFAULTS, validateConfig, loadConfigFromDb, type PluginConfig } from '../config.js';
+import os from 'node:os';
+import path from 'node:path';
+import { DEFAULTS, loadConfigFromDb, type PluginConfig, validateConfig } from '../config.js';
+import { autoBootstrapMemory } from '../core/bootstrap.js';
 import { openDb } from '../core/db.js';
+import { findEligibleDistillSession } from '../evolution/extractor.js';
 import { IngestQueue } from '../ingest/queue.js';
-import { registerSessionListener } from './session-listener.js';
-import { PromptSectionManager } from './prompt-section.js';
-import { registerPreStep } from './pre-step.js';
-import { registerMemoryVisibility, type MemoryVisibilityReader } from './memory-visibility.js';
-import { MemoryTools } from './tools.js';
-import { registerMemoryTools } from './tool-registry.js';
-import { MemoryCommands, getMemoryCommandHint } from './commands.js';
+import { JobRunner } from '../jobs/runner.js';
+import { JobScheduler, recoverJobsOnStartup } from '../jobs/scheduler.js';
+import type { Db } from '../types.js';
+import { getMemoryCommandHint, MemoryCommands } from './commands.js';
 import { registerPluginJobHandlers } from './job-handlers.js';
+import { type MemoryVisibilityReader, registerMemoryVisibility } from './memory-visibility.js';
+import { registerPreStep } from './pre-step.js';
+import { PromptSectionManager } from './prompt-section.js';
 import {
   extractAgentCwd,
   isResolvedScopeExcluded,
@@ -20,12 +22,10 @@ import {
   resolveRuntimeScope,
   resolveSessionWorkspaceId,
 } from './scope-resolver.js';
-import { JobRunner } from '../jobs/runner.js';
-import { JobScheduler, recoverJobsOnStartup } from '../jobs/scheduler.js';
-import { findEligibleDistillSession } from '../evolution/extractor.js';
+import { registerSessionListener } from './session-listener.js';
+import { registerMemoryTools } from './tool-registry.js';
+import { MemoryTools } from './tools.js';
 import { registerWebRoutes } from './web.js';
-import { autoBootstrapMemory } from '../core/bootstrap.js';
-import type { Db } from '../types.js';
 
 export const name = 'dsh-memory';
 // P0 修复：移除 top-level 'commands' 强依赖，使 headless / CLI / ACP 宿主可通过延迟 ctx.inject(['commands'], ...) 正常加载插件
@@ -66,7 +66,10 @@ export const Config = {
   default: DEFAULTS,
 };
 
-export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBootstrap?: boolean }) {
+export async function apply(
+  ctx: any,
+  config?: Partial<PluginConfig> & { autoBootstrap?: boolean }
+) {
   let db: Db | undefined;
   let promptSections: PromptSectionManager | undefined;
   let queue: IngestQueue | undefined;
@@ -262,8 +265,7 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
     // - 默认路径自动冷启动延迟至 .unref() 定时器后台触发，避免拖慢插件冷启动
     const resolveStartupWsPath = (): string => {
       try {
-        const rawBase =
-          typeof ctx?.get === 'function' ? ctx.get('baseDir') : ctx?.baseDir;
+        const rawBase = typeof ctx?.get === 'function' ? ctx.get('baseDir') : ctx?.baseDir;
         if (typeof rawBase === 'string' && rawBase.trim() && fs.existsSync(rawBase.trim())) {
           return rawBase.trim();
         }
@@ -342,13 +344,19 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                 },
                 { allowCwdFallback: false }
               );
-              if (scope.resolved && isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)) {
+              if (
+                scope.resolved &&
+                isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)
+              ) {
                 return;
               }
               const eligible = findEligibleDistillSession(currentDb, liveCfg, true, evt.sessionId);
               const minSeq = eligible?.minSeq ?? 1;
               const rawCwd = scope.workspacePath || scope.cwd || eligible?.workspaceId || '';
-              if (rawCwd && isWorkspaceOrMappedExcluded(rawCwd, liveCfg.excludeWorkspaces, currentDb)) {
+              if (
+                rawCwd &&
+                isWorkspaceOrMappedExcluded(rawCwd, liveCfg.excludeWorkspaces, currentDb)
+              ) {
                 return;
               }
               localScheduler.enqueue('distill', `${evt.sessionId}:seq:${minSeq}`, {
@@ -444,7 +452,9 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                   : undefined;
               const agent =
                 assembleCtx?.agent ??
-                (scopeObj?.ctx?.systemPrompt || scopeObj?.session || typeof scopeObj?.id === 'string'
+                (scopeObj?.ctx?.systemPrompt ||
+                scopeObj?.session ||
+                typeof scopeObj?.id === 'string'
                   ? scopeObj
                   : undefined) ??
                 (typeof assembleCtx?.agentId === 'string' && typeof ctx.agents?.get === 'function'
@@ -453,12 +463,20 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
 
               if (agent && promptSections && Array.isArray(assembly?.sections)) {
                 const liveCfg = getLiveCfg();
-                const scope = resolveRuntimeScope(ctx, currentDb, { agent }, { allowCwdFallback: false });
+                const scope = resolveRuntimeScope(
+                  ctx,
+                  currentDb,
+                  { agent },
+                  { allowCwdFallback: false }
+                );
                 const existingIdx = assembly.sections.findIndex(
                   (s: any) => s && s.name === 'memory-stable'
                 );
 
-                if (!scope.resolved || isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)) {
+                if (
+                  !scope.resolved ||
+                  isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)
+                ) {
                   if (existingIdx >= 0) {
                     assembly.sections.splice(existingIdx, 1);
                   }
@@ -606,7 +624,10 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                 },
                 { allowCwdFallback: false }
               );
-              if (!scope.resolved || isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)) {
+              if (
+                !scope.resolved ||
+                isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, currentDb)
+              ) {
                 return;
               }
               const wsId = scope.workspaceId;
@@ -623,11 +644,17 @@ export async function apply(ctx: any, config?: Partial<PluginConfig> & { autoBoo
                       : eligible.workspaceId ||
                         resolveSessionWorkspaceId(currentDb, eligible.sessionId) ||
                         rawCwd;
-                  if (!isWorkspaceOrMappedExcluded(distillCwd, liveCfg.excludeWorkspaces, currentDb)) {
-                    localScheduler.enqueue('distill', `${eligible.sessionId}:seq:${eligible.minSeq}`, {
-                      sessionId: eligible.sessionId,
-                      cwd: distillCwd,
-                    });
+                  if (
+                    !isWorkspaceOrMappedExcluded(distillCwd, liveCfg.excludeWorkspaces, currentDb)
+                  ) {
+                    localScheduler.enqueue(
+                      'distill',
+                      `${eligible.sessionId}:seq:${eligible.minSeq}`,
+                      {
+                        sessionId: eligible.sessionId,
+                        cwd: distillCwd,
+                      }
+                    );
                   }
                 }
               }

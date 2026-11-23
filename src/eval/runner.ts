@@ -1,37 +1,37 @@
 import { performance } from 'node:perf_hooks';
-import { openDb } from '../core/db.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
-import { workspaceId } from '../core/scope.js';
+import { openDb } from '../core/db.js';
 import { isWorkspaceExcluded } from '../core/privacy.js';
-import {
-  upsertCandidate,
-  addRelation,
-  pin,
-  freeze,
-  invalidateMemory,
-  generateId,
-} from '../core/writer.js';
+import { workspaceId } from '../core/scope.js';
+import { contentHash, extractEntities, ftsText } from '../core/text.js';
+import { budgetTokens, estimateTokens } from '../core/tokens.js';
 import {
   clearRuntimeVectorCache,
   computeLocalEmbedding,
   encodeEmbeddingBlob,
   removeCachedRuntimeEmbedding,
 } from '../core/vector.js';
-import { ftsText, contentHash, extractEntities } from '../core/text.js';
-import { estimateTokens, budgetTokens } from '../core/tokens.js';
+import {
+  addRelation,
+  freeze,
+  generateId,
+  invalidateMemory,
+  pin,
+  upsertCandidate,
+} from '../core/writer.js';
+import { renderStableLayer } from '../dsh/prompt-section.js';
+import { DEFAULT_STRATEGY } from '../retrieval/fuse.js';
 import { buildQueryPlan } from '../retrieval/query.js';
 import { recall } from '../retrieval/recall.js';
-import { DEFAULT_STRATEGY } from '../retrieval/fuse.js';
-import { renderStableLayer } from '../dsh/prompt-section.js';
+import type { StrategyConfig, VikingContextTier } from '../types.js';
 import { buildEvalReport } from './metrics.js';
 import type {
-  EvalCase,
   CaseResult,
+  EvalCase,
   EvalReport,
   ScaleBenchmarkDataset,
   ScaleBenchmarkReport,
 } from './types.js';
-import type { StrategyConfig, VikingContextTier } from '../types.js';
 
 export interface RunEvalOptions {
   coldCache?: boolean;
@@ -42,9 +42,7 @@ function extractInjectedTexts(
   items: ReturnType<typeof recall>['items']
 ): string[] {
   if (items.length === 0) return [];
-  const renderedLines = dynamicRendered
-    ? dynamicRendered.split('\n').slice(1, -1)
-    : [];
+  const renderedLines = dynamicRendered ? dynamicRendered.split('\n').slice(1, -1) : [];
   if (renderedLines.length === items.length) {
     return renderedLines;
   }
@@ -57,9 +55,7 @@ function extractInjectedTexts(
   });
 }
 
-function extractInjectedTiers(
-  items: ReturnType<typeof recall>['items']
-): VikingContextTier[] {
+function extractInjectedTiers(items: ReturnType<typeof recall>['items']): VikingContextTier[] {
   return items.map((it) => it.tier ?? (it.form === 'summary' ? 'L0' : 'L2'));
 }
 
@@ -113,9 +109,7 @@ export function runCase(
           ? workspaceId(item.workspaceId || testCase.workspace)
           : undefined;
       const itemSessionId =
-        itemScope === 'session'
-          ? item.sessionId || caseSessionId
-          : item.sessionId;
+        itemScope === 'session' ? item.sessionId || caseSessionId : item.sessionId;
       const itemConfidence = item.confidence ?? 1.0;
 
       const res = upsertCandidate(
@@ -371,9 +365,7 @@ export function runScaleBenchmark(
           importance, invalidated_at, embedding
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
-      const insertFts = memDb.prepare(
-        `INSERT INTO memory_fts(rowid, fts_text) VALUES (?, ?)`
-      );
+      const insertFts = memDb.prepare(`INSERT INTO memory_fts(rowid, fts_text) VALUES (?, ?)`);
       const insertEnt = memDb.prepare(
         `INSERT OR IGNORE INTO memory_entities(memory_id, entity) VALUES (?, ?)`
       );
@@ -453,11 +445,7 @@ export function runScaleBenchmark(
       clearRuntimeVectorCache(memDb);
     }
 
-    const stable = renderStableLayer(
-      memDb,
-      { workspaceId: wsId, sessionId: caseSessionId },
-      cfg
-    );
+    const stable = renderStableLayer(memDb, { workspaceId: wsId, sessionId: caseSessionId }, cfg);
     const stableTokens = budgetTokens(stable.text);
     const dynamicBudget =
       cfg.dynamicBudgetTokens === 0
@@ -495,8 +483,7 @@ export function runScaleBenchmark(
         q.expect.include.length === 0
           ? true
           : q.expect.include.every((sub) => dynamicRendered.includes(sub));
-      const emptyPass =
-        q.expect.include.length === 0 ? recallResult.items.length === 0 : true;
+      const emptyPass = q.expect.include.length === 0 ? recallResult.items.length === 0 : true;
       const excludePass =
         q.expect.exclude && q.expect.exclude.length > 0
           ? !q.expect.exclude.some((sub) => dynamicRendered.includes(sub))
@@ -509,10 +496,7 @@ export function runScaleBenchmark(
         dynamicTokens <= maxAllowed && stableTokens + dynamicTokens <= cfg.hardBudgetTokens;
 
       const pass =
-        includePass &&
-        excludePass &&
-        budgetPass &&
-        (q.expect.include.length > 0 || emptyPass);
+        includePass && excludePass && budgetPass && (q.expect.include.length > 0 || emptyPass);
 
       syntheticCases.push({
         id: q.id,

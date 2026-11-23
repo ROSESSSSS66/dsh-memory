@@ -1,7 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
-import { normalizeWorkspacePath, workspaceId } from './scope.js';
 import type { Db, MemoryRecord } from '../types.js';
+import { normalizeWorkspacePath, workspaceId } from './scope.js';
 
 export interface RedactResult {
   text: string;
@@ -124,7 +124,7 @@ export function redactSecrets(input: string): RedactResult {
 
   // 5. 常见厂商独立 API Key / Access Token（修复 Slack 连字符分段、结尾前瞻防泄露）
   const standaloneKeyRegex =
-    /(?<![a-zA-Z0-9_-])(sk-(?:ant-api\d{2}-|proj-|live-|test-)?[a-zA-Z0-9_\-]{20,}|gh[pousr]_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{50,}|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[baprs]-[0-9a-zA-Z\-]{10,})(?=$|[\s'"`,;}\])<>])/g;
+    /(?<![a-zA-Z0-9_-])(sk-(?:ant-api\d{2}-|proj-|live-|test-)?[a-zA-Z0-9_-]{20,}|gh[pousr]_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{50,}|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[baprs]-[0-9a-zA-Z-]{10,})(?=$|[\s'"`,;}\])<>])/g;
   if (standaloneKeyRegex.test(text)) {
     mark('API_KEY');
     standaloneKeyRegex.lastIndex = 0;
@@ -133,7 +133,7 @@ export function redactSecrets(input: string): RedactResult {
 
   // 5b. 其它主流厂商密钥：Google (AIza...)、Stripe、GitLab、HuggingFace、npm
   const vendorKeyRegex =
-    /(?<![a-zA-Z0-9_-])(AIza[0-9A-Za-z_\-]{35}|(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{20,}|glpat-[0-9a-zA-Z_\-]{20,}|hf_[a-zA-Z0-9]{30,}|npm_[a-zA-Z0-9]{36})(?=$|[\s'"`,;}\])<>])/g;
+    /(?<![a-zA-Z0-9_-])(AIza[0-9A-Za-z_-]{35}|(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{20,}|glpat-[0-9a-zA-Z_-]{20,}|hf_[a-zA-Z0-9]{30,}|npm_[a-zA-Z0-9]{36})(?=$|[\s'"`,;}\])<>])/g;
   if (vendorKeyRegex.test(text)) {
     mark('API_KEY');
     vendorKeyRegex.lastIndex = 0;
@@ -224,7 +224,10 @@ export function isWorkspaceExcluded(cwdOrId: string, excludeList: string[] = [])
 }
 
 /** Filter before LIMIT so private records cannot starve public batches. */
-export function memoryPrivacyFilterSQL(excludeList: string[] = []): { sql: string; params: string[] } {
+export function memoryPrivacyFilterSQL(excludeList: string[] = []): {
+  sql: string;
+  params: string[];
+} {
   const excluded = [
     ...new Set(
       excludeList
@@ -259,7 +262,11 @@ export function memoryPrivacyFilterSQL(excludeList: string[] = []): { sql: strin
 const SQL_IN_CHUNK_SIZE = 400;
 
 /** Shared legacy records without retained provenance cannot bypass workspace exclusions. */
-export function canSendMemoriesOffline(db: Db, memories: MemoryRecord[], excludeList: string[]): boolean {
+export function canSendMemoriesOffline(
+  db: Db,
+  memories: MemoryRecord[],
+  excludeList: string[]
+): boolean {
   if (!excludeList.length || !memories.length) return true;
   const ids = [...new Set(memories.map((m) => m.id))];
   const filter = memoryPrivacyFilterSQL(excludeList);
@@ -304,7 +311,10 @@ function isLoopbackHostname(hostname: string): boolean {
  * 判断 IPv4/IPv6 地址是否属于危险的链路本地/云元数据/未指定/组播段
  */
 export function isBlockedOutboundIp(ip: string, allowLoopback = true): boolean {
-  const normalized = ip.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  const normalized = ip
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
   if (!normalized) return true;
 
   // 解包 IPv4-mapped IPv6 (::ffff:a.b.c.d 或 ::ffff:hex:hex)
@@ -326,7 +336,8 @@ export function isBlockedOutboundIp(ip: string, allowLoopback = true): boolean {
 
   if (net.isIPv4(normalized)) {
     const octets = normalized.split('.').map(Number);
-    if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return true;
+    if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255))
+      return true;
     const [a, b] = octets;
     if (a === 0) return true; // 0.0.0.0/8 unspecified
     if (a === 169 && b === 254) return true; // AWS/GCP/Azure link-local metadata 169.254.0.0/16
@@ -339,7 +350,12 @@ export function isBlockedOutboundIp(ip: string, allowLoopback = true): boolean {
   if (net.isIPv6(normalized)) {
     if (normalized === '::' || normalized === '0:0:0:0:0:0:0:0') return true;
     if (normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') return !allowLoopback;
-    if (normalized.startsWith('fe8') || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')) {
+    if (
+      normalized.startsWith('fe8') ||
+      normalized.startsWith('fe9') ||
+      normalized.startsWith('fea') ||
+      normalized.startsWith('feb')
+    ) {
       return true; // fe80::/10 link-local
     }
     if (normalized.startsWith('ff')) return true; // ff00::/8 multicast
@@ -425,8 +441,7 @@ export async function assertSafeOutboundEndpoint(
   }
 
   const lookup =
-    options.lookupFn ||
-    (async (h: string) => dns.lookup(h, { all: true, verbatim: true }));
+    options.lookupFn || (async (h: string) => dns.lookup(h, { all: true, verbatim: true }));
 
   try {
     const records = await lookup(host);
@@ -513,7 +528,10 @@ export function isOfflineEndpointAllowed(
         if (lowerAllowed === targetUrl.host.toLowerCase()) {
           return true;
         }
-        if (lowerAllowed === targetHost && (!targetUrl.port || (targetUrl.protocol === 'https:' && targetUrl.port === '443'))) {
+        if (
+          lowerAllowed === targetHost &&
+          (!targetUrl.port || (targetUrl.protocol === 'https:' && targetUrl.port === '443'))
+        ) {
           return true;
         }
       }

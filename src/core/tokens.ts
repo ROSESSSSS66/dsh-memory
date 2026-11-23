@@ -20,7 +20,15 @@ function isKanaOrHangulOrCjkPunct(cp: number): boolean {
 }
 
 function isWhitespace(cp: number): boolean {
-  return cp === 0x20 || cp === 0x09 || cp === 0x0a || cp === 0x0d || cp === 0x0c || cp === 0x0b || cp === 0x3000;
+  return (
+    cp === 0x20 ||
+    cp === 0x09 ||
+    cp === 0x0a ||
+    cp === 0x0d ||
+    cp === 0x0c ||
+    cp === 0x0b ||
+    cp === 0x3000
+  );
 }
 
 function isAsciiPunctOrSymbol(cp: number): boolean {

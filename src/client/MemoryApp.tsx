@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { MEMORY_STYLES } from './styles.js';
-import { formatRelativeTime, getMessages, resolveUiLocale } from './i18n.js';
-import { MemoryHeader } from './components/MemoryHeader.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EpistemicInsights } from './components/EpistemicInsights.js';
 import { LLMConfigModal } from './components/LLMConfigModal.js';
+import { MemoryHeader } from './components/MemoryHeader.js';
+import { formatRelativeTime, getMessages, resolveUiLocale } from './i18n.js';
+import { MEMORY_STYLES } from './styles.js';
 import type {
   ConfigSavePayload,
   CoreMemoryBlock,
@@ -51,14 +51,10 @@ export function MemoryApp(props: MemoryHostAdapter) {
   const [loading, setLoading] = useState(true);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(
-    props.initialWorkspaceId ?? ''
-  );
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(props.initialWorkspaceId ?? '');
 
   const [statsData, setStatsData] = useState<OverviewStatsData | null>(null);
-  const [healthData, setHealthData] = useState<MemoryHealthReportData | null>(
-    null
-  );
+  const [healthData, setHealthData] = useState<MemoryHealthReportData | null>(null);
   const [coreBlocks, setCoreBlocks] = useState<CoreMemoryBlock[]>([]);
   const [coreTokens, setCoreTokens] = useState(0);
   const [stableLayerTokens, setStableLayerTokens] = useState(0);
@@ -69,8 +65,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
   const [filterQuery, setFilterQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [recentJobs, setRecentJobs] = useState<JobLogItem[]>([]);
-  const [hindsightData, setHindsightData] =
-    useState<HindsightSummaryData | null>(null);
+  const [hindsightData, setHindsightData] = useState<HindsightSummaryData | null>(null);
   const [vikingData, setVikingData] = useState<VikingSummaryData | null>(null);
 
   const [llmConfig, setLlmConfig] = useState<LLMConfigData | null>(null);
@@ -115,16 +110,11 @@ export function MemoryApp(props: MemoryHostAdapter) {
 
   const fetchLegacy = useCallback(
     async (signal: AbortSignal): Promise<void> => {
-      const limit = Math.min(
-        MAX_POLL_WINDOW,
-        Math.max(PAGE_SIZE, loadedWindowRef.current)
-      );
+      const limit = Math.min(MAX_POLL_WINDOW, Math.max(PAGE_SIZE, loadedWindowRef.current));
       const wsParam = selectedWorkspaceId
         ? `&workspaceId=${encodeURIComponent(selectedWorkspaceId)}`
         : '';
-      const qParam = debouncedQuery
-        ? `&q=${encodeURIComponent(debouncedQuery)}`
-        : '';
+      const qParam = debouncedQuery ? `&q=${encodeURIComponent(debouncedQuery)}` : '';
 
       const results = await Promise.allSettled([
         apiFetch(
@@ -155,9 +145,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
 
       if (stRes.status === 'fulfilled') {
         if (stRes.value.ok) {
-          const j = await safeJson<OverviewStatsData & { ok?: boolean }>(
-            stRes.value
-          );
+          const j = await safeJson<OverviewStatsData & { ok?: boolean }>(stRes.value);
           if (j?.ok) {
             anyOk = true;
             setStatsData(j);
@@ -170,9 +158,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
         }
       } else {
         firstError ??=
-          stRes.reason instanceof Error
-            ? stRes.reason.message
-            : t.banners.networkError;
+          stRes.reason instanceof Error ? stRes.reason.message : t.banners.networkError;
       }
 
       if (hlRes.status === 'fulfilled' && hlRes.value.ok) {
@@ -213,9 +199,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
           anyOk = true;
           const items = j.items ?? [];
           setMemories(items);
-          setTotalMemories(
-            typeof j.total === 'number' ? j.total : items.length
-          );
+          setTotalMemories(typeof j.total === 'number' ? j.total : items.length);
         }
       }
 
@@ -247,10 +231,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
   );
 
   const fetchAll = useCallback(
-    async (options?: {
-      force?: boolean;
-      abortCurrent?: boolean;
-    }): Promise<void> => {
+    async (options?: { force?: boolean; abortCurrent?: boolean }): Promise<void> => {
       if (fetchingRef.current) {
         if (options?.abortCurrent && pollAbortRef.current) {
           pollAbortRef.current.abort();
@@ -274,9 +255,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
         if (debouncedQuery) params.set('q', debouncedQuery);
         params.set(
           'limit',
-          String(
-            Math.min(MAX_POLL_WINDOW, Math.max(PAGE_SIZE, loadedWindowRef.current))
-          )
+          String(Math.min(MAX_POLL_WINDOW, Math.max(PAGE_SIZE, loadedWindowRef.current)))
         );
         params.set('offset', '0');
 
@@ -285,13 +264,10 @@ export function MemoryApp(props: MemoryHostAdapter) {
           headers['If-None-Match'] = etagRef.current;
         }
 
-        const res = await apiFetch(
-          `${API_PREFIX}/studio-snapshot?${params.toString()}`,
-          {
-            headers,
-            signal: controller.signal,
-          }
-        );
+        const res = await apiFetch(`${API_PREFIX}/studio-snapshot?${params.toString()}`, {
+          headers,
+          signal: controller.signal,
+        });
 
         if (controller.signal.aborted || !mountedRef.current) return;
 
@@ -311,15 +287,11 @@ export function MemoryApp(props: MemoryHostAdapter) {
           return;
         }
 
-        const j = await safeJson<
-          StudioSnapshotResponse | { ok?: false; error?: string }
-        >(res);
+        const j = await safeJson<StudioSnapshotResponse | { ok?: false; error?: string }>(res);
         if (controller.signal.aborted || !mountedRef.current) return;
 
         if (!j || !j.ok) {
-          setConnectionError(
-            (j && 'error' in j && j.error) || t.banners.invalidResponse
-          );
+          setConnectionError((j && 'error' in j && j.error) || t.banners.invalidResponse);
           return;
         }
 
@@ -345,9 +317,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
         const nextItems = j.memories?.items ?? [];
         setMemories(nextItems);
         setTotalMemories(
-          typeof j.memories?.total === 'number'
-            ? j.memories.total
-            : nextItems.length
+          typeof j.memories?.total === 'number' ? j.memories.total : nextItems.length
         );
         setRecentJobs((j.evolution?.recentJobs ?? []).slice(0, 8));
         setHindsightData(j.hindsight ?? null);
@@ -362,9 +332,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
           return;
         }
         setConnectionError(
-          err instanceof Error && err.message
-            ? err.message
-            : t.banners.networkError
+          err instanceof Error && err.message ? err.message : t.banners.networkError
         );
       } finally {
         if (pollAbortRef.current === controller) {
@@ -432,8 +400,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
 
   // Background 8s polling & visibility resume (paused while modal open or tab hidden)
   useEffect(() => {
-    const isHidden = () =>
-      typeof document !== 'undefined' && Boolean(document.hidden);
+    const isHidden = () => typeof document !== 'undefined' && Boolean(document.hidden);
 
     const timer = setInterval(() => {
       if (!isHidden() && !configOpenRef.current) {
@@ -516,14 +483,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
         setLoadingMore(false);
       }
     }
-  }, [
-    apiFetch,
-    debouncedQuery,
-    loadingMore,
-    memories.length,
-    selectedWorkspaceId,
-    totalMemories,
-  ]);
+  }, [apiFetch, debouncedQuery, loadingMore, memories.length, selectedWorkspaceId, totalMemories]);
 
   const handleOpenConfig = useCallback(() => {
     setConfigOpen(true);
@@ -563,10 +523,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
   );
 
   const handleTestConnection = useCallback(
-    async (
-      payload: LLMTestPayload,
-      signal?: AbortSignal
-    ): Promise<LLMTestResult> => {
+    async (payload: LLMTestPayload, signal?: AbortSignal): Promise<LLMTestResult> => {
       const res = await apiFetch(`${API_PREFIX}/llm/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -608,9 +565,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
         m.content?.toLowerCase().includes(q) ||
         Boolean(m.slot_key && m.slot_key.toLowerCase().includes(q)) ||
         Boolean(m.vikingUri && m.vikingUri.toLowerCase().includes(q)) ||
-        Boolean(
-          m.hindsightNetwork && m.hindsightNetwork.toLowerCase().includes(q)
-        ) ||
+        Boolean(m.hindsightNetwork && m.hindsightNetwork.toLowerCase().includes(q)) ||
         m.type.toLowerCase().includes(q) ||
         typeLabel.toLowerCase().includes(q) ||
         m.id.toLowerCase().includes(q)
@@ -625,15 +580,13 @@ export function MemoryApp(props: MemoryHostAdapter) {
     (statsData?.stats.active ?? statsData?.stats.byStatus?.active ?? 0) +
     (statsData?.stats.frozen ?? statsData?.stats.byStatus?.frozen ?? 0);
   const totalCount = statsData?.stats.total ?? 0;
-  const candidateCount =
-    statsData?.stats.candidate ?? statsData?.stats.byStatus?.candidate ?? 0;
+  const candidateCount = statsData?.stats.candidate ?? statsData?.stats.byStatus?.candidate ?? 0;
 
   const avgTokens = statsData?.recentTelemetry.avgTokens ?? 0;
   const dynamicBudget = statsData?.dynamicBudgetTokens ?? 1600;
   const stableBudget = statsData?.stableBudgetTokens ?? 600;
   const hardBudget = statsData?.hardBudgetTokens ?? 3200;
-  const effectiveStableTokens =
-    stableLayerTokens > 0 ? stableLayerTokens : coreTokens;
+  const effectiveStableTokens = stableLayerTokens > 0 ? stableLayerTokens : coreTokens;
 
   const correctionRate = statsData?.recentTelemetry.correctionRate ?? 0;
   const signalAccuracy = Number(Math.max(0, 100 - correctionRate).toFixed(1));
@@ -672,9 +625,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
   const effectiveTotalMemories = Math.max(totalMemories, memories.length);
   const remainingMemories = Math.max(0, effectiveTotalMemories - memories.length);
   const showSearchInput =
-    memories.length > 0 ||
-    effectiveTotalMemories > 0 ||
-    filterQuery.trim().length > 0;
+    memories.length > 0 || effectiveTotalMemories > 0 || filterQuery.trim().length > 0;
 
   const displayModelName = llmConfig?.offlineLLM?.useDshLlm
     ? llmConfig.offlineLLM.model || t.header.dshHostLabel
@@ -695,9 +646,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
           llmModelName={displayModelName}
           healthGrade={healthData?.grade}
           healthScore={healthData?.score}
-          strategyVersion={
-            hasData ? (statsData?.activeStrategyVersion ?? 1) : undefined
-          }
+          strategyVersion={hasData ? (statsData?.activeStrategyVersion ?? 1) : undefined}
           locale={locale}
           loading={isInitialLoading}
           offline={Boolean(connectionError)}
@@ -711,25 +660,16 @@ export function MemoryApp(props: MemoryHostAdapter) {
           <div className="dshm-banner dshm-banner--offline" role="alert">
             <div className="dshm-banner-body">
               <span className="dshm-banner-title">{t.banners.offlineTitle}</span>
-              <span className="dshm-banner-detail">
-                {t.banners.offlineDetail(connectionError)}
-              </span>
+              <span className="dshm-banner-detail">{t.banners.offlineDetail(connectionError)}</span>
             </div>
-            <button
-              type="button"
-              className="dshm-banner-retry"
-              onClick={handleRetrySync}
-            >
+            <button type="button" className="dshm-banner-retry" onClick={handleRetrySync}>
               {t.banners.retry}
             </button>
           </div>
         ) : null}
 
         {/* 2. Claude Studio 3x2 Telemetry Panel */}
-        <section
-          className="dshm-usage-panel"
-          aria-label={t.overview.ariaLabel}
-        >
+        <section className="dshm-usage-panel" aria-label={t.overview.ariaLabel}>
           <div className="dshm-usage-head">
             <div className="dshm-usage-head-left">
               <span className="dshm-usage-head-title">{t.overview.title}</span>
@@ -739,20 +679,14 @@ export function MemoryApp(props: MemoryHostAdapter) {
                 </span>
               ) : null}
             </div>
-            <span className="dshm-usage-head-caption">
-              {t.overview.caption}
-            </span>
+            <span className="dshm-usage-head-caption">{t.overview.caption}</span>
           </div>
 
           <div className="dshm-stat-grid">
             <div className="dshm-stat-tile">
-              <span className="dshm-stat-tile-label">
-                {t.overview.tiles.activeLabel}
-              </span>
+              <span className="dshm-stat-tile-label">{t.overview.tiles.activeLabel}</span>
               <div className="dshm-stat-tile-value-row">
-                <span className="dshm-stat-tile-value">
-                  {hasData ? activeCount : '—'}
-                </span>
+                <span className="dshm-stat-tile-value">{hasData ? activeCount : '—'}</span>
                 <span className="dshm-stat-tile-sub">
                   {hasData
                     ? t.overview.tiles.activeSub(totalCount, candidateCount)
@@ -762,61 +696,43 @@ export function MemoryApp(props: MemoryHostAdapter) {
             </div>
 
             <div className="dshm-stat-tile">
-              <span className="dshm-stat-tile-label">
-                {t.overview.tiles.healthLabel}
-              </span>
+              <span className="dshm-stat-tile-label">{t.overview.tiles.healthLabel}</span>
               <div className="dshm-stat-tile-value-row">
                 <span className="dshm-stat-tile-value">
-                  {healthData
-                    ? `${healthData.grade} · ${healthData.score}`
-                    : '—'}
+                  {healthData ? `${healthData.grade} · ${healthData.score}` : '—'}
                 </span>
                 <span className="dshm-stat-tile-sub">{healthSubText}</span>
               </div>
             </div>
 
             <div className="dshm-stat-tile">
-              <span className="dshm-stat-tile-label">
-                {t.overview.tiles.dynamicLabel}
-              </span>
+              <span className="dshm-stat-tile-label">{t.overview.tiles.dynamicLabel}</span>
               <div className="dshm-stat-tile-value-row">
                 <span className="dshm-stat-tile-value">
                   {hasData ? `${avgTokens} ${t.overview.tokUnit}` : '—'}
                 </span>
                 <span className="dshm-stat-tile-sub">
-                  {hasData
-                    ? t.overview.tiles.dynamicSub(dynamicBudget)
-                    : t.overview.tiles.syncing}
+                  {hasData ? t.overview.tiles.dynamicSub(dynamicBudget) : t.overview.tiles.syncing}
                 </span>
               </div>
             </div>
 
             <div className="dshm-stat-tile">
-              <span className="dshm-stat-tile-label">
-                {t.overview.tiles.stableLabel}
-              </span>
+              <span className="dshm-stat-tile-label">{t.overview.tiles.stableLabel}</span>
               <div className="dshm-stat-tile-value-row">
                 <span className="dshm-stat-tile-value">
-                  {hasData
-                    ? `${effectiveStableTokens} ${t.overview.tokUnit}`
-                    : '—'}
+                  {hasData ? `${effectiveStableTokens} ${t.overview.tokUnit}` : '—'}
                 </span>
                 <span className="dshm-stat-tile-sub">
-                  {hasData
-                    ? t.overview.tiles.stableSub(stableBudget)
-                    : t.overview.tiles.syncing}
+                  {hasData ? t.overview.tiles.stableSub(stableBudget) : t.overview.tiles.syncing}
                 </span>
               </div>
             </div>
 
             <div className="dshm-stat-tile">
-              <span className="dshm-stat-tile-label">
-                {t.overview.tiles.accuracyLabel}
-              </span>
+              <span className="dshm-stat-tile-label">{t.overview.tiles.accuracyLabel}</span>
               <div className="dshm-stat-tile-value-row">
-                <span className="dshm-stat-tile-value">
-                  {hasData ? `${signalAccuracy}%` : '—'}
-                </span>
+                <span className="dshm-stat-tile-value">{hasData ? `${signalAccuracy}%` : '—'}</span>
                 <span className="dshm-stat-tile-sub">
                   {hasData
                     ? t.overview.tiles.accuracySub(injectionCount)
@@ -826,9 +742,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
             </div>
 
             <div className="dshm-stat-tile">
-              <span className="dshm-stat-tile-label">
-                {t.overview.tiles.quotaLabel}
-              </span>
+              <span className="dshm-stat-tile-label">{t.overview.tiles.quotaLabel}</span>
               <div className="dshm-stat-tile-value-row">
                 <span className="dshm-stat-tile-value">
                   {hasData ? `${callsToday} / ${maxDailyCalls}` : '—'}
@@ -845,22 +759,12 @@ export function MemoryApp(props: MemoryHostAdapter) {
           {/* Context Budget Yardstick */}
           <div className="dshm-yardstick">
             <div className="dshm-yardstick-bar" aria-hidden="true">
-              <div
-                className="dshm-yardstick-seg-stable"
-                style={{ width: `${stableShare}%` }}
-              />
-              <div
-                className="dshm-yardstick-seg-dynamic"
-                style={{ width: `${dynamicShare}%` }}
-              />
+              <div className="dshm-yardstick-seg-stable" style={{ width: `${stableShare}%` }} />
+              <div className="dshm-yardstick-seg-dynamic" style={{ width: `${dynamicShare}%` }} />
             </div>
             <div className="dshm-yardstick-legend">
               <span>
-                {t.overview.yardstick.legend(
-                  effectiveStableTokens,
-                  coreTokens,
-                  avgTokens
-                )}
+                {t.overview.yardstick.legend(effectiveStableTokens, coreTokens, avgTokens)}
               </span>
               <span>{t.overview.yardstick.hardCap(hardBudget)}</span>
             </div>
@@ -873,10 +777,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
 
         {/* 3. Core Memory (All blocks rendered — custom blocks included) */}
         {coreBlocks.length > 0 ? (
-          <section
-            className="dshm-section"
-            aria-label={t.coreMemory.ariaLabel}
-          >
+          <section className="dshm-section" aria-label={t.coreMemory.ariaLabel}>
             <div className="dshm-section-head">
               <span className="dshm-section-label">{t.coreMemory.title}</span>
               <span className="dshm-section-sub">{t.coreMemory.sub}</span>
@@ -893,9 +794,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
                       {b.tokens} {t.overview.tokUnit}
                     </span>
                   </div>
-                  <div className="dshm-core-card-body">
-                    {b.content || t.coreMemory.emptyBlock}
-                  </div>
+                  <div className="dshm-core-card-body">{b.content || t.coreMemory.emptyBlock}</div>
                 </div>
               ))}
             </div>
@@ -903,11 +802,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
         ) : null}
 
         {/* 4. Read-Only Epistemic Insights (Hindsight 4-Network + OpenViking L0/L1/L2 Tree) */}
-        <EpistemicInsights
-          hindsight={hindsightData}
-          viking={vikingData}
-          locale={locale}
-        />
+        <EpistemicInsights hindsight={hindsightData} viking={vikingData} locale={locale} />
 
         {/* 5. Active Memories (Process-Column Expandable List + Server Search/Pagination) */}
         <section className="dshm-section" aria-label={t.memories.ariaLabel}>
@@ -939,9 +834,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
             <div className="dshm-empty-box">{t.memories.loadingState}</div>
           ) : filteredMemories.length === 0 ? (
             <div className="dshm-empty-box">
-              {filterQuery.trim()
-                ? t.memories.emptyFiltered
-                : t.memories.emptyReady}
+              {filterQuery.trim() ? t.memories.emptyFiltered : t.memories.emptyReady}
             </div>
           ) : (
             <div className="dshm-process-card">
@@ -949,32 +842,18 @@ export function MemoryApp(props: MemoryHostAdapter) {
                 <details key={m.id} className="dshm-process-item">
                   <summary className="dshm-process-summary">
                     <div className="dshm-process-left">
-                      <span
-                        className="dshm-process-kind"
-                        data-pinned={m.pinned ? '1' : '0'}
-                      >
-                        {m.status === 'frozen'
-                          ? '❄ '
-                          : m.pinned
-                            ? '★ '
-                            : ''}
+                      <span className="dshm-process-kind" data-pinned={m.pinned ? '1' : '0'}>
+                        {m.status === 'frozen' ? '❄ ' : m.pinned ? '★ ' : ''}
                         {t.memories.types[m.type] || m.type}
                       </span>
-                      <span className="dshm-process-title">
-                        {m.summary || m.content}
-                      </span>
+                      <span className="dshm-process-title">{m.summary || m.content}</span>
                     </div>
 
                     <div className="dshm-process-right">
-                      {m.slot_key ? (
-                        <span className="dshm-process-slot">{m.slot_key}</span>
-                      ) : null}
+                      {m.slot_key ? <span className="dshm-process-slot">{m.slot_key}</span> : null}
                       <span>{Math.round((m.utility ?? 0.5) * 100)}%</span>
                       <span>{formatRelativeTime(m.updated_at, locale)}</span>
-                      <span
-                        className="dshm-process-chevron"
-                        aria-hidden="true"
-                      >
+                      <span className="dshm-process-chevron" aria-hidden="true">
                         ›
                       </span>
                     </div>
@@ -988,8 +867,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
                       </span>
                       {m.hindsightNetwork ? (
                         <span className="dshm-meta-chip">
-                          {t.memories.meta.network}:{' '}
-                          {m.hindsightNetwork.toUpperCase()}
+                          {t.memories.meta.network}: {m.hindsightNetwork.toUpperCase()}
                         </span>
                       ) : null}
                       {m.vikingUri ? (
@@ -1001,12 +879,10 @@ export function MemoryApp(props: MemoryHostAdapter) {
                         {t.memories.meta.version}: v{m.version}
                       </span>
                       <span>
-                        {t.memories.meta.scope}:{' '}
-                        {t.memories.scopes[m.scope] || m.scope}
+                        {t.memories.meta.scope}: {t.memories.scopes[m.scope] || m.scope}
                       </span>
                       <span>
-                        {t.memories.meta.confidence}:{' '}
-                        {Math.round((m.confidence ?? 0.8) * 100)}%
+                        {t.memories.meta.confidence}: {Math.round((m.confidence ?? 0.8) * 100)}%
                       </span>
                       <span>
                         {t.memories.meta.importance}: {m.importance ?? 5}/10
@@ -1032,9 +908,7 @@ export function MemoryApp(props: MemoryHostAdapter) {
                     disabled={loadingMore}
                     onClick={() => void handleLoadMore()}
                   >
-                    {loadingMore
-                      ? t.memories.loadingMore
-                      : t.memories.loadMore(remainingMemories)}
+                    {loadingMore ? t.memories.loadingMore : t.memories.loadMore(remainingMemories)}
                   </button>
                 </div>
               ) : null}
@@ -1074,18 +948,14 @@ export function MemoryApp(props: MemoryHostAdapter) {
                     >
                       <span>{t.jobs.status[job.status] || job.status}</span>
                       {job.attempts > 1 || job.status === 'failed' ? (
-                        <span className="dshm-job-attempts">
-                          {t.jobs.attempts(job.attempts)}
-                        </span>
+                        <span className="dshm-job-attempts">{t.jobs.attempts(job.attempts)}</span>
                       ) : null}
                       <span className="dshm-job-time">
                         {formatRelativeTime(job.created_at, locale)}
                       </span>
                     </div>
                   </div>
-                  {job.last_error ? (
-                    <div className="dshm-job-error">{job.last_error}</div>
-                  ) : null}
+                  {job.last_error ? <div className="dshm-job-error">{job.last_error}</div> : null}
                 </div>
               ))}
             </div>

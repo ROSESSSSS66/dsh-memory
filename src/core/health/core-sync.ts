@@ -1,10 +1,10 @@
-import { hydrateMemoryRow, type Db, type MemoryRow } from '../../types.js';
-import { tokenSet, jaccard } from '../text.js';
-import { estimateTokens } from '../tokens.js';
-import { workspaceId } from '../scope.js';
-import { isWorkspaceExcluded, memoryPrivacyFilterSQL } from '../privacy.js';
-import { hasUntrustedOrigin } from '../trust.js';
+import { type Db, hydrateMemoryRow, type MemoryRow } from '../../types.js';
 import { getCoreMemory, setCoreMemory } from '../core-memory.js';
+import { isWorkspaceExcluded, memoryPrivacyFilterSQL } from '../privacy.js';
+import { workspaceId } from '../scope.js';
+import { jaccard, tokenSet } from '../text.js';
+import { estimateTokens } from '../tokens.js';
+import { hasUntrustedOrigin } from '../trust.js';
 
 export interface CoreSyncOptions {
   workspaceId?: string;
@@ -22,10 +22,7 @@ export type CoreSyncResult = number;
  * 仅将线上正反馈验证过 (pinned=1 或 success_count>=1)、confidence >= 0.88 且 utility >= 0.65 的无污点规则
  * 幂等蒸馏进 human (用户偏好) 与 project (项目核心规范) 块，严格限制每块 <= maxBlockTokens 且绝不覆盖 frozen 块。
  */
-export function syncAutonomousCoreMemory(
-  db: Db,
-  options: CoreSyncOptions = {}
-): CoreSyncResult {
+export function syncAutonomousCoreMemory(db: Db, options: CoreSyncOptions = {}): CoreSyncResult {
   const now = options.now ?? Date.now();
   const maxBlockTokens = options.maxBlockTokens ?? 220;
   const wsFilter = options.workspaceId ? workspaceId(options.workspaceId) : undefined;

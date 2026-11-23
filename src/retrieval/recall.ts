@@ -1,26 +1,22 @@
+import { DEFAULTS, type PluginConfig } from '../config.js';
 import {
-  hydrateMemoryRow,
+  type EmbedQueryOptions,
+  embedQueryWithFallback,
+  isRemoteEmbeddingEnabled,
+} from '../core/embedding-client.js';
+import { scopeFilterSQL } from '../core/scope.js';
+import { getActiveStrategy, validateAndClampStrategy } from '../evolution/strategy.js';
+import {
   type Db,
-  type QueryPlan,
+  hydrateMemoryRow,
   type MemoryRecord,
   type MemoryRow,
+  type QueryPlan,
   type StrategyConfig,
 } from '../types.js';
-import { DEFAULTS, type PluginConfig } from '../config.js';
-import { scopeFilterSQL } from '../core/scope.js';
-import {
-  isRemoteEmbeddingEnabled,
-  embedQueryWithFallback,
-  type EmbedQueryOptions,
-} from '../core/embedding-client.js';
-import {
-  runAllChannels,
-  expandGraphNeighbors,
-  buildVectorQueryText,
-} from './channels.js';
-import { fuseCandidates, DEFAULT_STRATEGY } from './fuse.js';
+import { buildVectorQueryText, expandGraphNeighbors, runAllChannels } from './channels.js';
+import { DEFAULT_STRATEGY, fuseCandidates } from './fuse.js';
 import { governWithResult, type SelectedItem } from './governor.js';
-import { getActiveStrategy, validateAndClampStrategy } from '../evolution/strategy.js';
 
 export interface RecallContext {
   workspaceId: string;
@@ -66,11 +62,7 @@ function resolveActiveStrategy(
 /**
  * 检索协调主入口 (§5.4 - §5.7) — 纯同步零网络调用，直接利用本地全量向量矩阵与 FTS5
  */
-export function recall(
-  db: Db,
-  plan: QueryPlan,
-  ctx: RecallContext
-): RecallResult {
+export function recall(db: Db, plan: QueryPlan, ctx: RecallContext): RecallResult {
   const t0 = Date.now();
   const cfg = ctx.cfg || DEFAULTS;
   const now = ctx.now ?? Date.now();
@@ -153,10 +145,7 @@ export function recall(
   const idList = Array.from(allIds);
   const placeholders = idList.map(() => '?').join(', ');
 
-  const memRows = db.all<MemoryRow>(
-    `SELECT * FROM memories WHERE id IN (${placeholders})`,
-    idList
-  );
+  const memRows = db.all<MemoryRow>(`SELECT * FROM memories WHERE id IN (${placeholders})`, idList);
   const memoriesMap = new Map<string, MemoryRecord>();
   for (const rawRow of memRows) {
     const hydrated = hydrateMemoryRow(rawRow);

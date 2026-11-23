@@ -1,7 +1,7 @@
 import * as React from 'react';
-import { MemoryApp } from './MemoryApp.js';
 import { MemoryErrorBoundary } from './components/MemoryErrorBoundary.js';
 import { getMessages, resolveUiLocale } from './i18n.js';
+import { MemoryApp } from './MemoryApp.js';
 import type { MemoryHostAdapter, UiLocale } from './types.js';
 
 interface HostContextLike {
@@ -14,7 +14,10 @@ interface HostContextLike {
   workspace?: { id?: string; current?: { id?: string } };
   slots?: {
     inject?: (name: string, callback: () => unknown) => unknown;
-    register: (meta: Record<string, unknown>, render: (props?: unknown) => React.ReactNode) => unknown;
+    register: (
+      meta: Record<string, unknown>,
+      render: (props?: unknown) => React.ReactNode
+    ) => unknown;
   };
 }
 
@@ -133,8 +136,7 @@ function createHostFetchApi(ctx: HostContextLike | undefined) {
   return (path: string, init?: RequestInit): Promise<Response> => {
     const conn = getService<HostConnectionLike>(ctx, 'connection');
     const baseUrl = resolveConnectionBaseUrl(conn);
-    const resolvedUrl =
-      baseUrl && path.startsWith('/') ? `${baseUrl}${path}` : path;
+    const resolvedUrl = baseUrl && path.startsWith('/') ? `${baseUrl}${path}` : path;
 
     const authHeaders = resolveConnectionHeaders(conn);
     const mergedHeaders = new Headers(authHeaders);
@@ -145,9 +147,7 @@ function createHostFetchApi(ctx: HostContextLike | undefined) {
     }
 
     const hasHeaders = Array.from(mergedHeaders.keys()).length > 0;
-    const requestInit: RequestInit = hasHeaders
-      ? { ...init, headers: mergedHeaders }
-      : { ...init };
+    const requestInit: RequestInit = hasHeaders ? { ...init, headers: mergedHeaders } : { ...init };
 
     return fetch(resolvedUrl, requestInit);
   };
@@ -176,11 +176,7 @@ interface MemoryStudioHostRootProps {
   initialWorkspaceId?: string;
 }
 
-function MemoryStudioHostRoot({
-  ctx,
-  fetchApi,
-  initialWorkspaceId,
-}: MemoryStudioHostRootProps) {
+function MemoryStudioHostRoot({ ctx, fetchApi, initialWorkspaceId }: MemoryStudioHostRootProps) {
   const readLocale = React.useCallback((): UiLocale => {
     const loc = getService<HostLocaleLike>(ctx, 'locale');
     return resolveUiLocale(loc);

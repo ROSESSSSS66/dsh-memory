@@ -1,13 +1,18 @@
-import type { Db, Scope } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import { CJK_SEGMENT_REGEX, segment, extractEntities, stemToken } from './text.js';
-import { workspaceId } from './scope.js';
+import type { Db, Scope } from '../types.js';
+import {
+  fetchRemoteEmbeddings,
+  getActiveEmbeddingMeta,
+  isRemoteEmbeddingEnabled,
+} from './embedding-client.js';
 import {
   isWorkspaceExcluded,
+  type LookupFn,
   memoryPrivacyFilterSQL,
   redactSecrets,
-  type LookupFn,
 } from './privacy.js';
+import { workspaceId } from './scope.js';
+import { CJK_SEGMENT_REGEX, extractEntities, segment, stemToken } from './text.js';
 import {
   invalidateVectorIndex,
   removeVectorIndexEntry,
@@ -15,11 +20,6 @@ import {
   upsertVectorIndexBatch,
   type VectorIndexEntryMeta,
 } from './vector-index.js';
-import {
-  fetchRemoteEmbeddings,
-  getActiveEmbeddingMeta,
-  isRemoteEmbeddingEnabled,
-} from './embedding-client.js';
 
 export const DEFAULT_LOCAL_VECTOR_DIM = 128;
 
@@ -209,11 +209,7 @@ export function dotProductUnit(a: Float32Array, b: Float32Array): number {
   let i = 0;
   const len4 = len & ~3;
   for (; i < len4; i += 4) {
-    dot +=
-      a[i] * b[i] +
-      a[i + 1] * b[i + 1] +
-      a[i + 2] * b[i + 2] +
-      a[i + 3] * b[i + 3];
+    dot += a[i] * b[i] + a[i + 1] * b[i + 1] + a[i + 2] * b[i + 2] + a[i + 3] * b[i + 3];
   }
   for (; i < len; i++) {
     dot += a[i] * b[i];
@@ -554,10 +550,7 @@ export function backfillMissingEmbeddings(
   db: Db,
   options?: { workspaceId?: string; limit?: number; dim?: number }
 ): number;
-export function backfillMissingEmbeddings(
-  db: Db,
-  limit: number
-): BackfillLocalResult;
+export function backfillMissingEmbeddings(db: Db, limit: number): BackfillLocalResult;
 export function backfillMissingEmbeddings(
   db: Db,
   optionsOrLimit?: { workspaceId?: string; limit?: number; dim?: number } | number

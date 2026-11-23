@@ -1,6 +1,6 @@
-import type { ChannelName, Db, StrategyConfig } from '../types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { DEFAULT_STRATEGY as RETRIEVAL_DEFAULT_STRATEGY } from '../retrieval/fuse.js';
+import type { ChannelName, Db, StrategyConfig } from '../types.js';
 
 export const SENTINEL_RESTORED_VERSION_KEY = 'sentinel.restored_version';
 
@@ -72,7 +72,9 @@ export function validateAndClampStrategy(
   strategy: StrategyConfig,
   cfg: PluginConfig = DEFAULTS
 ): StrategyConfig {
-  const safeStrategy = (strategy && typeof strategy === 'object' ? strategy : DEFAULT_STRATEGY) as Partial<StrategyConfig>;
+  const safeStrategy = (
+    strategy && typeof strategy === 'object' ? strategy : DEFAULT_STRATEGY
+  ) as Partial<StrategyConfig>;
 
   const rrfK = Math.round(clampFinite(safeStrategy.rrfK, 10, 200, DEFAULT_STRATEGY.rrfK));
 
@@ -90,7 +92,8 @@ export function validateAndClampStrategy(
   const dynamicCap = Math.max(0, cfg.hardBudgetTokens - cfg.stableBudgetTokens);
   const minDyn = Math.min(800, dynamicCap);
   const rawDyn =
-    typeof safeStrategy.dynamicBudgetTokens === 'number' && Number.isFinite(safeStrategy.dynamicBudgetTokens)
+    typeof safeStrategy.dynamicBudgetTokens === 'number' &&
+    Number.isFinite(safeStrategy.dynamicBudgetTokens)
       ? safeStrategy.dynamicBudgetTokens
       : DEFAULT_STRATEGY.dynamicBudgetTokens;
   const dynBudget =

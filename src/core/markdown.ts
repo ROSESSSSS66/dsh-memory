@@ -1,17 +1,11 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
-import type {
-  Db,
-  MemoryRecord,
-  MarkdownFrontmatter,
-  Scope,
-  MemoryType,
-} from '../types.js';
-import { upsertCandidate, restoreMemory, pin } from './writer.js';
+import type { Db, MarkdownFrontmatter, MemoryRecord, MemoryType, Scope } from '../types.js';
 import { redactSecrets } from './privacy.js';
 import { workspaceId as resolveWorkspaceId, scopeFilterSQL } from './scope.js';
 import { get } from './store.js';
+import { pin, restoreMemory, upsertCandidate } from './writer.js';
 
 const VALID_MEMORY_TYPES = new Set<MemoryType>([
   'episodic',
@@ -687,7 +681,9 @@ export function importFromMarkdown(
       try {
         const content = safeReadTextFileSync(file, inputDir, MAX_IMPORT_FILE_BYTES);
         if (content === null) {
-          errors.push(`File ${path.basename(file)}: skipped (unsafe path, symlink, or exceeds size limit)`);
+          errors.push(
+            `File ${path.basename(file)}: skipped (unsafe path, symlink, or exceeds size limit)`
+          );
           continue;
         }
         const parsed = parseMemoryMarkdown(content);
@@ -1256,7 +1252,8 @@ export function importMemoryBank(
             summary: cleanSummary.slice(0, 80),
             slot_key: parsedSlotKey,
             scope: effectiveScope,
-            workspaceId: effectiveScope === 'user' || effectiveScope === 'global' ? undefined : wsId,
+            workspaceId:
+              effectiveScope === 'user' || effectiveScope === 'global' ? undefined : wsId,
             source_kind: trusted ? 'user' : 'system',
             confidence: trusted ? 0.9 : 0.5,
             importance: 8,

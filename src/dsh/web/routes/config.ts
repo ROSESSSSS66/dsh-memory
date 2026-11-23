@@ -1,12 +1,12 @@
 import net from 'node:net';
 import * as z from 'zod';
-import { saveConfigToDb, type PluginConfig } from '../../../config.js';
+import { type PluginConfig, saveConfigToDb } from '../../../config.js';
 import {
   assertSafeOutboundEndpoint,
   isBlockedOutboundIp,
   isSafeApiKeyEnvName,
 } from '../../../core/privacy.js';
-import { probeOfflineLLM, type LlmProbeResult } from '../../../service/index.js';
+import { type LlmProbeResult, probeOfflineLLM } from '../../../service/index.js';
 import {
   HttpError,
   isSameOriginUrl,
@@ -184,7 +184,8 @@ export function createConfigRoutes(): RouteEntry[] {
       const hasExplicitApiKeyEnv = incoming.apiKeyEnv !== undefined;
 
       const baseUrlCleared = hasBaseUrlInReq && !nextBaseUrl;
-      const setFromEmptyWithoutKey = !prevBaseUrl && Boolean(nextBaseUrl) && hasBaseUrlInReq && !hasFreshApiKey;
+      const setFromEmptyWithoutKey =
+        !prevBaseUrl && Boolean(nextBaseUrl) && hasBaseUrlInReq && !hasFreshApiKey;
       const originChanged =
         Boolean(prevBaseUrl) && Boolean(nextBaseUrl) && !isSameOriginUrl(prevBaseUrl, nextBaseUrl);
       const transitioningToDshLlm = incoming.useDshLlm === true && !cfg.offlineLLM.useDshLlm;
@@ -406,17 +407,10 @@ export function createConfigRoutes(): RouteEntry[] {
     rctx.options?.onConfigUpdated?.(updated);
     rctx.onConfigMutated();
 
-    sendJson(
-      rctx.res,
-      200,
-      { ok: true, config: sanitizeConfigForClient(updated) },
-      rctx.reqOrigin
-    );
+    sendJson(rctx.res, 200, { ok: true, config: sanitizeConfigForClient(updated) }, rctx.reqOrigin);
   };
 
-  const handleLlmTest = async (
-    rctx: Parameters<NonNullable<RouteEntry['methods']['POST']>>[0]
-  ) => {
+  const handleLlmTest = async (rctx: Parameters<NonNullable<RouteEntry['methods']['POST']>>[0]) => {
     const rawBody = await readBodyJson(rctx.req);
     const body = LlmTestBodySchema.parse(rawBody);
 

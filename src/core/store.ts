@@ -1,17 +1,17 @@
 import {
-  hydrateMemoryRow,
   type Db,
+  type GraphData,
+  type GraphLink,
+  type GraphNode,
+  hydrateMemoryRow,
   type MemoryRecord,
   type MemoryRow,
   type MemorySource,
-  type MemoryType,
   type MemoryStatus,
+  type MemoryType,
   type Scope,
-  type GraphData,
-  type GraphNode,
-  type GraphLink,
 } from '../types.js';
-import { workspaceId, scopeFilterSQL } from './scope.js';
+import { scopeFilterSQL, workspaceId } from './scope.js';
 
 const MEMORY_COLUMNS_NO_EMBEDDING =
   'rowid_, id, type, status, content, summary, slot_key, scope, workspace_id, session_id, origin_kinds, approved_at, approved_by, source_kind, confidence, utility, use_count, success_count, fail_count, token_cost, summary_cost, hash, version, content_rev, pinned, valid_from, valid_to, importance, invalidated_at, created_at, updated_at, last_used_at, last_repair_at';
@@ -254,11 +254,7 @@ export function sources(db: Db, id: string, contentRev?: number): MemorySource[]
 /**
  * 统计概况（纯 SQL 聚合，严禁将全表拉入 V8 堆；传入 workspaceId/sessionId 时严格走 scopeFilterSQL 防会话泄漏）
  */
-export function stats(
-  db: Db,
-  workspaceIdFilter?: string,
-  sessionIdFilter?: string
-): MemoryStats {
+export function stats(db: Db, workspaceIdFilter?: string, sessionIdFilter?: string): MemoryStats {
   let whereSql = '';
   let params: unknown[] = [];
 
@@ -673,7 +669,10 @@ export function renderMermaidGraph(graph: GraphData, maxNodes: number = 25): str
 
   for (const n of selectedNodes) {
     // 清洗字符，Mermaid 节点标签使用双引号并移除特殊字符
-    const cleanLabel = n.label.replace(/["\(\)\[\]\{\}\<\>]/g, ' ').replace(/\s+/g, ' ').trim();
+    const cleanLabel = n.label
+      .replace(/["()[\]{}<>]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
     const safeId = n.id.replace(/[^a-zA-Z0-9_]/g, '_');
 
     if (n.type === 'entity') {

@@ -127,7 +127,10 @@ const safeStringArray = (maxItems = 200) =>
   );
 
 const safeNightlyAt = z.preprocess(
-  (v) => (typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v.trim()) ? v.trim() : DEFAULTS.nightlyAt),
+  (v) =>
+    typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v.trim())
+      ? v.trim()
+      : DEFAULTS.nightlyAt,
   z.string()
 );
 
@@ -139,7 +142,8 @@ const OfflineLLMSchema = z
     apiKeyEnv: safeString(DEFAULTS.offlineLLM.apiKeyEnv),
     apiKey: safeString(DEFAULTS.offlineLLM.apiKey),
     protocol: z.preprocess(
-      (v) => (v === 'chat/completions' || v === 'responses' || v === 'messages' ? v : 'chat/completions'),
+      (v) =>
+        v === 'chat/completions' || v === 'responses' || v === 'messages' ? v : 'chat/completions',
       z.enum(['chat/completions', 'responses', 'messages'])
     ),
   })
@@ -203,7 +207,10 @@ const PluginConfigSchema = z
     maxLabItems: safePositiveInt(DEFAULTS.maxLabItems),
     embedding: EmbeddingSchema,
     defaultScope: z.preprocess(
-      (v) => (v === 'session' || v === 'workspace' || v === 'user' || v === 'global' ? v : DEFAULTS.defaultScope),
+      (v) =>
+        v === 'session' || v === 'workspace' || v === 'user' || v === 'global'
+          ? v
+          : DEFAULTS.defaultScope,
       z.enum(['session', 'workspace', 'user', 'global'])
     ),
     excludeWorkspaces: safeStringArray(200),
@@ -211,7 +218,9 @@ const PluginConfigSchema = z
   })
   .strip();
 
-export function validateConfig(raw: Partial<PluginConfig> & Record<string, any> = {}): PluginConfig {
+export function validateConfig(
+  raw: Partial<PluginConfig> & Record<string, any> = {}
+): PluginConfig {
   const safeRaw = raw && typeof raw === 'object' ? raw : {};
   const rawOffline: Record<string, unknown> =
     safeRaw.offlineLLM && typeof safeRaw.offlineLLM === 'object' ? { ...safeRaw.offlineLLM } : {};
@@ -249,7 +258,11 @@ export function validateConfig(raw: Partial<PluginConfig> & Record<string, any> 
     cfg.stableBudgetTokens = cfg.hardBudgetTokens;
   }
   const maxDynamic = Math.max(0, cfg.hardBudgetTokens - cfg.stableBudgetTokens);
-  if (typeof safeRaw.dynamicBudgetTokens !== 'number' || !Number.isInteger(safeRaw.dynamicBudgetTokens) || safeRaw.dynamicBudgetTokens < 0) {
+  if (
+    typeof safeRaw.dynamicBudgetTokens !== 'number' ||
+    !Number.isInteger(safeRaw.dynamicBudgetTokens) ||
+    safeRaw.dynamicBudgetTokens < 0
+  ) {
     cfg.dynamicBudgetTokens = Math.min(DEFAULTS.dynamicBudgetTokens, maxDynamic);
   } else if (cfg.dynamicBudgetTokens > maxDynamic) {
     cfg.dynamicBudgetTokens = maxDynamic;
@@ -259,7 +272,12 @@ export function validateConfig(raw: Partial<PluginConfig> & Record<string, any> 
   if (cfg.embedding.provider === 'none') {
     cfg.embedding.dim = 0;
   } else if (cfg.embedding.provider === 'openai-compatible') {
-    if (!cfg.embedding.model.trim() || !Number.isInteger(cfg.embedding.dim) || cfg.embedding.dim <= 0 || cfg.embedding.dim > 8192) {
+    if (
+      !cfg.embedding.model.trim() ||
+      !Number.isInteger(cfg.embedding.dim) ||
+      cfg.embedding.dim <= 0 ||
+      cfg.embedding.dim > 8192
+    ) {
       cfg.embedding.provider = 'none';
       cfg.embedding.dim = 0;
     }
@@ -298,7 +316,9 @@ function pickOverride(source: Record<string, any> | null | undefined): Record<st
 }
 
 function readStoredOverride(db: Db): Record<string, any> | null {
-  const row = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['config_override']);
+  const row = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [
+    'config_override',
+  ]);
   if (!row?.value) return null;
   return pickOverride(JSON.parse(row.value));
 }
@@ -316,7 +336,10 @@ export function loadConfigFromDb(db: Db, baseCfg: PluginConfig = DEFAULTS): Plug
       });
     }
   } catch (err) {
-    console.warn('[dsh-memory] Failed to load config_override from meta:', err instanceof Error ? err.message : String(err));
+    console.warn(
+      '[dsh-memory] Failed to load config_override from meta:',
+      err instanceof Error ? err.message : String(err)
+    );
   }
   return validateConfig(baseCfg);
 }

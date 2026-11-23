@@ -1,9 +1,9 @@
 import type {
-  MemoryType,
   MemoryStatus,
-  SourceKind,
-  Scope,
+  MemoryType,
   RelationType,
+  Scope,
+  SourceKind,
   VikingContextTier,
 } from '../types.js';
 

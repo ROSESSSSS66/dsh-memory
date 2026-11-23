@@ -1,20 +1,20 @@
-import { hydrateMemoryRow, type Db, type MemoryRecord, type MemoryRow } from '../../types.js';
-import { workspaceId } from '../scope.js';
-import { isWorkspaceExcluded } from '../privacy.js';
-import { hasUserEvidence, hasUntrustedOrigin } from '../trust.js';
-import { backfillMissingEmbeddings, removeCachedRuntimeEmbedding } from '../vector.js';
-import { mergeMemories, saveVersionSnapshot, approveCandidate } from '../writer.js';
 import { checkAndRepairFts, pruneInvalidMemories } from '../../evolution/maintenance.js';
+import { type Db, hydrateMemoryRow, type MemoryRecord, type MemoryRow } from '../../types.js';
 import { runHindsightReflect } from '../hindsight.js';
+import { isWorkspaceExcluded } from '../privacy.js';
+import { workspaceId } from '../scope.js';
+import { hasUntrustedOrigin, hasUserEvidence } from '../trust.js';
+import { backfillMissingEmbeddings, removeCachedRuntimeEmbedding } from '../vector.js';
+import { approveCandidate, mergeMemories, saveVersionSnapshot } from '../writer.js';
 import {
+  type AuditMemoryHealthOptions,
   auditMemoryHealth,
-  refreshLightweightHealthReport,
   buildHealthScopeFilter,
   type MemoryHealthReport,
-  type AuditMemoryHealthOptions,
+  refreshLightweightHealthReport,
 } from './audit.js';
-import { weaveZettelkastenLinks } from './zettelkasten.js';
 import { syncAutonomousCoreMemory } from './core-sync.js';
+import { weaveZettelkastenLinks } from './zettelkasten.js';
 
 export interface AutoHealOptions {
   workspaceId?: string;
@@ -61,10 +61,7 @@ function formatErr(step: string, err: unknown): string {
  * 7. 同步高效用规则至 Core Memory，执行 Hindsight 幂等置信度校准与心智模型合成
  * 8. 执行 A-Mem Zettelkasten 孤岛节点双链织网 (支持 skipWeave)
  */
-export function autoHealMemoryHealth(
-  db: Db,
-  options: AutoHealOptions = {}
-): AutoHealResult {
+export function autoHealMemoryHealth(db: Db, options: AutoHealOptions = {}): AutoHealResult {
   const now = options.now ?? Date.now();
   const wsFilter = options.workspaceId ? workspaceId(options.workspaceId) : undefined;
   const excludeWorkspaces = options.excludeWorkspaces;

@@ -1,11 +1,12 @@
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
-import { hydrateMemoryRow, type Db, type MemoryRecord, type MemoryRow } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import { ftsText, contentHash } from '../core/text.js';
-import { workspaceId, resolveWorkspaceCwd } from '../core/scope.js';
 import { CURRENT_SCHEMA_VERSION, openDb } from '../core/db.js';
+import { memoryPrivacyFilterSQL, memoryWorkspaceIds } from '../core/privacy.js';
+import { resolveWorkspaceCwd, workspaceId } from '../core/scope.js';
+import { contentHash, ftsText } from '../core/text.js';
+import { hasUntrustedOrigin, hasUserEvidence } from '../core/trust.js';
 import {
   backfillMissingEmbeddings,
   clearRuntimeVectorCache,
@@ -14,12 +15,11 @@ import {
   primeRuntimeVectorCache,
   removeCachedRuntimeEmbedding,
 } from '../core/vector.js';
-import { saveVersionSnapshot, editContent, addRelation } from '../core/writer.js';
-import { PROMPT_CURATE, packPromptWithinBudget } from './prompts.js';
-import { parseOutput } from './parse.js';
+import { addRelation, editContent, saveVersionSnapshot } from '../core/writer.js';
+import { type Db, hydrateMemoryRow, type MemoryRecord, type MemoryRow } from '../types.js';
 import { callOfflineLLM } from './llm.js';
-import { memoryPrivacyFilterSQL, memoryWorkspaceIds } from '../core/privacy.js';
-import { hasUntrustedOrigin, hasUserEvidence } from '../core/trust.js';
+import { parseOutput } from './parse.js';
+import { PROMPT_CURATE, packPromptWithinBudget } from './prompts.js';
 import {
   getUnchangedReviewedMemory,
   isProtectedFromModelDiscard,
@@ -41,11 +41,7 @@ export function getBackupTimestamp(date: Date = new Date()): string {
  * 仅 active 且未置顶、效用低、长时间未使用的记录改 archived；frozen 与 superseded 绝不改动。
  * 同步写入 valid_to 与 invalidated_at，并在事务提交后淘汰向量缓存。
  */
-export function archiveColdMemories(
-  db: Db,
-  cfg: PluginConfig,
-  now: number = Date.now()
-): number {
+export function archiveColdMemories(db: Db, cfg: PluginConfig, now: number = Date.now()): number {
   const coldDays = cfg.coldDays ?? 60;
   const cutoffTime = now - coldDays * 24 * 3600 * 1000;
 
@@ -125,7 +121,9 @@ export function expireCandidates(
       try {
         const parsed = JSON.parse(prop.candidate_ids);
         if (Array.isArray(parsed)) {
-          candIds = parsed.filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+          candIds = parsed.filter(
+            (id): id is string => typeof id === 'string' && id.trim().length > 0
+          );
         }
       } catch {}
       for (const cid of candIds) {
@@ -230,7 +228,9 @@ export function checkAndRepairFts(db: Db): { consistent: boolean; rebuilt: boole
     const toRebuild = Array.from(new Set<number>([...missingRowids, ...emptyFtsRowids]));
     for (const rid of toRebuild) {
       deleteStmt.run(rid);
-      const row = selectStmt.get(rid) as { rowid_: number; content: string; summary: string } | undefined;
+      const row = selectStmt.get(rid) as
+        | { rowid_: number; content: string; summary: string }
+        | undefined;
       if (row) {
         insertStmt.run(row.rowid_, ftsText(row.content + ' ' + row.summary));
       }
@@ -289,7 +289,9 @@ export function cleanOldTelemetry(
         );
 
     // 2. turn_metrics
-    const resMetrics = db.run(`DELETE FROM turn_metrics WHERE created_at < ?`, [now - ninetyDaysMs]);
+    const resMetrics = db.run(`DELETE FROM turn_metrics WHERE created_at < ?`, [
+      now - ninetyDaysMs,
+    ]);
 
     // 3. jobs (done/failed > 14d)
     const resJobs = db.run(
@@ -303,7 +305,9 @@ export function cleanOldTelemetry(
     const resLedger = db.run(`DELETE FROM llm_ledger WHERE created_at < ?`, [now - ninetyDaysMs]);
 
     // 5. injections (> 90d)
-    const resInjections = db.run(`DELETE FROM injections WHERE created_at < ?`, [now - ninetyDaysMs]);
+    const resInjections = db.run(`DELETE FROM injections WHERE created_at < ?`, [
+      now - ninetyDaysMs,
+    ]);
 
     // 6. repair_proposals (approved/rejected > 30d)
     const resProposals = db.run(
@@ -554,14 +558,22 @@ export function importDatabaseFile(
   try {
     sourceDb = openDb(resolvedSource, { readOnly: true });
   } catch (err: any) {
-    return { success: false, importedRecords: 0, error: `Cannot open source database: ${err.message}` };
+    return {
+      success: false,
+      importedRecords: 0,
+      error: `Cannot open source database: ${err.message}`,
+    };
   }
 
   try {
     const integrity = sourceDb.get<{ integrity_check: string }>('PRAGMA integrity_check');
     if (integrity?.integrity_check !== 'ok') {
       sourceDb.close();
-      return { success: false, importedRecords: 0, error: 'Source database failed integrity check' };
+      return {
+        success: false,
+        importedRecords: 0,
+        error: 'Source database failed integrity check',
+      };
     }
 
     const metaRow = sourceDb.get<{ value: string }>(
@@ -569,7 +581,11 @@ export function importDatabaseFile(
     );
     if (!metaRow || !metaRow.value) {
       sourceDb.close();
-      return { success: false, importedRecords: 0, error: 'Source database missing schema_version in meta' };
+      return {
+        success: false,
+        importedRecords: 0,
+        error: 'Source database missing schema_version in meta',
+      };
     }
     const sourceSchemaVersion = parseInt(metaRow.value, 10);
     if (
@@ -608,7 +624,9 @@ export function importDatabaseFile(
     const memories = sourceDb.all<MemoryRow>('SELECT * FROM memories');
     const versions = sourceDb.all<any>('SELECT * FROM memory_versions');
     const entities = tables.includes('memory_entities')
-      ? sourceDb.all<{ memory_id: string; entity: string }>('SELECT memory_id, entity FROM memory_entities')
+      ? sourceDb.all<{ memory_id: string; entity: string }>(
+          'SELECT memory_id, entity FROM memory_entities'
+        )
       : [];
     const sourcesRows = tables.includes('memory_sources')
       ? sourceDb.all<any>(
@@ -616,7 +634,9 @@ export function importDatabaseFile(
         )
       : [];
     const sourceOwners = tables.includes('session_workspace_owners')
-      ? sourceDb.all<{ session_id: string; workspace_id: string }>('SELECT * FROM session_workspace_owners')
+      ? sourceDb.all<{ session_id: string; workspace_id: string }>(
+          'SELECT * FROM session_workspace_owners'
+        )
       : tables.includes('raw_events')
         ? sourceDb.all<{ session_id: string; workspace_id: string }>(
             "SELECT DISTINCT session_id, workspace_id FROM raw_events WHERE workspace_id != ''"
@@ -639,7 +659,9 @@ export function importDatabaseFile(
       }
       for (const m of memories) {
         // 尊重本地已 frozen 的同 ID 记录，禁止导入静默覆写；覆盖非 frozen 本地行前留存版本快照
-        const localExisting = currentDb.get<MemoryRow>('SELECT * FROM memories WHERE id = ?', [m.id]);
+        const localExisting = currentDb.get<MemoryRow>('SELECT * FROM memories WHERE id = ?', [
+          m.id,
+        ]);
         if (localExisting?.status === 'frozen') {
           skippedFrozenIds.add(m.id);
           continue;
@@ -688,7 +710,9 @@ export function importDatabaseFile(
             m.scope,
             m.workspace_id ?? null,
             m.session_id ?? null,
-            typeof m.origin_kinds === 'string' ? m.origin_kinds : JSON.stringify(m.origin_kinds || []),
+            typeof m.origin_kinds === 'string'
+              ? m.origin_kinds
+              : JSON.stringify(m.origin_kinds || []),
             m.approved_at ?? null,
             m.approved_by ?? null,
             m.source_kind,
@@ -729,10 +753,10 @@ export function importDatabaseFile(
 
       for (const ent of entities) {
         if (skippedFrozenIds.has(ent.memory_id)) continue;
-        currentDb.run(
-          `INSERT OR IGNORE INTO memory_entities (memory_id, entity) VALUES (?, ?)`,
-          [ent.memory_id, ent.entity]
-        );
+        currentDb.run(`INSERT OR IGNORE INTO memory_entities (memory_id, entity) VALUES (?, ?)`, [
+          ent.memory_id,
+          ent.entity,
+        ]);
       }
 
       for (const s of sourcesRows) {
@@ -833,7 +857,7 @@ export function pruneInvalidMemories(
     const key = `${m.scope}:${m.workspace_id || ''}:${m.session_id || ''}:${m.slot_key}`;
     const prev = activeSlotMap.get(key);
     const mEff = m.approved_at ?? m.created_at;
-    const prevEff = prev ? prev.approved_at ?? prev.created_at : -1;
+    const prevEff = prev ? (prev.approved_at ?? prev.created_at) : -1;
     if (!prev || m.status === 'frozen' || mEff > prevEff) {
       activeSlotMap.set(key, m);
     }
@@ -871,7 +895,9 @@ export function pruneInvalidMemories(
       if (!reason && mem.status === 'candidate' && mem.slot_key) {
         const key = `${mem.scope}:${mem.workspace_id || ''}:${mem.session_id || ''}:${mem.slot_key}`;
         const activeHolder = activeSlotMap.get(key);
-        const holderEffectiveAt = activeHolder ? activeHolder.approved_at ?? activeHolder.created_at : 0;
+        const holderEffectiveAt = activeHolder
+          ? (activeHolder.approved_at ?? activeHolder.created_at)
+          : 0;
         if (
           activeHolder &&
           activeHolder.id !== mem.id &&
@@ -952,7 +978,9 @@ export async function curateMemoriesWithLLM(
   const privacy = memoryPrivacyFilterSQL(cfg.excludeWorkspaces);
   const wsKey = options.workspaceId ? workspaceId(options.workspaceId) : 'global';
   const cursorKey = `curate:cursor:${wsKey}`;
-  const rawCursor = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [cursorKey])?.value;
+  const rawCursor = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [
+    cursorKey,
+  ])?.value;
   const cursorRowId = rawCursor ? parseInt(rawCursor, 10) || 0 : 0;
 
   // 先取 rowid_ > cursorRowId 的批次，再回绕补齐早期行
@@ -1128,10 +1156,7 @@ export async function curateMemoriesWithLLM(
   }
 
   // 仅在解析成功后持久化去重指纹与轮转游标
-  const maxReviewedRowId = selectedCandidates.reduce(
-    (max, m) => Math.max(max, m.rowid_ ?? 0),
-    0
-  );
+  const maxReviewedRowId = selectedCandidates.reduce((max, m) => Math.max(max, m.rowid_ ?? 0), 0);
   const nextCursorValue =
     afterCursorRows.length < 80 && wrappedRows.length > 0 ? 0 : maxReviewedRowId;
 
@@ -1203,7 +1228,13 @@ export async function curateMemoriesWithLLM(
               `SELECT * FROM memories WHERE scope = ? AND COALESCE(workspace_id, '') = ?
                AND COALESCE(session_id, '') = ? AND slot_key = ?
                AND status IN ('active', 'frozen') AND id != ?`,
-              [target.scope, target.workspace_id || '', target.session_id || '', nextSlot, target.id]
+              [
+                target.scope,
+                target.workspace_id || '',
+                target.session_id || '',
+                nextSlot,
+                target.id,
+              ]
             )
           )
         : undefined;
@@ -1319,7 +1350,6 @@ export async function curateMemoriesWithLLM(
           `[dsh-memory] curate update skipped for ${target.id}:`,
           err instanceof Error ? err.message : String(err)
         );
-        continue;
       }
     }
   });

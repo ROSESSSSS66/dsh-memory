@@ -1,15 +1,10 @@
 import crypto from 'node:crypto';
-import {
-  parseOriginKinds,
-  type CandidateInput,
-  type OriginKind,
-  type Scope,
-} from '../../types.js';
 import { DEFAULTS } from '../../config.js';
+import { type CandidateInput, type OriginKind, parseOriginKinds, type Scope } from '../../types.js';
+import { redactSecrets } from '../privacy.js';
+import { workspaceId } from '../scope.js';
 import { contentHash } from '../text.js';
 import { estimateTokens } from '../tokens.js';
-import { workspaceId } from '../scope.js';
-import { redactSecrets } from '../privacy.js';
 import { hasUntrustedOrigin, isUntrustedSourceKind } from '../trust.js';
 
 const ID_ALPHABET = '0123456789abcdefghjkmnpqrstvwxyz';

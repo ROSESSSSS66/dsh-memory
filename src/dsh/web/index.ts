@@ -1,26 +1,26 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Db } from '../../types.js';
 import type { PluginConfig } from '../../config.js';
-import { enforceRequestSecurity } from './security.js';
+import type { Db } from '../../types.js';
 import { sendJson } from './http.js';
 import {
   BoundedHealthCache,
+  type RegisterWebRoutesOptions,
   SingleFlightGuard,
   WebRouter,
-  type RegisterWebRoutesOptions,
 } from './router.js';
-import { createOverviewRoutes } from './routes/overview.js';
-import { createMemoriesRoutes } from './routes/memories.js';
+import { createAdminRoutes } from './routes/admin.js';
+import { createConfigRoutes } from './routes/config.js';
 import { createCoreMemoryRoutes } from './routes/core-memory.js';
 import { createEpistemicRoutes } from './routes/epistemic.js';
-import { createConfigRoutes } from './routes/config.js';
-import { createAdminRoutes } from './routes/admin.js';
+import { createMemoriesRoutes } from './routes/memories.js';
+import { createOverviewRoutes } from './routes/overview.js';
+import { enforceRequestSecurity } from './security.js';
 
 export const API_PREFIX = '/api/dsh-memory';
 
-export type { RegisterWebRoutesOptions } from './router.js';
-export { isTrustedOrigin, isAllowedHostHeader, securityHeaders } from './security.js';
 export { maskApiKey, sanitizeConfigForClient } from './http.js';
+export type { RegisterWebRoutesOptions } from './router.js';
+export { isAllowedHostHeader, isTrustedOrigin, securityHeaders } from './security.js';
 
 function cloneConfigSnapshot(cfg: PluginConfig): PluginConfig {
   return {
