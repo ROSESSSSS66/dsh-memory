@@ -416,16 +416,51 @@ describe('Model-Visible Tools (tools.ts & tool-registry.ts)', () => {
       expect(registered.has('memory_merge')).toBe(false);
       expect(registered.has('memory_core')).toBe(false);
 
+      // Verify standard JSON Schema object roots conforming to @deepseek-ai/dsh-tools supported subset
+      const allowedPropKeys = new Set([
+        'type',
+        'oneOf',
+        'properties',
+        'required',
+        'additionalProperties',
+        'items',
+        'enum',
+        'const',
+        'description',
+        'title',
+        'default',
+        'examples',
+      ]);
+      for (const [toolName, def] of registered.entries()) {
+        expect(def.parameters.type, `${toolName}.parameters.type`).toBe('object');
+        expect(def.parameters.properties, `${toolName}.parameters.properties`).toBeTypeOf('object');
+        expect(Array.isArray(def.parameters.required), `${toolName}.parameters.required`).toBe(true);
+        for (const reqKey of def.parameters.required) {
+          expect(Object.hasOwn(def.parameters.properties, reqKey), `${toolName} missing required prop ${reqKey}`).toBe(true);
+        }
+        for (const [propName, propSchema] of Object.entries<Record<string, unknown>>(def.parameters.properties)) {
+          expect(typeof propSchema.type, `${toolName}.${propName}.type`).toBe('string');
+          expect(Object.hasOwn(propSchema, 'required'), `${toolName}.${propName} must not set DSL required:true`).toBe(false);
+          for (const k of Object.keys(propSchema)) {
+            expect(allowedPropKeys.has(k), `${toolName}.${propName}.${k} unsupported by dsh-tools JSON Schema subset`).toBe(true);
+          }
+        }
+      }
+
       // Verify crisp enum schemas
-      expect(registered.get('memory_search').parameters.network.enum).toEqual([
+      expect(registered.get('memory_search').parameters.properties.network.enum).toEqual([
         'world',
         'experience',
         'observation',
         'opinion',
       ]);
-      expect(registered.get('memory_search').parameters.tier.enum).toEqual(['L0', 'L1', 'L2']);
-      expect(registered.get('memory_note').parameters.type.enum).not.toContain('meta');
-      expect(registered.get('memory_note').parameters.scope.enum).toEqual(['workspace', 'session', 'user']);
+      expect(registered.get('memory_search').parameters.properties.tier.enum).toEqual(['L0', 'L1', 'L2']);
+      expect(registered.get('memory_search').parameters.required).toEqual(['query']);
+      expect(registered.get('memory_expand').parameters.required).toEqual(['id']);
+      expect(registered.get('memory_feedback').parameters.required).toEqual(['id', 'contentRev', 'helpful']);
+      expect(registered.get('memory_note').parameters.properties.type.enum).not.toContain('meta');
+      expect(registered.get('memory_note').parameters.properties.scope.enum).toEqual(['workspace', 'session', 'user']);
+      expect(registered.get('memory_note').parameters.required).toEqual(['content']);
 
       // Aborted signal returns cleanly without executing
       const ac = new AbortController();

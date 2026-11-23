@@ -45,6 +45,10 @@ jobs:
 
       - name: Run All Tests with Coverage
         if: matrix.os == 'ubuntu-latest'
+        env:
+          # V8 coverage instrumentation inflates inner-loop wall clock on shared runners;
+          # the perf budget is widened here only, non-coverage jobs keep the strict default.
+          DSH_VECTOR_SCAN_BUDGET_MS: '30'
         run: npm run test:coverage
 
       - name: Run Build

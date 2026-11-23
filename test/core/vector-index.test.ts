@@ -101,7 +101,7 @@ describe('Per-Workspace Lazy In-Memory Vector Matrix (src/core/vector-index.ts)'
     db.close();
   });
 
-  it('scans 10,000 × 128D vectors in <5ms and finds vector #9,500 missed by Top-400', () => {
+  it('scans 10,000 × 128D vectors within budget and finds vector #9,500 missed by Top-400', () => {
     const ws = workspaceId('/bench/ws-10k');
     const dim = DEFAULT_LOCAL_VECTOR_DIM;
 
@@ -179,7 +179,12 @@ describe('Per-Workspace Lazy In-Memory Vector Matrix (src/core/vector-index.ts)'
     }
     const avgMs = (performance.now() - t0) / runs;
     expect(lastHits[0]?.id).toBe('m_09500');
-    expect(avgMs).toBeLessThan(5);
+    // Wall-clock budget: 5 ms by default. The Ubuntu CI job runs this suite under V8
+    // coverage, whose per-line counters inflate inner-loop timings on shared runners, so it
+    // widens the budget explicitly (DSH_VECTOR_SCAN_BUDGET_MS) instead of dropping the check.
+    // The full-matrix scan / no-Top-400-truncation assertions above stay binding everywhere.
+    const budgetMs = Number.parseInt(process.env.DSH_VECTOR_SCAN_BUDGET_MS ?? '', 10) || 5;
+    expect(avgMs).toBeLessThan(budgetMs);
   });
 
   it('enforces lazy partition loading, scope isolation, status/type/exclude filters, and NULL embedding fallback', () => {
