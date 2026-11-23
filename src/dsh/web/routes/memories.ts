@@ -1,21 +1,16 @@
-import {
-  hydrateMemoryRow,
-  type Db,
-  type MemoryRecord,
-  type MemoryRow,
-} from '../../../types.js';
 import type { PluginConfig } from '../../../config.js';
 import { scopeFilterSQL } from '../../../core/scope.js';
 import { segment } from '../../../core/text.js';
 import { getLedgerUsage } from '../../../evolution/ledger.js';
 import { listStrategies } from '../../../evolution/strategy.js';
 import {
+  type ApiMemoryRecord,
   getMemoryDetail,
   normalizeMemoryType,
   stripMemoryForApi,
   VALID_SCOPES,
-  type ApiMemoryRecord,
 } from '../../../service/index.js';
+import { type Db, hydrateMemoryRow, type MemoryRecord, type MemoryRow } from '../../../types.js';
 import {
   buildPrivacyWhereSQL,
   HttpError,
@@ -24,7 +19,7 @@ import {
   type WebScope,
 } from '../http.js';
 import type { RouteEntry } from '../router.js';
-import { getReadOnlyActiveStrategy, type ActiveStrategySnapshot } from './core-memory.js';
+import { type ActiveStrategySnapshot, getReadOnlyActiveStrategy } from './core-memory.js';
 
 export const MEMORY_COLUMNS_NO_EMBEDDING =
   'm.rowid_, m.id, m.type, m.status, m.content, m.summary, m.slot_key, m.scope, m.workspace_id, m.session_id, m.origin_kinds, m.approved_at, m.approved_by, m.source_kind, m.confidence, m.utility, m.use_count, m.success_count, m.fail_count, m.token_cost, m.summary_cost, m.hash, m.version, m.content_rev, m.pinned, m.valid_from, m.valid_to, m.importance, m.invalidated_at, m.created_at, m.updated_at, m.last_used_at, m.last_repair_at';
@@ -422,9 +417,7 @@ export function createMemoriesRoutes(): RouteEntry[] {
     }
 
     const detail = getMemoryDetail(rctx.db, id, {
-      scopeCtx: scope.wsId
-        ? { workspaceId: scope.wsId, sessionId: scope.sessionId }
-        : undefined,
+      scopeCtx: scope.wsId ? { workspaceId: scope.wsId, sessionId: scope.sessionId } : undefined,
       excludeWorkspaces: rctx.cfg.excludeWorkspaces,
     });
 

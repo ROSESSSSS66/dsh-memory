@@ -1,5 +1,5 @@
-import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Db, DbResult } from '../types.js';
@@ -45,7 +45,10 @@ export function openDb(dbPath: string = ':memory:', options: { readOnly?: boolea
   try {
     rawDb.exec('PRAGMA busy_timeout = 5000;');
   } catch (err) {
-    console.warn('[dsh-memory] Failed to set busy_timeout:', err instanceof Error ? err.message : String(err));
+    console.warn(
+      '[dsh-memory] Failed to set busy_timeout:',
+      err instanceof Error ? err.message : String(err)
+    );
   }
 
   if (dbPath !== ':memory:' && !options.readOnly) {
@@ -53,7 +56,10 @@ export function openDb(dbPath: string = ':memory:', options: { readOnly?: boolea
       rawDb.exec('PRAGMA journal_mode = WAL;');
       rawDb.exec('PRAGMA synchronous = NORMAL;');
     } catch (err) {
-      console.warn('[dsh-memory] Failed to configure WAL mode:', err instanceof Error ? err.message : String(err));
+      console.warn(
+        '[dsh-memory] Failed to configure WAL mode:',
+        err instanceof Error ? err.message : String(err)
+      );
     }
   }
   rawDb.exec('PRAGMA foreign_keys = ON;');
@@ -87,7 +93,10 @@ export function openDb(dbPath: string = ':memory:', options: { readOnly?: boolea
       try {
         cb();
       } catch (err) {
-        console.warn('[dsh-memory] afterCommit callback error:', err instanceof Error ? err.message : String(err));
+        console.warn(
+          '[dsh-memory] afterCommit callback error:',
+          err instanceof Error ? err.message : String(err)
+        );
       }
     }
   }

@@ -1,15 +1,15 @@
-import type { MemoryType, Scope, OriginKind, CandidateInput } from '../types.js';
+import { redactSecrets } from '../core/privacy.js';
+import type { CandidateInput, MemoryType, OriginKind, Scope } from '../types.js';
 import type {
-  EvidenceLedger,
-  LLMTaskKind,
-  RawMemoryItem,
-  ParseResult,
-  RepairAction,
-  JudgeOutput,
   CurateOutput,
   CurateUpdateItem,
+  EvidenceLedger,
+  JudgeOutput,
+  LLMTaskKind,
+  ParseResult,
+  RawMemoryItem,
+  RepairAction,
 } from './types.js';
-import { redactSecrets } from '../core/privacy.js';
 
 // 模型不得创建内部系统类型 'meta'
 const VALID_MEMORY_TYPES = new Set<MemoryType>([
@@ -70,7 +70,11 @@ export function matchesWithWorkspaceGaps(text: string, quote: string): boolean {
       const prev = text.charCodeAt(s - 1);
       if (prev === 10 || prev === 13) lastNewline = s - 1;
       // 最近的可达偏移同时是间隔最短、最不可能跨行的候选
-      if (lastReach > lastNewline && s - lastReach <= MAX_WORKSPACE_GAP && text.startsWith(part, s)) {
+      if (
+        lastReach > lastNewline &&
+        s - lastReach <= MAX_WORKSPACE_GAP &&
+        text.startsWith(part, s)
+      ) {
         next[s + part.length] = 1;
       }
     }
@@ -233,7 +237,10 @@ export function parseOutput(raw: string, options: ParseOptions): ParseResult {
   const discardIds = Array.from(
     new Set<string>(
       rawDiscardList
-        .filter((id: unknown): id is string => typeof id === 'string' && VALID_MEMORY_ID_REGEX.test(id.trim()))
+        .filter(
+          (id: unknown): id is string =>
+            typeof id === 'string' && VALID_MEMORY_ID_REGEX.test(id.trim())
+        )
         .map((id: string) => id.trim())
     )
   ).slice(0, 20);
@@ -249,12 +256,13 @@ export function parseOutput(raw: string, options: ParseOptions): ParseResult {
   }
 
   const droppedNotes: string[] = [];
-  const itemsToScan = parsed.items.length > MAX_ITEMS_SCAN
-    ? (() => {
-        droppedNotes.push(`items_truncated_from_${parsed.items.length}_to_${MAX_ITEMS_SCAN}`);
-        return parsed.items.slice(0, MAX_ITEMS_SCAN);
-      })()
-    : parsed.items;
+  const itemsToScan =
+    parsed.items.length > MAX_ITEMS_SCAN
+      ? (() => {
+          droppedNotes.push(`items_truncated_from_${parsed.items.length}_to_${MAX_ITEMS_SCAN}`);
+          return parsed.items.slice(0, MAX_ITEMS_SCAN);
+        })()
+      : parsed.items;
 
   const validated = validateMemoryItems(itemsToScan, options);
   droppedNotes.push(...validated.droppedNotes);
@@ -481,7 +489,11 @@ function parseRepairOutput(parsed: any, options: ParseOptions): ParseResult {
     };
   }
 
-  if (typeof parsed.reason !== 'string' || parsed.reason.trim().length === 0 || parsed.reason.length > 200) {
+  if (
+    typeof parsed.reason !== 'string' ||
+    parsed.reason.trim().length === 0 ||
+    parsed.reason.length > 200
+  ) {
     return {
       success: false,
       error: 'invalid_repair_reason',
@@ -571,7 +583,12 @@ function parseJudgeOutput(parsed: any): ParseResult {
     return { success: false, error: 'judge_items_not_array' };
   }
 
-  const validVerdicts = new Set(['potentially_useful', 'neutral', 'potentially_harmful', 'unknown']);
+  const validVerdicts = new Set([
+    'potentially_useful',
+    'neutral',
+    'potentially_harmful',
+    'unknown',
+  ]);
   if (!validVerdicts.has(parsed.verdict)) {
     return { success: false, error: `invalid_judge_verdict: ${parsed.verdict}` };
   }
@@ -585,7 +602,11 @@ function parseJudgeOutput(parsed: any): ParseResult {
     return { success: false, error: `invalid_judge_score: ${parsed.score}` };
   }
 
-  if (typeof parsed.reason !== 'string' || parsed.reason.trim().length === 0 || parsed.reason.length > 200) {
+  if (
+    typeof parsed.reason !== 'string' ||
+    parsed.reason.trim().length === 0 ||
+    parsed.reason.length > 200
+  ) {
     return { success: false, error: 'invalid_judge_reason' };
   }
 
@@ -679,7 +700,9 @@ function parseCurateOutput(parsed: any): ParseResult {
     }
     const priv = redactSecrets(text);
     if (priv.hasSensitive) {
-      droppedNotes.push(`updates[${i}]: text_contains_sensitive_data: ${priv.detectedKinds.join(',')}`);
+      droppedNotes.push(
+        `updates[${i}]: text_contains_sensitive_data: ${priv.detectedKinds.join(',')}`
+      );
       continue;
     }
 
@@ -708,7 +731,9 @@ function parseCurateOutput(parsed: any): ParseResult {
             u.absorb_ids
               .filter(
                 (id: unknown): id is string =>
-                  typeof id === 'string' && VALID_MEMORY_ID_REGEX.test(id.trim()) && id.trim() !== targetId
+                  typeof id === 'string' &&
+                  VALID_MEMORY_ID_REGEX.test(id.trim()) &&
+                  id.trim() !== targetId
               )
               .map((id: string) => id.trim())
           )

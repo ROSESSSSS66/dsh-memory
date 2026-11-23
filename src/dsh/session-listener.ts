@@ -1,8 +1,8 @@
-import type { Context, Db, RawEvent } from '../types.js';
-import type { IngestQueue } from '../ingest/queue.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { redactSecrets } from '../core/privacy.js';
 import { extractToolCallId, extractToolResultCallId } from '../ingest/backfill.js';
+import type { IngestQueue } from '../ingest/queue.js';
+import type { Context, Db, RawEvent } from '../types.js';
 import { MemoryRefsSchema } from './memory-visibility.js';
 import {
   extractSessionCwd,
@@ -220,7 +220,8 @@ export class SessionListener {
     // 3. 工作区解析与排除检查 (DSH 真实 Session 路径位于 session.header.cwd)
     const directCwd = extractSessionCwd(session);
     const effectiveWorkspace =
-      directCwd || (sessionId !== 'default_session' ? resolveSessionWorkspaceId(this.db, sessionId) : '');
+      directCwd ||
+      (sessionId !== 'default_session' ? resolveSessionWorkspaceId(this.db, sessionId) : '');
 
     if (
       effectiveWorkspace &&

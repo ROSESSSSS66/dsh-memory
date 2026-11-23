@@ -1,7 +1,7 @@
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { generateDataset, generateScaleDataset } from './gen-dataset.js';
 import { runEvalSuite, runScaleBenchmark } from './runner.js';
-import type { SuiteMetrics, EvalReport, MvpGateStatus } from './types.js';
+import type { EvalReport, MvpGateStatus, SuiteMetrics } from './types.js';
 
 export interface MvpGateLine {
   key: keyof MvpGateStatus;
@@ -69,10 +69,7 @@ export function parseCliArgs(args: string[]): ParsedCliArgs {
 }
 
 export function formatMetricsTable(report: EvalReport): string {
-  const rows: SuiteMetrics[] = [
-    report.overall,
-    ...Object.values(report.suites),
-  ];
+  const rows: SuiteMetrics[] = [report.overall, ...Object.values(report.suites)];
 
   const headers = [
     'Suite',
@@ -151,10 +148,7 @@ function resolveGates(report: EvalReport, cfg: PluginConfig): MvpGateStatus {
  * 生成与 buildEvalReport().mvpPassed 1-to-1 严格对齐的 MVP 门槛检查项。
  * 不变量：lines.every(l => l.ok) === report.mvpPassed
  */
-export function buildMvpGateLines(
-  report: EvalReport,
-  cfg: PluginConfig = DEFAULTS
-): MvpGateLine[] {
+export function buildMvpGateLines(report: EvalReport, cfg: PluginConfig = DEFAULTS): MvpGateLine[] {
   const gates = resolveGates(report, cfg);
   const maxAvgDynamic = cfg.dynamicBudgetTokens ?? DEFAULTS.dynamicBudgetTokens;
   const hardBudget = cfg.hardBudgetTokens ?? DEFAULTS.hardBudgetTokens;
@@ -222,22 +216,20 @@ export function buildMvpGateLines(
     {
       key: 'allImplicitStablePass',
       label: 'All Implicit Stable Layer Pass',
-      value: implicitTotal > 0 ? `${gates.allImplicitStablePass ? implicitTotal : 'failed'}/${implicitTotal}` : 'n/a',
+      value:
+        implicitTotal > 0
+          ? `${gates.allImplicitStablePass ? implicitTotal : 'failed'}/${implicitTotal}`
+          : 'n/a',
       ok: gates.allImplicitStablePass,
     },
   ];
 }
 
-export function formatMvpGateSection(
-  report: EvalReport,
-  cfg: PluginConfig = DEFAULTS
-): string {
+export function formatMvpGateSection(report: EvalReport, cfg: PluginConfig = DEFAULTS): string {
   const gateLines = buildMvpGateLines(report, cfg);
   return [
     '--- MVP Gate Verification (§8.3) ---',
-    ...gateLines.map(
-      (g) => `- ${g.label.padEnd(48)} ${g.value} [${g.ok ? 'OK' : 'FAIL'}]`
-    ),
+    ...gateLines.map((g) => `- ${g.label.padEnd(48)} ${g.value} [${g.ok ? 'OK' : 'FAIL'}]`),
   ].join('\n');
 }
 

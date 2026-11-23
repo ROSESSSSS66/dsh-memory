@@ -1,29 +1,26 @@
 export {
-  auditMemoryHealth,
-  normSlot,
   type AuditMemoryHealthOptions,
-  type MemoryHealthReport,
-  type DuplicatePairItem,
-  type DuplicatePair,
+  auditMemoryHealth,
   type ContradictionItem,
+  type DuplicatePair,
+  type DuplicatePairItem,
+  type MemoryHealthReport,
+  normSlot,
   type StaleMemoryItem,
 } from './health/audit.js';
-
 export {
-  weaveZettelkastenLinks,
+  type AutoHealOptions,
+  type AutoHealResult,
+  autoHealMemoryHealth,
+} from './health/auto-heal.js';
+export {
+  type CoreSyncOptions,
+  type CoreSyncResult,
+  syncAutonomousCoreMemory,
+} from './health/core-sync.js';
+export {
   areScopesCompatibleForWeaving,
   type WeaveOptions,
   type WeaveResult,
+  weaveZettelkastenLinks,
 } from './health/zettelkasten.js';
-
-export {
-  autoHealMemoryHealth,
-  type AutoHealOptions,
-  type AutoHealResult,
-} from './health/auto-heal.js';
-
-export {
-  syncAutonomousCoreMemory,
-  type CoreSyncOptions,
-  type CoreSyncResult,
-} from './health/core-sync.js';

@@ -1,15 +1,14 @@
 import * as z from 'zod';
-import {
-  hydrateMemoryRow,
-  type Db,
-  type GraphData,
-  type MemoryRecord,
-  type MemoryRow,
-  type RelationType,
-  type Scope,
-} from '../../../types.js';
 import type { PluginConfig } from '../../../config.js';
+import { autoBootstrapMemory } from '../../../core/bootstrap.js';
+import { appendCoreMemory, getAllCoreMemories, setCoreMemory } from '../../../core/core-memory.js';
+import { autoHealMemoryHealth, weaveZettelkastenLinks } from '../../../core/health.js';
+import { runHindsightReflect } from '../../../core/hindsight.js';
+import { serializeMemoryToMarkdown } from '../../../core/markdown.js';
+import { redactSecrets } from '../../../core/privacy.js';
+import { normalizeWorkspacePath, scopeFilterSQL } from '../../../core/scope.js';
 import { get, getGraphData, getSubgraph } from '../../../core/store.js';
+import { estimateTokens } from '../../../core/tokens.js';
 import {
   addRelation,
   approveCandidate,
@@ -23,19 +22,9 @@ import {
   unpin,
   upsertCandidate,
 } from '../../../core/writer.js';
-import { normalizeWorkspacePath, scopeFilterSQL } from '../../../core/scope.js';
-import { redactSecrets } from '../../../core/privacy.js';
-import { serializeMemoryToMarkdown } from '../../../core/markdown.js';
-import { estimateTokens } from '../../../core/tokens.js';
-import { autoHealMemoryHealth, weaveZettelkastenLinks } from '../../../core/health.js';
-import { autoBootstrapMemory } from '../../../core/bootstrap.js';
-import { runHindsightReflect } from '../../../core/hindsight.js';
-import {
-  appendCoreMemory,
-  getAllCoreMemories,
-  setCoreMemory,
-} from '../../../core/core-memory.js';
-import { findConsolidationClusters, consolidateCluster } from '../../../evolution/consolidator.js';
+import { generateDataset } from '../../../eval/gen-dataset.js';
+import { runEvalSuite } from '../../../eval/runner.js';
+import { consolidateCluster, findConsolidationClusters } from '../../../evolution/consolidator.js';
 import { distillSession } from '../../../evolution/extractor.js';
 import { runStrategyEvolution } from '../../../evolution/lab.js';
 import { curateMemoriesWithLLM } from '../../../evolution/maintenance.js';
@@ -43,11 +32,8 @@ import { reconcileAndUpsert, reconcileCandidate } from '../../../evolution/recon
 import { approveRepairProposal, rejectRepairProposal } from '../../../evolution/repair.js';
 import { rollbackStrategy } from '../../../evolution/strategy.js';
 import { runBackfill } from '../../../ingest/backfill.js';
-import { generateDataset } from '../../../eval/gen-dataset.js';
-import { runEvalSuite } from '../../../eval/runner.js';
 import { buildQueryPlan } from '../../../retrieval/query.js';
 import { recall } from '../../../retrieval/recall.js';
-import { renderStableLayer } from '../../prompt-section.js';
 import {
   assertWorkspaceAllowed,
   editMemoryRecord,
@@ -60,6 +46,16 @@ import {
   VALID_SCOPES,
 } from '../../../service/index.js';
 import {
+  type Db,
+  type GraphData,
+  hydrateMemoryRow,
+  type MemoryRecord,
+  type MemoryRow,
+  type RelationType,
+  type Scope,
+} from '../../../types.js';
+import { renderStableLayer } from '../../prompt-section.js';
+import {
   buildPrivacyWhereSQL,
   HttpError,
   readBodyJson,
@@ -68,12 +64,9 @@ import {
   sendJson,
   str,
 } from '../http.js';
-import { securityHeaders } from '../security.js';
 import type { RouteEntry, WebRouteContext } from '../router.js';
-import {
-  getReadOnlyActiveStrategy,
-  NO_ACTIVE_WORKSPACE_SENTINEL,
-} from './core-memory.js';
+import { securityHeaders } from '../security.js';
+import { getReadOnlyActiveStrategy, NO_ACTIVE_WORKSPACE_SENTINEL } from './core-memory.js';
 import { MEMORY_COLUMNS_NO_EMBEDDING } from './memories.js';
 
 const EXPORT_FORMAT_VERSION = '0.11.0';
@@ -113,7 +106,11 @@ const HindsightReflectBodySchema = z
 
 const CoreMemoryPostSchema = z
   .object({
-    block: z.string().trim().min(1, '请指定 Core Memory 块名称').regex(CORE_BLOCK_NAME_RE, 'Invalid core memory block name'),
+    block: z
+      .string()
+      .trim()
+      .min(1, '请指定 Core Memory 块名称')
+      .regex(CORE_BLOCK_NAME_RE, 'Invalid core memory block name'),
     content: z.string().trim().min(1, 'Core Memory 内容不能为空').max(16_000),
     mode: z.enum(['set', 'append']).optional(),
     workspaceId: z.string().max(512).optional(),
@@ -383,8 +380,7 @@ export function createAdminRoutes(): RouteEntry[] {
     }
 
     const scopeCtx = resolveWebScopeValues(body.workspaceId, body.sessionId, rctx.cfg, rctx.db);
-    const effectiveScope: Scope =
-      body.scope ?? (scopeCtx.wsId ? 'workspace' : 'global');
+    const effectiveScope: Scope = body.scope ?? (scopeCtx.wsId ? 'workspace' : 'global');
     const slotKey = body.slot_key?.trim() || undefined;
     if (slotKey && slotKey.toLowerCase().startsWith('core:')) {
       throw new HttpError(
@@ -401,9 +397,7 @@ export function createAdminRoutes(): RouteEntry[] {
         ? scopeCtx.wsId || scopeCtx.defaultWsId
         : undefined;
     const targetSessionId =
-      effectiveScope === 'session'
-        ? scopeCtx.sessionId || 'reconcile_sandbox'
-        : undefined;
+      effectiveScope === 'session' ? scopeCtx.sessionId || 'reconcile_sandbox' : undefined;
 
     const candidateInput = {
       type: normalizeMemoryType(body.type),
@@ -439,12 +433,7 @@ export function createAdminRoutes(): RouteEntry[] {
           )
         : undefined;
       const targetMemory = targetMem ? stripMemoryForApi(rctx.db, [targetMem])[0] : null;
-      sendJson(
-        rctx.res,
-        200,
-        { ok: true, dryRun: true, decision, targetMemory },
-        rctx.reqOrigin
-      );
+      sendJson(rctx.res, 200, { ok: true, dryRun: true, decision, targetMemory }, rctx.reqOrigin);
       return;
     }
 
@@ -682,9 +671,7 @@ export function createAdminRoutes(): RouteEntry[] {
         rctx.db,
         items.map((m) => m.id)
       );
-      const mdSections = items.map((m) =>
-        serializeMemoryToMarkdown(m, entityMap.get(m.id) || [])
-      );
+      const mdSections = items.map((m) => serializeMemoryToMarkdown(m, entityMap.get(m.id) || []));
       const fullMd =
         `# DSH 长期记忆知识库导出 (${items.length} 条)\n\n导出时间: ${new Date().toISOString()}\n\n---\n\n` +
         mdSections.join('\n\n---\n\n');
@@ -745,7 +732,10 @@ export function createAdminRoutes(): RouteEntry[] {
         typeof item === 'object' &&
         !Array.isArray(item) &&
         typeof (item as Record<string, unknown>).slot_key === 'string' &&
-        ((item as Record<string, unknown>).slot_key as string).trim().toLowerCase().startsWith('core:')
+        ((item as Record<string, unknown>).slot_key as string)
+          .trim()
+          .toLowerCase()
+          .startsWith('core:')
       ) {
         coreRejected++;
         coreErrors.push(`item[${i}]: core_slot_requires_allow_core`);
@@ -767,7 +757,11 @@ export function createAdminRoutes(): RouteEntry[] {
       throw new HttpError(400, 'exceeds_max_items', resImp.errors[0]);
     }
     if (resImp.errors.includes('workspace_excluded')) {
-      throw new HttpError(403, 'workspace_excluded', 'Workspace is excluded by privacy configuration');
+      throw new HttpError(
+        403,
+        'workspace_excluded',
+        'Workspace is excluded by privacy configuration'
+      );
     }
 
     if (resImp.imported > 0) {
@@ -817,13 +811,16 @@ export function createAdminRoutes(): RouteEntry[] {
         throw new HttpError(404, 'memory_not_found', `Memory ${id} not found`);
       }
       const ok =
-        action === 'pin'
-          ? pin(rctx.db, target.id, 'user')
-          : unpin(rctx.db, target.id, 'user');
+        action === 'pin' ? pin(rctx.db, target.id, 'user') : unpin(rctx.db, target.id, 'user');
       if (!ok) {
         throw new HttpError(404, 'memory_not_found', `Memory ${id} not found`);
       }
-      sendJson(rctx.res, 200, { ok: true, id: target.id, pinned: action === 'pin' }, rctx.reqOrigin);
+      sendJson(
+        rctx.res,
+        200,
+        { ok: true, id: target.id, pinned: action === 'pin' },
+        rctx.reqOrigin
+      );
       return;
     }
 
@@ -1020,7 +1017,11 @@ export function createAdminRoutes(): RouteEntry[] {
     if (action === 'batch') {
       const subAction = str(body.subAction) as (typeof VALID_BATCH_SUBACTIONS)[number];
       if (!VALID_BATCH_SUBACTIONS.includes(subAction)) {
-        throw new HttpError(400, 'invalid_batch_action', `Unknown batch action: ${String(body.subAction)}`);
+        throw new HttpError(
+          400,
+          'invalid_batch_action',
+          `Unknown batch action: ${String(body.subAction)}`
+        );
       }
       const ids: string[] = Array.isArray(body.ids)
         ? Array.from(
@@ -1095,12 +1096,7 @@ export function createAdminRoutes(): RouteEntry[] {
         }
       });
 
-      sendJson(
-        rctx.res,
-        200,
-        { ok: true, affected, total: ids.length, results },
-        rctx.reqOrigin
-      );
+      sendJson(rctx.res, 200, { ok: true, affected, total: ids.length, results }, rctx.reqOrigin);
       return;
     }
 
@@ -1148,8 +1144,7 @@ export function createAdminRoutes(): RouteEntry[] {
             targetScope === 'workspace' || targetScope === 'session'
               ? scope.wsId || scope.defaultWsId
               : undefined,
-          sessionId:
-            targetScope === 'session' ? scope.sessionId || 'manual_ui_entry' : undefined,
+          sessionId: targetScope === 'session' ? scope.sessionId || 'manual_ui_entry' : undefined,
           content: clean.text,
           summary: rawSummary || undefined,
           slot_key: slotKey,
@@ -1195,7 +1190,11 @@ export function createAdminRoutes(): RouteEntry[] {
       const fromMem = resolveScopedTarget(rctx.db, rctx.cfg, fromRaw, scopeCtx);
       const toMem = resolveScopedTarget(rctx.db, rctx.cfg, toRaw, scopeCtx);
       if (!fromMem || !toMem) {
-        throw new HttpError(404, 'memory_not_found', '未找到对应的记忆条目（支持完整 ID 或前 8 位短 ID）');
+        throw new HttpError(
+          404,
+          'memory_not_found',
+          '未找到对应的记忆条目（支持完整 ID 或前 8 位短 ID）'
+        );
       }
       if (fromMem.id === toMem.id) {
         throw new HttpError(400, 'self_relation_forbidden', '不能与自身建立拓扑关联');
@@ -1243,8 +1242,7 @@ export function createAdminRoutes(): RouteEntry[] {
     }
 
     if (action === 'rollback-strategy') {
-      const targetVer =
-        body.targetVersion !== undefined ? Number(body.targetVersion) : undefined;
+      const targetVer = body.targetVersion !== undefined ? Number(body.targetVersion) : undefined;
       if (targetVer !== undefined && (!Number.isInteger(targetVer) || targetVer < 1)) {
         throw new HttpError(400, 'invalid_target_version', '无效的策略版本号');
       }
@@ -1252,12 +1250,7 @@ export function createAdminRoutes(): RouteEntry[] {
       if (!resRollback.ok) {
         throw new HttpError(400, 'rollback_strategy_failed', resRollback.reason || '策略回滚失败');
       }
-      sendJson(
-        rctx.res,
-        200,
-        { ok: true, rolledBackTo: resRollback.rolledBackTo },
-        rctx.reqOrigin
-      );
+      sendJson(rctx.res, 200, { ok: true, rolledBackTo: resRollback.rolledBackTo }, rctx.reqOrigin);
       return;
     }
 
@@ -1273,8 +1266,9 @@ export function createAdminRoutes(): RouteEntry[] {
 
     // bootstrap / init: 严禁接受任意 body.workspacePath，仅允许 options.activeWorkspaces() 校验通过的工作区路径
     if (action === 'bootstrap' || action === 'init') {
-      const registeredPaths = (rctx.options?.activeWorkspaces?.() || [])
-        .filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+      const registeredPaths = (rctx.options?.activeWorkspaces?.() || []).filter(
+        (p): p is string => typeof p === 'string' && p.trim().length > 0
+      );
       const allowedByNorm = new Map<string, string>();
       for (const p of registeredPaths) {
         const norm = normalizeWorkspacePath(p);

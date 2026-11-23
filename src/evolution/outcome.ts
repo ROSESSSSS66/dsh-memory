@@ -1,13 +1,13 @@
-import { hydrateMemoryRow, type Db, type RawEvent, type MemoryRow } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import { tokenSet, jaccard, extractEntities } from '../core/text.js';
-import { applyUtility } from '../core/writer.js';
 import { isWorkspaceExcluded, memoryPrivacyFilterSQL, redactSecrets } from '../core/privacy.js';
+import { extractEntities, jaccard, tokenSet } from '../core/text.js';
+import { applyUtility } from '../core/writer.js';
 import { CORRECTION_REGEX, isCorrectionMessage } from '../ingest/rules.js';
 import { enqueueJob } from '../jobs/scheduler.js';
+import { type Db, hydrateMemoryRow, type MemoryRow, type RawEvent } from '../types.js';
 import { harvestSample } from './lab.js';
-import { getActiveStrategy } from './strategy.js';
 import { enqueueRepairJobIfEligible } from './repair.js';
+import { getActiveStrategy } from './strategy.js';
 
 export { CORRECTION_REGEX };
 

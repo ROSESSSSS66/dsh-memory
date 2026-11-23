@@ -1,7 +1,7 @@
-import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import { workspaceId, resolveWorkspaceCwd } from '../core/scope.js';
 import { isWorkspaceExcluded } from '../core/privacy.js';
+import { resolveWorkspaceCwd, workspaceId } from '../core/scope.js';
+import type { Db } from '../types.js';
 
 export interface ResolvedScope {
   rawWorkspace?: string;
@@ -95,10 +95,7 @@ export function assertWorkspaceAllowed(
  * 将 excludeWorkspaces 展开为 SQL IN (...) 可用的精确 ID/原值集合
  * （包含直接条目、16-hex 哈希，以及 meta['ws_path:*'] 下命中子目录前缀排除的工作区哈希）
  */
-export function expandExcludedWorkspaceIds(
-  db: Db,
-  excludeWorkspaces: string[] = []
-): string[] {
+export function expandExcludedWorkspaceIds(db: Db, excludeWorkspaces: string[] = []): string[] {
   if (!excludeWorkspaces || excludeWorkspaces.length === 0) return [];
 
   const excluded = new Set<string>();
@@ -136,12 +133,12 @@ export function expandExcludedWorkspaceIds(
  * 枚举所有未被 excludeWorkspaces 排除的活跃工作区（聚合 memories 与 meta ws_path:* 映射），
  * 供 Studio UI 工作区选择器及全局运维任务使用。
  */
-export function listActiveWorkspaces(
-  db: Db,
-  cfg: PluginConfig
-): ActiveWorkspaceInfo[] {
+export function listActiveWorkspaces(db: Db, cfg: PluginConfig): ActiveWorkspaceInfo[] {
   const excludeList = cfg?.excludeWorkspaces || [];
-  const workspaces = new Map<string, { path?: string; activeMemories: number; registered: boolean }>();
+  const workspaces = new Map<
+    string,
+    { path?: string; activeMemories: number; registered: boolean }
+  >();
 
   const memRows = db.all<{ workspace_id: string; active_cnt: number | null }>(
     `SELECT workspace_id,
@@ -170,7 +167,8 @@ export function listActiveWorkspaces(
     for (const row of metaRows) {
       const wsId = row.key.slice('ws_path:'.length).trim().toLowerCase();
       if (!wsId) continue;
-      const wsPath = typeof row.value === 'string' && row.value.trim() ? row.value.trim() : undefined;
+      const wsPath =
+        typeof row.value === 'string' && row.value.trim() ? row.value.trim() : undefined;
       const existing = workspaces.get(wsId);
       if (existing) {
         if (wsPath) existing.path = wsPath;

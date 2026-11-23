@@ -1,9 +1,5 @@
 import { formatRelativeTime, getMessages } from '../i18n.js';
-import type {
-  HindsightSummaryData,
-  UiLocale,
-  VikingSummaryData,
-} from '../types.js';
+import type { HindsightSummaryData, UiLocale, VikingSummaryData } from '../types.js';
 
 export interface EpistemicInsightsProps {
   hindsight: HindsightSummaryData | null;
@@ -11,11 +7,7 @@ export interface EpistemicInsightsProps {
   locale: UiLocale;
 }
 
-export function EpistemicInsights({
-  hindsight,
-  viking,
-  locale,
-}: EpistemicInsightsProps) {
+export function EpistemicInsights({ hindsight, viking, locale }: EpistemicInsightsProps) {
   if (!hindsight && !viking) return null;
 
   const t = getMessages(locale);
@@ -78,9 +70,7 @@ export function EpistemicInsights({
           {hindsight ? (
             <div className="dshm-insights-block">
               <div className="dshm-insights-block-head">
-                <span className="dshm-insights-block-title">
-                  {t.epistemic.hindsightTitle}
-                </span>
+                <span className="dshm-insights-block-title">{t.epistemic.hindsightTitle}</span>
               </div>
 
               <div className="dshm-network-grid">
@@ -102,15 +92,11 @@ export function EpistemicInsights({
               </div>
 
               <div className="dshm-insights-block-head">
-                <span className="dshm-insights-block-title">
-                  {t.epistemic.mentalModelsTitle}
-                </span>
+                <span className="dshm-insights-block-title">{t.epistemic.mentalModelsTitle}</span>
               </div>
 
               {models.length === 0 ? (
-                <div className="dshm-insights-empty">
-                  {t.epistemic.mentalModelsEmpty}
-                </div>
+                <div className="dshm-insights-empty">{t.epistemic.mentalModelsEmpty}</div>
               ) : (
                 <div className="dshm-model-list">
                   {models.map((model) => {
@@ -122,22 +108,16 @@ export function EpistemicInsights({
                           <span className="dshm-model-badge">{badge}</span>
                           <div className="dshm-model-meta">
                             <span>
-                              {t.epistemic.confidence(
-                                Math.round((model.confidence ?? 0.8) * 100)
-                              )}
+                              {t.epistemic.confidence(Math.round((model.confidence ?? 0.8) * 100))}
                             </span>
                             {model.updated_at ? (
-                              <span>
-                                {formatRelativeTime(model.updated_at, locale)}
-                              </span>
+                              <span>{formatRelativeTime(model.updated_at, locale)}</span>
                             ) : null}
                           </div>
                         </div>
                         <div className="dshm-model-summary">{model.summary}</div>
                         {model.vikingUri || slotLabel ? (
-                          <div className="dshm-model-uri">
-                            {model.vikingUri || slotLabel}
-                          </div>
+                          <div className="dshm-model-uri">{model.vikingUri || slotLabel}</div>
                         ) : null}
                       </div>
                     );
@@ -151,9 +131,7 @@ export function EpistemicInsights({
           {viking ? (
             <div className="dshm-insights-block">
               <div className="dshm-insights-block-head">
-                <span className="dshm-insights-block-title">
-                  {t.epistemic.vikingTitle}
-                </span>
+                <span className="dshm-insights-block-title">{t.epistemic.vikingTitle}</span>
                 <span className="dshm-insights-uri">
                   {viking.rootUri} · {t.epistemic.vikingTotal(vikingTotal)}
                 </span>
@@ -164,11 +142,9 @@ export function EpistemicInsights({
               ) : (
                 <div className="dshm-viking-tree">
                   {categories.map((cat) => {
-                    const catLabel =
-                      t.epistemic.vikingCategories[cat.category] || cat.category;
+                    const catLabel = t.epistemic.vikingCategories[cat.category] || cat.category;
                     const samples =
-                      Array.isArray(cat.sampleAbstracts) &&
-                      cat.sampleAbstracts.length > 0
+                      Array.isArray(cat.sampleAbstracts) && cat.sampleAbstracts.length > 0
                         ? cat.sampleAbstracts
                         : cat.description
                           ? [cat.description]

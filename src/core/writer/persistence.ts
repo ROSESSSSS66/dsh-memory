@@ -1,22 +1,15 @@
 import {
-  hydrateMemoryRow,
-  parseOriginKinds,
   type CandidateInput,
   type Db,
+  hydrateMemoryRow,
   type MemoryRow,
   type OriginKind,
+  parseOriginKinds,
   type Scope,
   type UpsertResult,
 } from '../../types.js';
-import { ftsText, extractEntities } from '../text.js';
+import { extractEntities, ftsText } from '../text.js';
 import { computeLocalEmbedding, decodeEmbeddingBlob, encodeEmbeddingBlob } from '../vector.js';
-import {
-  generateId,
-  truncateExcerpt,
-  validateAndPrepareCandidate,
-  type SanitizedSourceInput,
-  type WriterLimits,
-} from './validate.js';
 import {
   addRelation,
   findActiveSlotOccupant,
@@ -26,6 +19,13 @@ import {
   schedulePrimeVectorCache,
   supersedeActiveSlot,
 } from './slot-policy.js';
+import {
+  generateId,
+  type SanitizedSourceInput,
+  truncateExcerpt,
+  validateAndPrepareCandidate,
+  type WriterLimits,
+} from './validate.js';
 import { weaveRelatedMemoryIds } from './weave.js';
 
 export { addRelation, saveVersionSnapshot } from './slot-policy.js';
@@ -389,14 +389,7 @@ export function upsertCandidate(
                version = version + 1,
                updated_at = ?
            WHERE id = ?`,
-          [
-            reactivatedConf,
-            JSON.stringify(mergedOriginKinds),
-            now,
-            approver,
-            now,
-            existingSame.id,
-          ]
+          [reactivatedConf, JSON.stringify(mergedOriginKinds), now, approver, now, existingSame.id]
         );
         const existingVec = decodeEmbeddingBlob(existingSame.embedding);
         if (existingVec) {
@@ -414,10 +407,11 @@ export function upsertCandidate(
           const clampedConf = mergedTainted
             ? Math.min(existingSame.confidence, 0.5)
             : existingSame.confidence;
-          db.run(
-            `UPDATE memories SET origin_kinds = ?, confidence = ? WHERE id = ?`,
-            [JSON.stringify(mergedOriginKinds), clampedConf, existingSame.id]
-          );
+          db.run(`UPDATE memories SET origin_kinds = ?, confidence = ? WHERE id = ?`, [
+            JSON.stringify(mergedOriginKinds),
+            clampedConf,
+            existingSame.id,
+          ]);
         }
         return { action: 'merged', id: existingSame.id };
       }
@@ -447,13 +441,7 @@ export function upsertCandidate(
                confidence = ?,
                updated_at = ?
            WHERE id = ?`,
-          [
-            nextContentRev,
-            JSON.stringify(mergedOriginKinds),
-            resurrectedConf,
-            now,
-            existingSame.id,
-          ]
+          [nextContentRev, JSON.stringify(mergedOriginKinds), resurrectedConf, now, existingSame.id]
         );
         return { action: 'merged', id: existingSame.id };
       }
@@ -481,14 +469,7 @@ export function upsertCandidate(
                version = version + 1,
                updated_at = ?
            WHERE id = ?`,
-          [
-            now,
-            approver,
-            promotedConf,
-            JSON.stringify(mergedOriginKinds),
-            now,
-            existingSame.id,
-          ]
+          [now, approver, promotedConf, JSON.stringify(mergedOriginKinds), now, existingSame.id]
         );
       } else if (existingSame.status === 'candidate') {
         // 未批准记录使用 noisy-or 聚合独立证据，并在任一已合并来源含 web/tool 污点时强制封顶 0.5

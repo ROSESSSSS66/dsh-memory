@@ -1,19 +1,19 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
 import os from 'node:os';
+import path from 'node:path';
 import zlib from 'node:zlib';
 import * as fzstd from 'fzstd';
-import type { Db, RawEvent } from '../types.js';
-import { normalizeWorkspacePath, rememberWorkspacePath, workspaceId } from '../core/scope.js';
-import { isWorkspaceExcluded, redactSecrets } from '../core/privacy.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
+import { isWorkspaceExcluded, redactSecrets } from '../core/privacy.js';
+import { normalizeWorkspacePath, rememberWorkspacePath, workspaceId } from '../core/scope.js';
 import { IGNORED_EVENT_TYPES, isIgnoredUserMessageSource } from '../dsh/session-listener.js';
+import type { Db, RawEvent } from '../types.js';
 import { runRules } from './rules.js';
 
-export const ZSTD_MAGIC = 0xFD2FB528;
-const ZSTD_SKIPPABLE_MAGIC_MIN = 0x184D2A50;
-const ZSTD_SKIPPABLE_MAGIC_MAX = 0x184D2A5F;
+export const ZSTD_MAGIC = 0xfd2fb528;
+const ZSTD_SKIPPABLE_MAGIC_MIN = 0x184d2a50;
+const ZSTD_SKIPPABLE_MAGIC_MAX = 0x184d2a5f;
 
 export const MAX_COMPRESSED_FILE_BYTES = 32 * 1024 * 1024;
 export const MAX_DECOMPRESSED_FILE_BYTES = 64 * 1024 * 1024;
@@ -68,11 +68,7 @@ export function extractToolCallId(data: any): string | null {
 export function extractToolResultCallId(data: any): string | null {
   if (!data || typeof data !== 'object') return null;
   const raw =
-    data.toolCallId ??
-    data.message?.toolCallId ??
-    data.source?.callId ??
-    data.callId ??
-    data.id;
+    data.toolCallId ?? data.message?.toolCallId ?? data.source?.callId ?? data.callId ?? data.id;
   if (raw === undefined || raw === null || raw === '') return null;
   return String(raw);
 }
@@ -125,7 +121,7 @@ function parseZstdFrameHeader(buffer: Buffer, frameStart: number): ParsedZstdHea
     const exponent = windowDesc >>> 3;
     const mantissa = windowDesc & 7;
     // 使用 Math.pow 避免 exponent >= 22 时 32 位左移溢出回绕成小值
-    const windowBase = Math.pow(2, 10 + exponent);
+    const windowBase = 2 ** (10 + exponent);
     windowSize = windowBase + (windowBase / 8) * mantissa;
   }
 
@@ -305,7 +301,7 @@ function decompressZstdFrameBounded(
   const headerInfo =
     options.windowSize !== undefined || options.contentSize !== undefined
       ? options
-      : parseZstdFrameHeader(frameBuf, 0) ?? {};
+      : (parseZstdFrameHeader(frameBuf, 0) ?? {});
 
   if (headerInfo.windowSize !== undefined && headerInfo.windowSize > MAX_ZSTD_WINDOW_BYTES) {
     throw makeBudgetError(MAX_ZSTD_WINDOW_BYTES);
@@ -345,7 +341,12 @@ function readProjCacheJsonFile(
     const data = JSON.parse(raw);
     const rec = data?.record;
     const identity = rec?.identity;
-    if (!identity || identity.formatVersion !== 4 || typeof identity.cwd !== 'string' || !identity.cwd) {
+    if (
+      !identity ||
+      identity.formatVersion !== 4 ||
+      typeof identity.cwd !== 'string' ||
+      !identity.cwd
+    ) {
       return null;
     }
 
@@ -369,8 +370,7 @@ function readProjCacheJsonFile(
     }
 
     const sessionId =
-      rec.sessionId ||
-      path.basename(filePath, '.json').replace(/^session_/, 'session-');
+      rec.sessionId || path.basename(filePath, '.json').replace(/^session_/, 'session-');
     const baseTime = typeof identity.createdAt === 'number' ? identity.createdAt : Date.now();
 
     const rawLines: string[] = [];
@@ -436,10 +436,7 @@ function readProjCacheJsonFile(
   }
 }
 
-function parseAndValidateHeaderLine(
-  line: string,
-  excludeWorkspaces: string[] = []
-): any | null {
+function parseAndValidateHeaderLine(line: string, excludeWorkspaces: string[] = []): any | null {
   let header: any;
   try {
     header = JSON.parse(line);
@@ -527,7 +524,10 @@ export function readSessionFile(
         });
       } catch (err: any) {
         if (isBudgetOverflowError(err)) {
-          console.warn(`[dsh-memory] Zstd output budget exceeded in ${filePath}:`, err?.message || err);
+          console.warn(
+            `[dsh-memory] Zstd output budget exceeded in ${filePath}:`,
+            err?.message || err
+          );
           return null;
         }
         // 非 OOM 的单帧损坏：保留前面已成功解出的帧 0..K-1，仅截断后续帧
@@ -556,7 +556,12 @@ export function readSessionFile(
     }
 
     // 尝试恢复撕裂尾帧（在剩余累计预算内）
-    if (!hitCorruptFrame && tornStart !== undefined && tornStart < buf.length && remainingOutputBytes > 0) {
+    if (
+      !hitCorruptFrame &&
+      tornStart !== undefined &&
+      tornStart < buf.length &&
+      remainingOutputBytes > 0
+    ) {
       try {
         const tornBuf = buf.subarray(tornStart);
         const recovered = decompressZstdFrameBounded(tornBuf, remainingOutputBytes, {
@@ -601,7 +606,8 @@ export function readSessionFile(
       return null;
     }
 
-    text = bytesRead === stat.size ? actualProbe.toString('utf8') : fs.readFileSync(filePath, 'utf8');
+    text =
+      bytesRead === stat.size ? actualProbe.toString('utf8') : fs.readFileSync(filePath, 'utf8');
   }
 
   if (!text) return null;
@@ -644,7 +650,9 @@ function canonicalFileKey(filePath: string): string {
 
 function loadBackfillCheckpoints(db: Db): CheckpointMap {
   try {
-    const row = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [CHECKPOINT_META_KEY]);
+    const row = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', [
+      CHECKPOINT_META_KEY,
+    ]);
     if (!row?.value) return {};
     const parsed = JSON.parse(row.value);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
@@ -1056,7 +1064,10 @@ export function runBackfill(db: Db, options: BackfillOptions = {}): BackfillStat
       stats.processedFiles++;
       seenSessionIds.add(sessionId);
     } catch (txErr: any) {
-      console.warn(`[dsh-memory] backfill transaction failed for ${file}:`, txErr?.message || txErr);
+      console.warn(
+        `[dsh-memory] backfill transaction failed for ${file}:`,
+        txErr?.message || txErr
+      );
       stats.skippedFiles++;
     }
   }

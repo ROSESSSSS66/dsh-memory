@@ -1,51 +1,48 @@
 import fs from 'node:fs';
 import * as z from 'zod';
-import type { Db, MemoryRecord, MemoryType, Scope, VikingContextTier } from '../types.js';
-import { get, sources } from '../core/store.js';
-import { workspaceId, scopeFilterSQL } from '../core/scope.js';
-import { buildQueryPlan } from '../retrieval/query.js';
-import { recall } from '../retrieval/recall.js';
-import { getActiveStrategy } from '../evolution/strategy.js';
-import { TAG_MAP, singleLine, escapeXmlData } from '../retrieval/render.js';
-import { budgetTokens } from '../core/tokens.js';
-import { redactSecrets } from '../core/privacy.js';
-import { upsertCandidate, confirmMemory, mergeMemories } from '../core/writer.js';
-import {
-  getCoreMemory,
-  getAllCoreMemories,
-  setCoreMemory,
-  appendCoreMemory,
-  renderCoreMemoryMarkdown,
-} from '../core/core-memory.js';
-import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
+import { DEFAULTS, type PluginConfig } from '../config.js';
 import { autoBootstrapMemory } from '../core/bootstrap.js';
 import {
-  parseHindsightNetwork,
+  appendCoreMemory,
+  getAllCoreMemories,
+  getCoreMemory,
+  renderCoreMemoryMarkdown,
+  setCoreMemory,
+} from '../core/core-memory.js';
+import { auditMemoryHealth, autoHealMemoryHealth } from '../core/health.js';
+import {
   classifyHindsightNetwork,
-  runHindsightReflect,
   formatHindsightReflectReport,
+  parseHindsightNetwork,
+  runHindsightReflect,
   traceHindsightEvolution,
 } from '../core/hindsight.js';
+import { redactSecrets } from '../core/privacy.js';
+import { scopeFilterSQL, workspaceId } from '../core/scope.js';
+import { get, sources } from '../core/store.js';
+import { budgetTokens } from '../core/tokens.js';
 import {
-  resolveVikingUri,
-  resolveVikingUrisBatch,
-  normalizeVikingUriInput,
-  resolveMemoryByVikingUriOrId,
   browseVikingDirectory,
-  findInVikingTree,
-  getVikingEvolutionDiff,
-  formatVikingEvolutionDiff,
   buildInlineL1Overview,
   buildTieredMemoryView,
+  findInVikingTree,
+  formatVikingEvolutionDiff,
+  getVikingEvolutionDiff,
+  normalizeVikingUriInput,
+  resolveMemoryByVikingUriOrId,
+  resolveVikingUri,
+  resolveVikingUrisBatch,
 } from '../core/viking.js';
+import { confirmMemory, mergeMemories, upsertCandidate } from '../core/writer.js';
 import { reconcileAndUpsert } from '../evolution/reconciler.js';
 import { enqueueRepairJobIfEligible } from '../evolution/repair.js';
+import { getActiveStrategy } from '../evolution/strategy.js';
+import { buildQueryPlan } from '../retrieval/query.js';
+import { recall } from '../retrieval/recall.js';
+import { escapeXmlData, singleLine, TAG_MAP } from '../retrieval/render.js';
 import { normalizeMemoryType } from '../service/index.js';
-import { DEFAULTS, type PluginConfig } from '../config.js';
-import {
-  isWorkspaceOrMappedExcluded,
-  resolveSessionWorkspaceId,
-} from './scope-resolver.js';
+import type { Db, MemoryRecord, MemoryType, Scope, VikingContextTier } from '../types.js';
+import { isWorkspaceOrMappedExcluded, resolveSessionWorkspaceId } from './scope-resolver.js';
 
 export interface ToolContext {
   db: Db;
@@ -253,7 +250,8 @@ export class MemoryTools {
     const now = Date.now();
     const wsId = workspaceId(agentCtx.workspaceId || '');
     const sessionId = agentCtx.sessionId || 'default_session';
-    const turn = typeof agentCtx.turn === 'number' && Number.isFinite(agentCtx.turn) ? agentCtx.turn : 0;
+    const turn =
+      typeof agentCtx.turn === 'number' && Number.isFinite(agentCtx.turn) ? agentCtx.turn : 0;
 
     const plan = buildQueryPlan({
       userText: rawQuery,
@@ -269,8 +267,23 @@ export class MemoryTools {
         version: this.strategyVersion,
         config: {
           rrfK: 25,
-          channelWeights: { lexical: 1, entity: 1.2, typed: 0.8, temporal: 0.8, preference: 0.6, vector: 1 },
-          scoreWeights: { relevance: 0.5, confidence: 0.14, utility: 0.14, freshness: 0.08, consistency: 0.06, specificity: 0.03, importance: 0.05 },
+          channelWeights: {
+            lexical: 1,
+            entity: 1.2,
+            typed: 0.8,
+            temporal: 0.8,
+            preference: 0.6,
+            vector: 1,
+          },
+          scoreWeights: {
+            relevance: 0.5,
+            confidence: 0.14,
+            utility: 0.14,
+            freshness: 0.08,
+            consistency: 0.06,
+            specificity: 0.03,
+            importance: 0.05,
+          },
           minRelevance: 0.15,
           dynamicBudgetTokens: 1600,
           maxItems: 6,
@@ -286,7 +299,9 @@ export class MemoryTools {
 
     const searchStrategy = {
       ...activeStrat.config,
-      maxItems: hasPostFilters ? Math.max(limit * 4, 32) : Math.max(limit, activeStrat.config.maxItems, 12),
+      maxItems: hasPostFilters
+        ? Math.max(limit * 4, 32)
+        : Math.max(limit, activeStrat.config.maxItems, 12),
       dynamicBudgetTokens: hasPostFilters ? 16_000 : 10_000,
     };
     const recallCfg: PluginConfig =
@@ -313,7 +328,8 @@ export class MemoryTools {
 
     const candidateMemories = recallRes.items.map((it) => it.memory);
     const uriMap = resolveVikingUrisBatch(this.db, candidateMemories);
-    const allowedTypes = types && types.length > 0 ? new Set(types.map((t) => t.toLowerCase())) : null;
+    const allowedTypes =
+      types && types.length > 0 ? new Set(types.map((t) => t.toLowerCase())) : null;
 
     const filtered: MemoryRecord[] = [];
     for (const m of candidateMemories) {
@@ -452,7 +468,15 @@ export class MemoryTools {
           `INSERT OR IGNORE INTO injections (
             session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
           ) VALUES (?, ?, ?, ?, 'tool', 1, ?, 'summary', ?, ?)`,
-          [agentCtx.sessionId, agentCtx.turn ?? 0, mem.id, mem.content_rev, mem.summary_cost, stratVer, Date.now()]
+          [
+            agentCtx.sessionId,
+            agentCtx.turn ?? 0,
+            mem.id,
+            mem.content_rev,
+            mem.summary_cost,
+            stratVer,
+            Date.now(),
+          ]
         );
       }
       return tierOut;
@@ -465,7 +489,9 @@ export class MemoryTools {
     const srcList = sources(this.db, mem.id, mem.content_rev).slice(0, 3);
     const srcLines = srcList.map((s) => {
       const sessShort = (s.session_id || '').slice(0, 8);
-      const excerpt = s.excerpt ? ` "${singleLine(redactSecrets(s.excerpt).text).slice(0, 60)}"` : '';
+      const excerpt = s.excerpt
+        ? ` "${singleLine(redactSecrets(s.excerpt).text).slice(0, 60)}"`
+        : '';
       return `  - session ${sessShort} seq ${s.seq} (${s.kind})${excerpt}`;
     });
 
@@ -546,7 +572,15 @@ export class MemoryTools {
         `INSERT OR IGNORE INTO injections (
           session_id, turn, memory_id, content_rev, layer, rank, tokens, form, strategy_v, created_at
         ) VALUES (?, ?, ?, ?, 'tool', 1, ?, 'content', ?, ?)`,
-        [agentCtx.sessionId, agentCtx.turn ?? 0, mem.id, mem.content_rev, mem.token_cost, stratVer, Date.now()]
+        [
+          agentCtx.sessionId,
+          agentCtx.turn ?? 0,
+          mem.id,
+          mem.content_rev,
+          mem.token_cost,
+          stratVer,
+          Date.now(),
+        ]
       );
     }
     return res;
@@ -573,11 +607,11 @@ export class MemoryTools {
       typeof agentCtx?.sessionId === 'string' && agentCtx.sessionId.trim()
         ? agentCtx.sessionId.trim()
         : 'default_session';
-    const turn = typeof agentCtx?.turn === 'number' && Number.isFinite(agentCtx.turn) ? agentCtx.turn : 0;
+    const turn =
+      typeof agentCtx?.turn === 'number' && Number.isFinite(agentCtx.turn) ? agentCtx.turn : 0;
 
     // 解析作用域并在 get() 中强制执行（若未显式传 workspaceId 则先尝试从 session_workspace_owners 反查）
-    const explicitWs =
-      agentCtx?.workspaceId !== undefined ? agentCtx.workspaceId : undefined;
+    const explicitWs = agentCtx?.workspaceId !== undefined ? agentCtx.workspaceId : undefined;
     const inferredWs =
       explicitWs === undefined && sessionId !== 'default_session'
         ? resolveSessionWorkspaceId(this.db, sessionId)
@@ -624,9 +658,7 @@ export class MemoryTools {
     const r = helpful ? 1 : -1;
     const target = (r + 1) / 2; // helpful -> 1, unhelpful -> 0
     const lr = cfg.utilityLR || 0.1;
-    const sanitizedNote = note
-      ? singleLine(redactSecrets(note.trim()).text).slice(0, 300)
-      : '';
+    const sanitizedNote = note ? singleLine(redactSecrets(note.trim()).text).slice(0, 300) : '';
     const repairQuery = sanitizedNote || 'Negative tool feedback';
 
     // 使用 SQLite 原子条件更新实现跨进程、持久化的单次反馈幂等保护（替代易失内存 Set）
@@ -734,7 +766,8 @@ export class MemoryTools {
 
     const chosenScope: Scope = parsed.data.scope || 'workspace';
     const sessionId = agentCtx.sessionId || 'default_session';
-    const turn = typeof agentCtx.turn === 'number' && Number.isFinite(agentCtx.turn) ? agentCtx.turn : 0;
+    const turn =
+      typeof agentCtx.turn === 'number' && Number.isFinite(agentCtx.turn) ? agentCtx.turn : 0;
     const now = Date.now();
 
     // 速率限制：turn > 0 时按 turn 真 LRU 限流；turn === 0 / 不可用时退回 60s 滑动时间窗口限流（每 60s 最多 3 次）
@@ -854,10 +887,7 @@ export class MemoryTools {
   /**
    * 7. core_read (内部辅助方法)
    */
-  public coreRead(
-    params: { block?: string },
-    agentCtx: { workspaceId: string }
-  ): string {
+  public coreRead(params: { block?: string }, agentCtx: { workspaceId: string }): string {
     if (this.isExcludedWorkspace(agentCtx?.workspaceId)) {
       return 'Error: workspace is excluded by privacy configuration.';
     }
@@ -1018,7 +1048,9 @@ export class MemoryTools {
     if (report.duplicatePairs.length > 0) {
       lines.push('Duplicate Pairs (can merge via /memory merge):');
       for (const pair of report.duplicatePairs.slice(0, 5)) {
-        lines.push(`  - ${pair.sourceId} -> ${pair.targetId} (sim=${pair.similarity}, reason=${pair.reason})`);
+        lines.push(
+          `  - ${pair.sourceId} -> ${pair.targetId} (sim=${pair.similarity}, reason=${pair.reason})`
+        );
       }
     }
     if (report.recommendations.length > 0) {
@@ -1247,7 +1279,10 @@ export class MemoryTools {
           agentCtx
         );
       case 'expand':
-        return this.expand({ id: (params.id || params.uri) as string, tier: params.tier }, agentCtx);
+        return this.expand(
+          { id: (params.id || params.uri) as string, tier: params.tier },
+          agentCtx
+        );
       case 'note':
         return this.note(
           {
@@ -1272,18 +1307,32 @@ export class MemoryTools {
         return this.confirm({ id: params.id as string }, agentCtx);
       case 'merge':
         return this.merge(
-          { sourceId: params.sourceId as string, targetId: params.targetId as string, reason: params.reason },
+          {
+            sourceId: params.sourceId as string,
+            targetId: params.targetId as string,
+            reason: params.reason,
+          },
           agentCtx
         );
       case 'core_read':
         return this.coreRead({ block: params.block }, agentCtx);
       case 'core_set':
-        return this.coreSet({ block: params.block || 'project', content: argsContent(params) }, agentCtx);
+        return this.coreSet(
+          { block: params.block || 'project', content: argsContent(params) },
+          agentCtx
+        );
       case 'core_append':
-        return this.coreAppend({ block: params.block || 'project', text: params.text || params.content || '' }, agentCtx);
+        return this.coreAppend(
+          { block: params.block || 'project', text: params.text || params.content || '' },
+          agentCtx
+        );
       case 'reconcile':
         return this.reconcile(
-          { content: params.content as string, type: params.type || params.kind || 'semantic', slotKey: params.slotKey },
+          {
+            content: params.content as string,
+            type: params.type || params.kind || 'semantic',
+            slotKey: params.slotKey,
+          },
           agentCtx
         );
       case 'doctor':
@@ -1318,7 +1367,9 @@ export class MemoryTools {
       case 'diff':
         return this.diff(agentCtx);
       case 'reflect':
-        return this.reflect({ topic: params.topic || params.query }, agentCtx, { privileged: false });
+        return this.reflect({ topic: params.topic || params.query }, agentCtx, {
+          privileged: false,
+        });
       default:
         return `Error: unknown action '${action}'. Supported: search, expand, note, feedback, confirm, merge, core_read, core_set, core_append, reconcile, doctor, heal, init, tree, find, diff, reflect`;
     }

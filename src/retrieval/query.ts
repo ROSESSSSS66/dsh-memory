@@ -1,5 +1,5 @@
-import { segment, extractEntities, STOPWORDS } from '../core/text.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
+import { extractEntities, STOPWORDS, segment } from '../core/text.js';
 import type { QueryPlan } from '../types.js';
 
 export const TEMPORAL_INTENT_REGEX =
@@ -22,29 +22,195 @@ export const PREFERENCE_BROWSE_REGEX =
 
 export const QUERY_PROMPT_WORDS = new Set([
   // 中文查询提示词 / 常见虚词二元组
-  '今天', '昨天', '前天', '最近', '上周', '上次', '之前', '以前', '刚才', '时候',
-  '怎么', '如何', '什么', '为什么', '为何', '哪个', '哪些', '哪一', '多少', '是否',
-  '请', '帮', '帮我', '帮忙', '请问', '一下', '这个', '那个', '一个', '我们', '应该',
-  '能否', '可以', '不能', '告诉', '记得', '回忆', '忘记', '查看', '看看', '说说',
-  '怎么做', '有什', '是什', '是哪', '到底', '目前', '现在', '已经', '需要', '想要',
+  '今天',
+  '昨天',
+  '前天',
+  '最近',
+  '上周',
+  '上次',
+  '之前',
+  '以前',
+  '刚才',
+  '时候',
+  '怎么',
+  '如何',
+  '什么',
+  '为什么',
+  '为何',
+  '哪个',
+  '哪些',
+  '哪一',
+  '多少',
+  '是否',
+  '请',
+  '帮',
+  '帮我',
+  '帮忙',
+  '请问',
+  '一下',
+  '这个',
+  '那个',
+  '一个',
+  '我们',
+  '应该',
+  '能否',
+  '可以',
+  '不能',
+  '告诉',
+  '记得',
+  '回忆',
+  '忘记',
+  '查看',
+  '看看',
+  '说说',
+  '怎么做',
+  '有什',
+  '是什',
+  '是哪',
+  '到底',
+  '目前',
+  '现在',
+  '已经',
+  '需要',
+  '想要',
   // 英文自然问句提示词与功能词
-  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'am', 'be', 'been', 'being',
-  'in', 'on', 'of', 'for', 'to', 'at', 'by', 'from', 'with', 'without', 'about', 'into',
-  'how', 'why', 'what', 'which', 'who', 'whom', 'whose', 'where', 'when',
-  'today', 'yesterday', 'recently', 'previously', 'earlier', 'ago', 'last',
-  'can', 'could', 'will', 'would', 'shall', 'should', 'may', 'might', 'must',
-  'do', 'does', 'did', 'done', 'have', 'has', 'had', 'having',
-  'i', 'me', 'my', 'we', 'us', 'our', 'you', 'your', 'he', 'him', 'his', 'she', 'her', 'they', 'them', 'their',
-  'this', 'that', 'these', 'those', 'it', 'its', 'there', 'here',
-  'please', 'help', 'tell', 'remember', 'recall', 'remind', 'forgot', 'forget', 'know',
-  'explain', 'describe', 'hey', 'hi', 'hello', 'thanks', 'thank',
-  'just', 'very', 'really', 'actually', 'basically', 'currently', 'still', 'already', 'again',
-  'also', 'then', 'than', 'so', 'if', 'not', 'no', 'yes', 'only', 'want', 'need',
-  'any', 'some', 'all', 'anything', 'something', 'someone', 'anyone',
+  'the',
+  'a',
+  'an',
+  'is',
+  'are',
+  'was',
+  'were',
+  'am',
+  'be',
+  'been',
+  'being',
+  'in',
+  'on',
+  'of',
+  'for',
+  'to',
+  'at',
+  'by',
+  'from',
+  'with',
+  'without',
+  'about',
+  'into',
+  'how',
+  'why',
+  'what',
+  'which',
+  'who',
+  'whom',
+  'whose',
+  'where',
+  'when',
+  'today',
+  'yesterday',
+  'recently',
+  'previously',
+  'earlier',
+  'ago',
+  'last',
+  'can',
+  'could',
+  'will',
+  'would',
+  'shall',
+  'should',
+  'may',
+  'might',
+  'must',
+  'do',
+  'does',
+  'did',
+  'done',
+  'have',
+  'has',
+  'had',
+  'having',
+  'i',
+  'me',
+  'my',
+  'we',
+  'us',
+  'our',
+  'you',
+  'your',
+  'he',
+  'him',
+  'his',
+  'she',
+  'her',
+  'they',
+  'them',
+  'their',
+  'this',
+  'that',
+  'these',
+  'those',
+  'it',
+  'its',
+  'there',
+  'here',
+  'please',
+  'help',
+  'tell',
+  'remember',
+  'recall',
+  'remind',
+  'forgot',
+  'forget',
+  'know',
+  'explain',
+  'describe',
+  'hey',
+  'hi',
+  'hello',
+  'thanks',
+  'thank',
+  'just',
+  'very',
+  'really',
+  'actually',
+  'basically',
+  'currently',
+  'still',
+  'already',
+  'again',
+  'also',
+  'then',
+  'than',
+  'so',
+  'if',
+  'not',
+  'no',
+  'yes',
+  'only',
+  'want',
+  'need',
+  'any',
+  'some',
+  'all',
+  'anything',
+  'something',
+  'someone',
+  'anyone',
 ]);
 
-const CJK_PARTICLE_BOUNDARY_REGEX = /^[的是了吗呢吧啊么哪怎何呀嘛哦]|[\s]*[的是了吗呢吧啊么哪怎何呀嘛哦]$/;
-const CJK_VALID_COMPOUNDS = new Set(['目的', '几何', '了解', '任何', '的确', '正确', '明确', '准确']);
+const CJK_PARTICLE_BOUNDARY_REGEX =
+  /^[的是了吗呢吧啊么哪怎何呀嘛哦]|[\s]*[的是了吗呢吧啊么哪怎何呀嘛哦]$/;
+const CJK_VALID_COMPOUNDS = new Set([
+  '目的',
+  '几何',
+  '了解',
+  '任何',
+  '的确',
+  '正确',
+  '明确',
+  '准确',
+]);
 
 /**
  * 校验公历年月日是否真实存在（防止 2026-02-30 静默溢出成 2026-03-02）
@@ -70,7 +236,10 @@ function makeValidDayRange(
 /**
  * 解析查询中的时间区间
  */
-export function parseTimeRange(text: string, now: number): { from: number; to: number } | undefined {
+export function parseTimeRange(
+  text: string,
+  now: number
+): { from: number; to: number } | undefined {
   const nowDate = new Date(now);
 
   // 1. 具体日期 YYYY-MM-DD（严格校验历法溢出，如 2026-02-30 返回 undefined）
@@ -109,23 +278,63 @@ export function parseTimeRange(text: string, now: number): { from: number; to: n
 
   // 3. 今天 / today
   if (/(?:今天|\btoday\b)/i.test(text)) {
-    const start = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate(), 0, 0, 0, 0).getTime();
+    const start = new Date(
+      nowDate.getFullYear(),
+      nowDate.getMonth(),
+      nowDate.getDate(),
+      0,
+      0,
+      0,
+      0
+    ).getTime();
     return { from: start, to: now };
   }
 
   // 4. 昨天 / yesterday
   if (/(?:昨天|\byesterday\b)/i.test(text)) {
     const yDate = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - 1);
-    const start = new Date(yDate.getFullYear(), yDate.getMonth(), yDate.getDate(), 0, 0, 0, 0).getTime();
-    const end = new Date(yDate.getFullYear(), yDate.getMonth(), yDate.getDate(), 23, 59, 59, 999).getTime();
+    const start = new Date(
+      yDate.getFullYear(),
+      yDate.getMonth(),
+      yDate.getDate(),
+      0,
+      0,
+      0,
+      0
+    ).getTime();
+    const end = new Date(
+      yDate.getFullYear(),
+      yDate.getMonth(),
+      yDate.getDate(),
+      23,
+      59,
+      59,
+      999
+    ).getTime();
     return { from: start, to: end };
   }
 
   // 5. 前天
   if (/(?:前天)/i.test(text)) {
     const bDate = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - 2);
-    const start = new Date(bDate.getFullYear(), bDate.getMonth(), bDate.getDate(), 0, 0, 0, 0).getTime();
-    const end = new Date(bDate.getFullYear(), bDate.getMonth(), bDate.getDate(), 23, 59, 59, 999).getTime();
+    const start = new Date(
+      bDate.getFullYear(),
+      bDate.getMonth(),
+      bDate.getDate(),
+      0,
+      0,
+      0,
+      0
+    ).getTime();
+    const end = new Date(
+      bDate.getFullYear(),
+      bDate.getMonth(),
+      bDate.getDate(),
+      23,
+      59,
+      59,
+      999
+    ).getTime();
     return { from: start, to: end };
   }
 

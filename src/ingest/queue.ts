@@ -1,7 +1,7 @@
-import type { Db, RawEvent } from '../types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
-import { runRules } from './rules.js';
 import type { CommittedInjection } from '../dsh/memory-visibility.js';
+import type { Db, RawEvent } from '../types.js';
+import { runRules } from './rules.js';
 
 /** 缓冲区上限：数据库长期不可写时防止内存无限增长 */
 const MAX_BUFFERED_EVENTS = 5000;
@@ -258,9 +258,11 @@ export class IngestQueue {
     }
   }
 
-  private isolateBatchWithSavepoints(
-    batch: Array<RawEvent | CommittedInjection>
-  ): { inserted: number; jobsEnqueued: number; requeued: Array<RawEvent | CommittedInjection> } {
+  private isolateBatchWithSavepoints(batch: Array<RawEvent | CommittedInjection>): {
+    inserted: number;
+    jobsEnqueued: number;
+    requeued: Array<RawEvent | CommittedInjection>;
+  } {
     let inserted = 0;
     let jobsEnqueued = 0;
     const requeued: Array<RawEvent | CommittedInjection> = [];
@@ -292,9 +294,10 @@ export class IngestQueue {
     return { inserted, jobsEnqueued, requeued };
   }
 
-  private flushBatch(
-    batch: Array<RawEvent | CommittedInjection>
-  ): { inserted: number; hadRequeued: boolean } {
+  private flushBatch(batch: Array<RawEvent | CommittedInjection>): {
+    inserted: number;
+    hadRequeued: boolean;
+  } {
     try {
       let insertedCount = 0;
       let jobsEnqueued = 0;
@@ -313,10 +316,7 @@ export class IngestQueue {
       return { inserted: insertedCount, hadRequeued: false };
     } catch (err) {
       this.consecutiveFailures++;
-      const backoffMs = Math.min(
-        MAX_BACKOFF_MS,
-        BASE_BACKOFF_MS * Math.pow(2, this.consecutiveFailures)
-      );
+      const backoffMs = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** this.consecutiveFailures);
       this.nextRetryAt = Date.now() + backoffMs;
 
       const shouldIsolate =

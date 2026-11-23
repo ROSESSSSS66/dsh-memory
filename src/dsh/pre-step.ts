@@ -1,14 +1,14 @@
 import crypto from 'node:crypto';
-import type { Db } from '../types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
 import { estimateTokens } from '../core/tokens.js';
+import { evaluateTurnOutcome } from '../evolution/outcome.js';
+import { getActiveStrategy } from '../evolution/strategy.js';
 import { buildQueryPlan } from '../retrieval/query.js';
 import { recall } from '../retrieval/recall.js';
-import { getActiveStrategy } from '../evolution/strategy.js';
-import { evaluateTurnOutcome } from '../evolution/outcome.js';
+import type { Db } from '../types.js';
 import type { PromptSectionManager } from './prompt-section.js';
-import { isIgnoredUserMessageSource } from './session-listener.js';
 import { isResolvedScopeExcluded, resolveRuntimeScope } from './scope-resolver.js';
+import { isIgnoredUserMessageSource } from './session-listener.js';
 
 export interface PreStepContext {
   db: Db;
@@ -224,9 +224,10 @@ export async function handlePreStep(
     const alreadyInjected = new Set<string>();
 
     // A. 稳定层可见引用
-    const stableRefs = stableState.visibleRefs.size > 0
-      ? stableState.visibleRefs
-      : ctx.promptSections.getVisibleRefs(agentId);
+    const stableRefs =
+      stableState.visibleRefs.size > 0
+        ? stableState.visibleRefs
+        : ctx.promptSections.getVisibleRefs(agentId);
     for (const ref of stableRefs) {
       alreadyInjected.add(ref);
     }
@@ -306,10 +307,7 @@ export async function handlePreStep(
     scheduleOutcomeEvaluation();
 
     const strategyVersion =
-      recallResult.strategyVersion ??
-      ctx.strategyVersion ??
-      activeStrat?.version ??
-      1;
+      recallResult.strategyVersion ?? ctx.strategyVersion ?? activeStrat?.version ?? 1;
 
     const queryTokens = estimateTokens(userText);
     const candidatesCount = recallResult.candidatesCount ?? recallResult.items.length;
@@ -363,9 +361,7 @@ export async function handlePreStep(
         turn,
         strategyVersion,
         items: Object.freeze(
-          recallResult.items.map((item) =>
-            Object.freeze({ tokens: item.tokens, form: item.form })
-          )
+          recallResult.items.map((item) => Object.freeze({ tokens: item.tokens, form: item.form }))
         ),
       }),
     });
@@ -377,7 +373,10 @@ export async function handlePreStep(
       messages: [...decision.messages, memoryMsg],
     };
   } catch (err: any) {
-    console.warn('[dsh-memory] pre-step injection failed (gracefully degraded):', err?.message || err);
+    console.warn(
+      '[dsh-memory] pre-step injection failed (gracefully degraded):',
+      err?.message || err
+    );
     return decision;
   }
 }
@@ -385,10 +384,7 @@ export async function handlePreStep(
 /**
  * 注册 pre-step 监听器
  */
-export function registerPreStep(
-  ctx: any,
-  preStepCtx: PreStepContext
-): () => void {
+export function registerPreStep(ctx: any, preStepCtx: PreStepContext): () => void {
   return ctx.on(
     'agent/pre-step',
     async (payload: any, next: () => Promise<any>) => {

@@ -3,14 +3,14 @@ import {
   assertSafeOutboundEndpoint,
   isOfflineEndpointAllowed,
   isSafeApiKeyEnvName,
-  redactSecrets,
   type LookupFn,
+  redactSecrets,
 } from '../core/privacy.js';
 import {
   buildProtocolPayload,
+  type LLMProtocol,
   resolveDshHostLlmFallback,
   resolveEndpointAndProtocol,
-  type LLMProtocol,
 } from '../evolution/llm.js';
 
 export interface LlmProbeRequest {
@@ -93,9 +93,7 @@ async function readErrorBodyCapped(res: Response, maxBytes: number): Promise<str
         if (done) break;
         if (!value) continue;
         const chunk =
-          value instanceof Uint8Array
-            ? value
-            : new Uint8Array(value as ArrayBufferLike);
+          value instanceof Uint8Array ? value : new Uint8Array(value as ArrayBufferLike);
         const remaining = maxBytes - totalBytes;
         if (chunk.byteLength > remaining) {
           chunks.push(chunk.subarray(0, remaining));
@@ -387,11 +385,7 @@ export async function probeOfflineLLM(
         isSameOriginUrl(baseURL, cfg.offlineLLM.baseURL));
 
     let apiKey = '';
-    if (
-      typeof req.apiKey === 'string' &&
-      req.apiKey.trim() &&
-      !req.apiKey.includes('****')
-    ) {
+    if (typeof req.apiKey === 'string' && req.apiKey.trim() && !req.apiKey.includes('****')) {
       apiKey = req.apiKey.trim();
     } else if (usingHostFallback && hostFallback?.apiKey) {
       apiKey = hostFallback.apiKey;

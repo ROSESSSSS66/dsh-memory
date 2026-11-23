@@ -1,23 +1,23 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import os from 'node:os';
-import type { Db } from '../types.js';
+import path from 'node:path';
 import { DEFAULTS, type PluginConfig } from '../config.js';
-import { workspaceId, rememberWorkspacePath } from './scope.js';
-import { isWorkspaceExcluded, redactSecrets } from './privacy.js';
+import { initDefaultStrategy, listStrategies } from '../evolution/strategy.js';
+import { runBackfill } from '../ingest/backfill.js';
+import type { Db } from '../types.js';
 import { getCoreMemory, setCoreMemory } from './core-memory.js';
-import { upsertCandidate } from './writer.js';
+import { weaveZettelkastenLinks } from './health.js';
 import {
   importFromMarkdown,
   importMemoryBank,
   isPathInsideRoot,
   safeReadTextFileSync,
 } from './markdown.js';
-import { importVikingContextTree } from './viking.js';
+import { isWorkspaceExcluded, redactSecrets } from './privacy.js';
+import { rememberWorkspacePath, workspaceId } from './scope.js';
 import { backfillMissingEmbeddings } from './vector.js';
-import { weaveZettelkastenLinks } from './health.js';
-import { initDefaultStrategy, listStrategies } from '../evolution/strategy.js';
-import { runBackfill } from '../ingest/backfill.js';
+import { importVikingContextTree } from './viking.js';
+import { upsertCandidate } from './writer.js';
 
 export interface AutoBootstrapOptions {
   workspacePath?: string;
@@ -184,7 +184,9 @@ function inspectWorkspaceProfile(wsPath: string, warnings: string[]): WorkspaceP
           }
 
           const deps =
-            pkg.dependencies && typeof pkg.dependencies === 'object' && !Array.isArray(pkg.dependencies)
+            pkg.dependencies &&
+            typeof pkg.dependencies === 'object' &&
+            !Array.isArray(pkg.dependencies)
               ? (pkg.dependencies as Record<string, unknown>)
               : {};
           const devDeps =
@@ -372,9 +374,15 @@ export function autoBootstrapMemory(
     }
 
     if (!getCoreMemory(db, 'project', { workspaceId: wsId })) {
-      const preferredScripts = ['build', 'check', 'test', 'typecheck', 'lint', 'eval', 'init'].filter(
-        (k) => profile.scriptNames.includes(k)
-      );
+      const preferredScripts = [
+        'build',
+        'check',
+        'test',
+        'typecheck',
+        'lint',
+        'eval',
+        'init',
+      ].filter((k) => profile.scriptNames.includes(k));
       const displayScripts =
         preferredScripts.length > 0 ? preferredScripts : profile.scriptNames.slice(0, 6);
 
@@ -606,10 +614,7 @@ export function autoBootstrapMemory(
         });
         backfillMemoriesCreated = bfStats.memoriesCreated;
         backfillEventsAdded = bfStats.newEventsAdded;
-        db.run('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)', [
-          backfillKey,
-          String(now),
-        ]);
+        db.run('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)', [backfillKey, String(now)]);
       } catch (err: unknown) {
         warnings.push(`backfill failed: ${(err as Error)?.message || String(err)}`);
       }

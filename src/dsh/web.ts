@@ -1,16 +1,16 @@
-export {
-  API_PREFIX,
-  registerWebRoutes,
-  type RegisterWebRoutesOptions,
-} from './web/index.js';
-export {
-  isTrustedOrigin,
-  isAllowedHostHeader,
-  securityHeaders,
-} from './web/security.js';
+export { normalizeMemoryType } from '../service/index.js';
 export {
   maskApiKey,
   sanitizeConfigForClient,
   sanitizeConfigForClient as getSanitizedConfig,
 } from './web/http.js';
-export { normalizeMemoryType } from '../service/index.js';
+export {
+  API_PREFIX,
+  type RegisterWebRoutesOptions,
+  registerWebRoutes,
+} from './web/index.js';
+export {
+  isAllowedHostHeader,
+  isTrustedOrigin,
+  securityHeaders,
+} from './web/security.js';

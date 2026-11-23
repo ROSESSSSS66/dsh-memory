@@ -1,10 +1,10 @@
 import crypto from 'node:crypto';
-import type { Db, MemoryRecord } from '../types.js';
+import { DEFAULTS, type PluginConfig } from '../config.js';
 import { scopeFilterSQL } from '../core/scope.js';
-import { render } from '../retrieval/render.js';
 import { budgetTokens, estimateTokens } from '../core/tokens.js';
 import { getActiveStrategy } from '../evolution/strategy.js';
-import { DEFAULTS, type PluginConfig } from '../config.js';
+import { render } from '../retrieval/render.js';
+import type { Db, MemoryRecord } from '../types.js';
 
 export interface StableSectionState {
   disposer?: () => void;
@@ -37,11 +37,7 @@ function resolveStrategyVersion(db: Db, cfg: PluginConfig): number {
   }
 }
 
-function queryPinnedFingerprint(
-  db: Db,
-  strategyVersion: number,
-  maxStableTokens: number
-): string {
+function queryPinnedFingerprint(db: Db, strategyVersion: number, maxStableTokens: number): string {
   try {
     const row = db.get<{
       cnt: number;
@@ -133,7 +129,10 @@ export function renderStableLayer(
       estimatedTokens: estimateTokens(currentText),
     };
   } catch (err: any) {
-    console.warn('[dsh-memory] renderStableLayer failed (degrading to empty):', err?.message || err);
+    console.warn(
+      '[dsh-memory] renderStableLayer failed (degrading to empty):',
+      err?.message || err
+    );
     return { text: '', visibleRefs: new Set(), stableTokens: 0, estimatedTokens: 0 };
   }
 }
@@ -160,7 +159,10 @@ export class PromptSectionManager {
     return this.getCfg ? this.getCfg() : this.cfg;
   }
 
-  public buildStableSection(scopeCtx: { workspaceId: string; sessionId?: string }): StableLayerResult {
+  public buildStableSection(scopeCtx: {
+    workspaceId: string;
+    sessionId?: string;
+  }): StableLayerResult {
     const liveCfg = this.currentCfg();
     const maxStableTokens = Math.min(
       liveCfg.stableBudgetTokens ?? 600,

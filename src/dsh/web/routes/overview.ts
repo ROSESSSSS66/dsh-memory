@@ -1,30 +1,25 @@
 import crypto from 'node:crypto';
-import type { Db } from '../../../types.js';
 import type { PluginConfig } from '../../../config.js';
-import { scopeFilterSQL } from '../../../core/scope.js';
 import { getAllCoreMemories } from '../../../core/core-memory.js';
 import { auditMemoryHealth, type MemoryHealthReport } from '../../../core/health.js';
 import { runHindsightReflect } from '../../../core/hindsight.js';
+import { scopeFilterSQL } from '../../../core/scope.js';
 import { getLedgerUsage } from '../../../evolution/ledger.js';
 import { listActiveWorkspaces, queryInjectionTelemetry7d } from '../../../service/index.js';
+import type { Db } from '../../../types.js';
 import { renderStableLayer } from '../../prompt-section.js';
-import {
-  buildPrivacyWhereSQL,
-  resolveWebScope,
-  sendJson,
-  type WebScope,
-} from '../http.js';
-import { getHeader, securityHeaders } from '../security.js';
+import { buildPrivacyWhereSQL, resolveWebScope, sendJson, type WebScope } from '../http.js';
 import type { BoundedHealthCache, RouteEntry } from '../router.js';
+import { getHeader, securityHeaders } from '../security.js';
 import {
+  type ActiveStrategySnapshot,
   buildCoreMemoryData,
   getReadOnlyActiveStrategy,
   NO_ACTIVE_WORKSPACE_SENTINEL,
-  type ActiveStrategySnapshot,
   type StableLayerSnapshot,
 } from './core-memory.js';
-import { buildEvolutionData, queryMemoriesList } from './memories.js';
 import { buildVikingRootSummary } from './epistemic.js';
+import { buildEvolutionData, queryMemoriesList } from './memories.js';
 
 export function computeMemoryFingerprint(db: Db): string {
   const m = db.get<{ c: number; u: number | null; v: number | null }>(

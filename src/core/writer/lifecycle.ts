@@ -1,26 +1,20 @@
+import { DEFAULTS } from '../../config.js';
 import {
-  hydrateMemoryRow,
-  parseOriginKinds,
   type Db,
+  hydrateMemoryRow,
   type MemoryRecord,
   type MemoryRow,
   type MemoryType,
   type OriginKind,
+  parseOriginKinds,
   type Scope,
 } from '../../types.js';
-import { DEFAULTS } from '../../config.js';
-import { ftsText, contentHash, extractEntities } from '../text.js';
-import { estimateTokens } from '../tokens.js';
-import { workspaceId } from '../scope.js';
 import { redactSecrets } from '../privacy.js';
+import { workspaceId } from '../scope.js';
+import { contentHash, extractEntities, ftsText } from '../text.js';
+import { estimateTokens } from '../tokens.js';
 import { hasUntrustedOrigin, hasUserEvidence } from '../trust.js';
 import { computeLocalEmbedding, decodeEmbeddingBlob, encodeEmbeddingBlob } from '../vector.js';
-import {
-  firstSentence,
-  truncateExcerpt,
-  truncateToTokens,
-  type WriterLimits,
-} from './validate.js';
 import {
   findActiveSlotOccupant,
   saveVersionSnapshot,
@@ -29,6 +23,7 @@ import {
   scheduleReplaceVectorCache,
   supersedeActiveSlot,
 } from './slot-policy.js';
+import { firstSentence, truncateExcerpt, truncateToTokens, type WriterLimits } from './validate.js';
 
 const VALID_MEMORY_TYPES = new Set<MemoryType>([
   'episodic',
@@ -675,12 +670,7 @@ export function unfreeze(
 /**
  * 置顶记忆（仅允许 active / frozen 状态，记录快照并递增版本）
  */
-export function pin(
-  db: Db,
-  id: string,
-  actor: string = 'user',
-  now: number = Date.now()
-): boolean {
+export function pin(db: Db, id: string, actor: string = 'user', now: number = Date.now()): boolean {
   return db.transaction(() => {
     const memory = loadMemory(db, id);
     if (!memory) return false;
@@ -688,10 +678,10 @@ export function pin(
     if (memory.pinned === 1) return true;
 
     saveVersionSnapshot(db, memory, 'pin', actor, now);
-    db.run(
-      `UPDATE memories SET pinned = 1, version = version + 1, updated_at = ? WHERE id = ?`,
-      [now, id]
-    );
+    db.run(`UPDATE memories SET pinned = 1, version = version + 1, updated_at = ? WHERE id = ?`, [
+      now,
+      id,
+    ]);
     return true;
   });
 }
@@ -711,10 +701,10 @@ export function unpin(
     if (memory.pinned === 0) return true;
 
     saveVersionSnapshot(db, memory, 'unpin', actor, now);
-    db.run(
-      `UPDATE memories SET pinned = 0, version = version + 1, updated_at = ? WHERE id = ?`,
-      [now, id]
-    );
+    db.run(`UPDATE memories SET pinned = 0, version = version + 1, updated_at = ? WHERE id = ?`, [
+      now,
+      id,
+    ]);
     return true;
   });
 }

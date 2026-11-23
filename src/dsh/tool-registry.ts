@@ -1,7 +1,7 @@
-import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import type { MemoryTools } from './tools.js';
+import type { Db } from '../types.js';
 import { isResolvedScopeExcluded, resolveRuntimeScope } from './scope-resolver.js';
+import type { MemoryTools } from './tools.js';
 
 export const REGISTERED_MEMORY_TOOL_NAMES = [
   'memory_search',
@@ -85,12 +85,14 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
             },
             uriPrefix: {
               type: 'string',
-              description: 'Optional OpenViking URI prefix filter (e.g. viking://workspace/memories/skills)',
+              description:
+                'Optional OpenViking URI prefix filter (e.g. viking://workspace/memories/skills)',
             },
             tier: {
               type: 'string',
               enum: ['L0', 'L1', 'L2'],
-              description: 'Output granularity: L0 (abstract, default), L1 (overview), or L2 (content)',
+              description:
+                'Output granularity: L0 (abstract, default), L1 (overview), or L2 (content)',
             },
             limit: {
               type: 'integer',
@@ -103,7 +105,10 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
         execute: safeToolExecute((args, exec) => {
           const liveCfg = deps.getLiveCfg();
           const scope = resolveRuntimeScope(ctx, deps.db, exec, { allowCwdFallback: false });
-          if (scope.resolved && isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, deps.db)) {
+          if (
+            scope.resolved &&
+            isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, deps.db)
+          ) {
             return 'Error: workspace is excluded by privacy configuration.';
           }
           return deps.tools.search(args, {
@@ -140,7 +145,10 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
         execute: safeToolExecute((args, exec) => {
           const liveCfg = deps.getLiveCfg();
           const scope = resolveRuntimeScope(ctx, deps.db, exec, { allowCwdFallback: false });
-          if (scope.resolved && isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, deps.db)) {
+          if (
+            scope.resolved &&
+            isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, deps.db)
+          ) {
             return 'Error: workspace is excluded by privacy configuration.';
           }
           return deps.tools.expand(args, {
@@ -162,7 +170,10 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
           type: 'object',
           properties: {
             id: { type: 'string', description: 'Memory full or short ID' },
-            contentRev: { type: 'integer', description: 'Referenced content revision number (>= 1)' },
+            contentRev: {
+              type: 'integer',
+              description: 'Referenced content revision number (>= 1)',
+            },
             helpful: { type: 'boolean', description: 'True if helpful, false if unhelpful/wrong' },
             note: { type: 'string', description: 'Optional brief feedback note (max 300 chars)' },
           },
@@ -175,7 +186,10 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
           if (!scope.resolved && !scope.explicitSessionId) {
             return 'Error: workspace or session scope could not be resolved; refusing mutation.';
           }
-          if (scope.resolved && isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, deps.db)) {
+          if (
+            scope.resolved &&
+            isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, deps.db)
+          ) {
             return 'Error: workspace is excluded by privacy configuration.';
           }
           return deps.tools.feedback(args, {
@@ -202,7 +216,15 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
             },
             type: {
               type: 'string',
-              enum: ['semantic', 'preference', 'procedural', 'failure', 'episodic', 'belief', 'goal'],
+              enum: [
+                'semantic',
+                'preference',
+                'procedural',
+                'failure',
+                'episodic',
+                'belief',
+                'goal',
+              ],
               description: 'Memory category (default semantic)',
             },
             scope: {
@@ -226,7 +248,10 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
           if ((requestedScope === 'workspace' || requestedScope === 'session') && !scope.resolved) {
             return 'Error: workspace scope could not be resolved; refusing mutation.';
           }
-          if (scope.resolved && isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, deps.db)) {
+          if (
+            scope.resolved &&
+            isResolvedScopeExcluded(scope, liveCfg.excludeWorkspaces, deps.db)
+          ) {
             return 'Error: workspace is excluded by privacy configuration.';
           }
 

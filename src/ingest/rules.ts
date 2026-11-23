@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
-import type { Db, RawEvent, CandidateInput, Scope, MemoryType } from '../types.js';
-import { upsertCandidate } from '../core/writer.js';
+import { DEFAULTS, type PluginConfig } from '../config.js';
 import { redactSecrets } from '../core/privacy.js';
 import { estimateTokens } from '../core/tokens.js';
-import { DEFAULTS, type PluginConfig } from '../config.js';
+import { upsertCandidate } from '../core/writer.js';
+import type { CandidateInput, Db, MemoryType, RawEvent, Scope } from '../types.js';
 
 export const PREFERENCE_INDICATOR_REGEX =
   /(?:以后|今后|总是|一律|永远|不要再|别再|每次都|统一使用|必须使用|严禁|切勿|绝不|\b(?:from now on|always|never|must always|do not ever)\b)/i;
@@ -180,17 +180,29 @@ export function resolveFixedSlot(text: string): SlotResolution {
 
   // 1. 回复语言偏好 (中/英)
   const zhReplyPref =
-    /(?:回复|回答|说话)(?:一律|总是|全部|都|请|统一|默认)?(?:使用|用)(?:中文|汉语|zh-CN)/i.test(s) ||
-    /(?:请|以后|今后|一律|总是|全部|都|统一)?(?:使用|用)(?:中文|汉语|zh-CN)(?:回复|回答|交流)/i.test(s) ||
-    /(?<!\b(?:don't|do not|never|not)\s+)(?:\b(?:reply|respond|answer)\s+(?:always\s+)?in\s+chinese\b|\balways\s+(?:reply|respond|answer)\s+in\s+chinese\b)/i.test(s);
+    /(?:回复|回答|说话)(?:一律|总是|全部|都|请|统一|默认)?(?:使用|用)(?:中文|汉语|zh-CN)/i.test(
+      s
+    ) ||
+    /(?:请|以后|今后|一律|总是|全部|都|统一)?(?:使用|用)(?:中文|汉语|zh-CN)(?:回复|回答|交流)/i.test(
+      s
+    ) ||
+    /(?<!\b(?:don't|do not|never|not)\s+)(?:\b(?:reply|respond|answer)\s+(?:always\s+)?in\s+chinese\b|\balways\s+(?:reply|respond|answer)\s+in\s+chinese\b)/i.test(
+      s
+    );
   if (zhReplyPref && !/(?:不要|别|禁止|避免)(?:用)?(?:中文|汉语)(?:回复|回答)/.test(s)) {
     return { slotKey: 'user.pref.reply_language', scope: 'user', type: 'preference' };
   }
 
   const enReplyPref =
-    /(?:回复|回答|说话)(?:一律|总是|全部|都|请|统一|默认)?(?:使用|用)(?:英文|英语|en-US)/i.test(s) ||
-    /(?:请|以后|今后|一律|总是|全部|都|统一)?(?:使用|用)(?:英文|英语|en-US)(?:回复|回答|交流)/i.test(s) ||
-    /(?<!\b(?:don't|do not|never|not)\s+)(?:\b(?:reply|respond|answer)\s+(?:always\s+)?in\s+english\b|\balways\s+(?:reply|respond|answer)\s+in\s+english\b)/i.test(s);
+    /(?:回复|回答|说话)(?:一律|总是|全部|都|请|统一|默认)?(?:使用|用)(?:英文|英语|en-US)/i.test(
+      s
+    ) ||
+    /(?:请|以后|今后|一律|总是|全部|都|统一)?(?:使用|用)(?:英文|英语|en-US)(?:回复|回答|交流)/i.test(
+      s
+    ) ||
+    /(?<!\b(?:don't|do not|never|not)\s+)(?:\b(?:reply|respond|answer)\s+(?:always\s+)?in\s+english\b|\balways\s+(?:reply|respond|answer)\s+in\s+english\b)/i.test(
+      s
+    );
   if (enReplyPref && !/(?:不要|别|禁止|避免)(?:用)?(?:英文|英语)(?:回复|回答)/.test(s)) {
     return { slotKey: 'user.pref.reply_language', scope: 'user', type: 'preference' };
   }
@@ -412,7 +424,8 @@ export function runRules(
 
       if (!isSkipContext) {
         const slotRes = resolveFixedSlot(trimmed);
-        const hasNormativeCue = slotRes.slotKey !== null || NORMATIVE_DIRECTIVE_CUE_REGEX.test(trimmed);
+        const hasNormativeCue =
+          slotRes.slotKey !== null || NORMATIVE_DIRECTIVE_CUE_REGEX.test(trimmed);
         const isOneOffTask =
           !slotRes.slotKey &&
           ((ONE_OFF_TASK_PROMPT_REGEX.test(trimmed) && !DURABLE_HABIT_MARKER_REGEX.test(trimmed)) ||
@@ -525,10 +538,10 @@ export function runRules(
       sessions: string;
       last_seq_ref: string | null;
       memory_id: string | null;
-    }>('SELECT count, sessions, last_seq_ref, memory_id FROM failure_sigs WHERE sig = ? AND workspace_id = ?', [
-      sig,
-      event.workspace_id,
-    ]);
+    }>(
+      'SELECT count, sessions, last_seq_ref, memory_id FROM failure_sigs WHERE sig = ? AND workspace_id = ?',
+      [sig, event.workspace_id]
+    );
 
     if (!row || row.last_seq_ref !== seqRef) {
       let sessions: string[] = [];
@@ -593,14 +606,19 @@ export function runRules(
         }
 
         if (candidateRes.action === 'inserted' || candidateRes.action === 'merged') {
-          db.run(
-            'UPDATE failure_sigs SET memory_id = ? WHERE sig = ? AND workspace_id = ?',
-            [candidateRes.id, sig, event.workspace_id]
-          );
+          db.run('UPDATE failure_sigs SET memory_id = ? WHERE sig = ? AND workspace_id = ?', [
+            candidateRes.id,
+            sig,
+            event.workspace_id,
+          ]);
         }
 
         if (enqueueOfflineJobs) {
-          const sigHash = crypto.createHash('sha256').update(`${event.workspace_id}:${sig}`).digest('hex').slice(0, 16);
+          const sigHash = crypto
+            .createHash('sha256')
+            .update(`${event.workspace_id}:${sig}`)
+            .digest('hex')
+            .slice(0, 16);
           const jobKey = `reflect:failure_sig:${sigHash}`;
           const jobRes = db.run(
             "INSERT OR IGNORE INTO jobs (kind, key, payload, status, created_at, next_eligible_at) VALUES ('reflect', ?, ?, 'queued', ?, 0)",

@@ -1,15 +1,15 @@
-import type {
-  MemoryRecord,
-  QueryPlan,
-  ChannelName,
-  StrategyConfig,
-  MemoryType,
-  HindsightNetwork,
-} from '../types.js';
-import type { Candidate, AssociativeNeighbor } from './channels.js';
-import { tokenSet, buildStemmedTokenSet, isTokenMatch } from '../core/text.js';
-import { classifyHindsightNetwork, computeNetworkIntentBonus } from '../core/hindsight.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
+import { classifyHindsightNetwork, computeNetworkIntentBonus } from '../core/hindsight.js';
+import { buildStemmedTokenSet, isTokenMatch, tokenSet } from '../core/text.js';
+import type {
+  ChannelName,
+  HindsightNetwork,
+  MemoryRecord,
+  MemoryType,
+  QueryPlan,
+  StrategyConfig,
+} from '../types.js';
+import type { AssociativeNeighbor, Candidate } from './channels.js';
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
   rrfK: 25,
@@ -22,7 +22,7 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
     vector: 1.0,
   },
   scoreWeights: {
-    relevance: 0.50,
+    relevance: 0.5,
     confidence: 0.14,
     utility: 0.14,
     freshness: 0.08,
@@ -71,7 +71,11 @@ function clamp01(v: unknown, fallback: number): number {
 }
 
 function isExpiredOrInvalidated(m: MemoryRecord, now: number): boolean {
-  if (m.invalidated_at !== null && m.invalidated_at !== undefined && Number.isFinite(m.invalidated_at)) {
+  if (
+    m.invalidated_at !== null &&
+    m.invalidated_at !== undefined &&
+    Number.isFinite(m.invalidated_at)
+  ) {
     if (m.invalidated_at <= now) return true;
   }
   if (m.valid_to !== null && m.valid_to !== undefined && Number.isFinite(m.valid_to)) {
@@ -102,8 +106,7 @@ export function computeActRBaseActivation(
 
   const effectiveUse = Math.max(0, safeUse - safeFail);
   const effectiveSuccess = Math.max(0, safeSuccess - safeFail * 0.5);
-  const rehearsalBoost =
-    1 + 0.35 * Math.log(1 + effectiveUse + 2 * effectiveSuccess);
+  const rehearsalBoost = 1 + 0.35 * Math.log(1 + effectiveUse + 2 * effectiveSuccess);
   const effectiveHalfLife = safeHalfLife * rehearsalBoost;
   return Math.exp(-Math.LN2 * (safeAge / effectiveHalfLife)) * safeMod;
 }
@@ -164,9 +167,7 @@ export function fuseCandidates(
   const docTokensCache = new Map<string, Set<string>>();
   const docStemsCache = new Map<string, Set<string>>();
 
-  const getDocTokensAndStems = (
-    mem: MemoryRecord
-  ): { tokens: Set<string>; stems: Set<string> } => {
+  const getDocTokensAndStems = (mem: MemoryRecord): { tokens: Set<string>; stems: Set<string> } => {
     let tokens = docTokensCache.get(mem.id);
     let stems = docStemsCache.get(mem.id);
     if (!tokens || !stems) {
@@ -182,7 +183,10 @@ export function fuseCandidates(
   const memoryChannels = new Map<string, Map<ChannelName, number>>();
   const candidateSimilarities = new Map<string, number>();
 
-  for (const [chName, candidates] of Object.entries(channelResults) as [ChannelName, Candidate[]][]) {
+  for (const [chName, candidates] of Object.entries(channelResults) as [
+    ChannelName,
+    Candidate[],
+  ][]) {
     if (!Array.isArray(candidates)) continue;
     for (const c of candidates) {
       let chMap = memoryChannels.get(c.id);
@@ -390,10 +394,7 @@ export function fuseCandidates(
         );
         recordSeedConvergence(edge.neighborId, edge.seedId);
         const rrfContrib = (0.65 * fanWeight) / (safeRrfK + safeSeedRank + 2 + hopPenalty);
-        graphBonusRrf.set(
-          edge.neighborId,
-          (graphBonusRrf.get(edge.neighborId) || 0) + rrfContrib
-        );
+        graphBonusRrf.set(edge.neighborId, (graphBonusRrf.get(edge.neighborId) || 0) + rrfContrib);
         continue;
       }
 
@@ -438,10 +439,7 @@ export function fuseCandidates(
 
         const rrfContrib = (0.65 * fanWeight) / (safeRrfK + safeSeedRank + 2 + hopPenalty);
         // HippoRAG 2 PPR 多种子激活能量累加 (Multi-Seed Spreading Activation Accumulation)
-        graphBonusRrf.set(
-          edge.neighborId,
-          (graphBonusRrf.get(edge.neighborId) || 0) + rrfContrib
-        );
+        graphBonusRrf.set(edge.neighborId, (graphBonusRrf.get(edge.neighborId) || 0) + rrfContrib);
       }
     }
   }
@@ -477,12 +475,30 @@ export function fuseCandidates(
   // 4. 第三步：综合打分（尊重外部自定义 strategy.scoreWeights 并对 NaN/Infinity 防御）
   const scoredList: ScoredCandidate[] = [];
   const weights = strategy?.scoreWeights ?? DEFAULT_STRATEGY.scoreWeights;
-  const wRelevance = Math.max(0, finiteNumber(weights.relevance, DEFAULT_STRATEGY.scoreWeights.relevance));
-  const wConfidence = Math.max(0, finiteNumber(weights.confidence, DEFAULT_STRATEGY.scoreWeights.confidence));
-  const wUtility = Math.max(0, finiteNumber(weights.utility, DEFAULT_STRATEGY.scoreWeights.utility));
-  const wFreshness = Math.max(0, finiteNumber(weights.freshness, DEFAULT_STRATEGY.scoreWeights.freshness));
-  const wConsistency = Math.max(0, finiteNumber(weights.consistency, DEFAULT_STRATEGY.scoreWeights.consistency));
-  const wSpecificity = Math.max(0, finiteNumber(weights.specificity, DEFAULT_STRATEGY.scoreWeights.specificity));
+  const wRelevance = Math.max(
+    0,
+    finiteNumber(weights.relevance, DEFAULT_STRATEGY.scoreWeights.relevance)
+  );
+  const wConfidence = Math.max(
+    0,
+    finiteNumber(weights.confidence, DEFAULT_STRATEGY.scoreWeights.confidence)
+  );
+  const wUtility = Math.max(
+    0,
+    finiteNumber(weights.utility, DEFAULT_STRATEGY.scoreWeights.utility)
+  );
+  const wFreshness = Math.max(
+    0,
+    finiteNumber(weights.freshness, DEFAULT_STRATEGY.scoreWeights.freshness)
+  );
+  const wConsistency = Math.max(
+    0,
+    finiteNumber(weights.consistency, DEFAULT_STRATEGY.scoreWeights.consistency)
+  );
+  const wSpecificity = Math.max(
+    0,
+    finiteNumber(weights.specificity, DEFAULT_STRATEGY.scoreWeights.specificity)
+  );
   const wImportance =
     weights.importance === undefined ? 0 : Math.max(0, finiteNumber(weights.importance, 0));
 

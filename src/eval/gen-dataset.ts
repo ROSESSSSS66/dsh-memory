@@ -1112,28 +1112,32 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
     {
       sig: 'SQLITE_BUSY',
       failContent: '并发写入触发 SQLITE_BUSY：database is locked 锁竞争异常。',
-      procContent: '修复 SQLITE_BUSY 锁竞争需开启 PRAGMA journal_mode=WAL 并设置 busy_timeout=5000。',
+      procContent:
+        '修复 SQLITE_BUSY 锁竞争需开启 PRAGMA journal_mode=WAL 并设置 busy_timeout=5000。',
       query: 'SQLite 并发写入报 SQLITE_BUSY 锁错误怎么修复？',
       inc: ['SQLITE_BUSY', 'WAL'],
     },
     {
       sig: 'HEAP_OUT_OF_MEMORY',
       failContent: '前端全量打包崩溃 HEAP_OUT_OF_MEMORY：JavaScript heap out of memory。',
-      procContent: '遭遇打包内存溢出 HEAP_OUT_OF_MEMORY 时，设置 NODE_OPTIONS=--max-old-space-size=4096。',
+      procContent:
+        '遭遇打包内存溢出 HEAP_OUT_OF_MEMORY 时，设置 NODE_OPTIONS=--max-old-space-size=4096。',
       query: '构建打包时遇到 HEAP_OUT_OF_MEMORY 堆内存溢出怎么解决？',
       inc: ['HEAP_OUT_OF_MEMORY', 'max-old-space-size=4096'],
     },
     {
       sig: 'ERR_TLS_CERT_ALTNAME_INVALID',
       failContent: '内网 HTTPS 请求报错 ERR_TLS_CERT_ALTNAME_INVALID：证书未包含当前主机名。',
-      procContent: '处理 ERR_TLS_CERT_ALTNAME_INVALID 需在证书 SAN 扩展字段补齐服务域名后重新签发。',
+      procContent:
+        '处理 ERR_TLS_CERT_ALTNAME_INVALID 需在证书 SAN 扩展字段补齐服务域名后重新签发。',
       query: 'HTTPS 调用出现 ERR_TLS_CERT_ALTNAME_INVALID 证书域名不匹配如何解决？',
       inc: ['ERR_TLS_CERT_ALTNAME_INVALID', 'SAN'],
     },
     {
       sig: 'CORS_ORIGIN_DENIED',
       failContent: '浏览器预检请求失败 CORS_ORIGIN_DENIED：响应头缺少允许的 Origin。',
-      procContent: '遇到 CORS_ORIGIN_DENIED 跨域拦截时，在网关 cors.allowedOrigins 白名单追加前端域名。',
+      procContent:
+        '遇到 CORS_ORIGIN_DENIED 跨域拦截时，在网关 cors.allowedOrigins 白名单追加前端域名。',
       query: '前端调用接口报 CORS_ORIGIN_DENIED 跨域被拒怎么配置修复？',
       inc: ['CORS_ORIGIN_DENIED', 'allowedOrigins'],
     },
@@ -1147,28 +1151,32 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
     {
       sig: 'ERR_PNPM_OUTDATED_LOCKFILE',
       failContent: 'CI 安装阶段报错 ERR_PNPM_OUTDATED_LOCKFILE：锁文件与 package.json 不同步。',
-      procContent: '遇到 ERR_PNPM_OUTDATED_LOCKFILE 时，在本地运行 pnpm install 并提交最新 pnpm-lock.yaml。',
+      procContent:
+        '遇到 ERR_PNPM_OUTDATED_LOCKFILE 时，在本地运行 pnpm install 并提交最新 pnpm-lock.yaml。',
       query: 'CI 流水线安装依赖报 ERR_PNPM_OUTDATED_LOCKFILE 怎么修复？',
       inc: ['ERR_PNPM_OUTDATED_LOCKFILE', 'pnpm-lock.yaml'],
     },
     {
       sig: 'TS2307',
       failContent: '类型检查失败 TS2307：Cannot find module 或缺少对应类型声明文件。',
-      procContent: '解决 TS2307 报错需安装对应 @types 声明包并核对 tsconfig.json 的 moduleResolution 设置。',
+      procContent:
+        '解决 TS2307 报错需安装对应 @types 声明包并核对 tsconfig.json 的 moduleResolution 设置。',
       query: 'TypeScript 编译报 TS2307 找不到模块声明怎么处理？',
       inc: ['TS2307', 'moduleResolution'],
     },
     {
       sig: 'K8S_OOM_KILLED_137',
       failContent: '生产 Pod 重启事件 K8S_OOM_KILLED_137：容器超出内存限额被内核强杀。',
-      procContent: '排查 K8S_OOM_KILLED_137 时先导出堆快照定位泄漏，并将容器 memory.limit 上调至 2Gi。',
+      procContent:
+        '排查 K8S_OOM_KILLED_137 时先导出堆快照定位泄漏，并将容器 memory.limit 上调至 2Gi。',
       query: 'Kubernetes Pod 频繁发生 K8S_OOM_KILLED_137 退出码 137 怎么排查修复？',
       inc: ['K8S_OOM_KILLED_137', '2Gi'],
     },
     {
       sig: 'CRASH_LOOP_BACKOFF',
       failContent: '容器持续重启 CRASH_LOOP_BACKOFF：启动探针连续失败导致反复拉起。',
-      procContent: '诊断 CRASH_LOOP_BACKOFF 需立刻运行 kubectl logs --previous 查看上次崩溃栈输出。',
+      procContent:
+        '诊断 CRASH_LOOP_BACKOFF 需立刻运行 kubectl logs --previous 查看上次崩溃栈输出。',
       query: 'Pod 卡在 CRASH_LOOP_BACKOFF 状态反复重启怎么排查？',
       inc: ['CRASH_LOOP_BACKOFF', 'kubectl logs --previous'],
     },
@@ -1181,29 +1189,34 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
     },
     {
       sig: 'REDIS_OOM_DISALLOWED',
-      failContent: '缓存写入异常 REDIS_OOM_DISALLOWED：OOM command not allowed when used memory > maxmemory。',
-      procContent: '处理 REDIS_OOM_DISALLOWED 需将 maxmemory-policy 调整为 allkeys-lru 并清理大 Key。',
+      failContent:
+        '缓存写入异常 REDIS_OOM_DISALLOWED：OOM command not allowed when used memory > maxmemory。',
+      procContent:
+        '处理 REDIS_OOM_DISALLOWED 需将 maxmemory-policy 调整为 allkeys-lru 并清理大 Key。',
       query: 'Redis 写入触发 REDIS_OOM_DISALLOWED 内存耗尽报错怎么解决？',
       inc: ['REDIS_OOM_DISALLOWED', 'allkeys-lru'],
     },
     {
       sig: 'KAFKA_REBALANCE_STORM',
       failContent: '消费组告警 KAFKA_REBALANCE_STORM：单批处理过慢导致消费者被反复踢出。',
-      procContent: '缓解 KAFKA_REBALANCE_STORM 需将 max.poll.interval.ms 调大至 300000 并减少单批拉取条数。',
+      procContent:
+        '缓解 KAFKA_REBALANCE_STORM 需将 max.poll.interval.ms 调大至 300000 并减少单批拉取条数。',
       query: 'Kafka 消费者组出现 KAFKA_REBALANCE_STORM 重平衡风暴怎么调优？',
       inc: ['KAFKA_REBALANCE_STORM', '300000'],
     },
     {
       sig: 'DOCKER_CACHE_MISS',
       failContent: '镜像构建耗时翻倍 DOCKER_CACHE_MISS：修改源码导致每次重跑依赖安装层。',
-      procContent: '解决 DOCKER_CACHE_MISS 需在 Dockerfile 中先单独 COPY package.json 安装依赖再复制源码。',
+      procContent:
+        '解决 DOCKER_CACHE_MISS 需在 Dockerfile 中先单独 COPY package.json 安装依赖再复制源码。',
       query: 'Docker 镜像构建出现 DOCKER_CACHE_MISS 缓存失效怎么优化？',
       inc: ['DOCKER_CACHE_MISS', 'COPY package.json'],
     },
     {
       sig: 'GIT_SUBMODULE_EMPTY',
       failContent: '拉取仓库后子模块目录为空 GIT_SUBMODULE_EMPTY：编译缺少公共协议定义。',
-      procContent: '遇到 GIT_SUBMODULE_EMPTY 时，执行 git submodule update --init --recursive 拉取子模块。',
+      procContent:
+        '遇到 GIT_SUBMODULE_EMPTY 时，执行 git submodule update --init --recursive 拉取子模块。',
       query: '克隆仓库后遇到 GIT_SUBMODULE_EMPTY 子模块目录为空怎么修复？',
       inc: ['GIT_SUBMODULE_EMPTY', 'git submodule update'],
     },
@@ -1217,7 +1230,8 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
     {
       sig: 'ERR_IMPORT_ATTRIBUTE_MISSING',
       failContent: 'Node 24 运行报错 ERR_IMPORT_ATTRIBUTE_MISSING：ESM 直接导入 JSON 缺少断言。',
-      procContent: '修复 ERR_IMPORT_ATTRIBUTE_MISSING 需在 JSON import 语句末尾补充 with { type: "json" }。',
+      procContent:
+        '修复 ERR_IMPORT_ATTRIBUTE_MISSING 需在 JSON import 语句末尾补充 with { type: "json" }。',
       query: 'ESM 导入 JSON 报 ERR_IMPORT_ATTRIBUTE_MISSING 错误怎么修改？',
       inc: ['ERR_IMPORT_ATTRIBUTE_MISSING', 'with { type: "json" }'],
     },
@@ -1231,14 +1245,16 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
     {
       sig: 'NGINX_502_BAD_GATEWAY',
       failContent: '入口代理返回 NGINX_502_BAD_GATEWAY：上游连接被意外重置。',
-      procContent: '排查 NGINX_502_BAD_GATEWAY 需核对后端 Node keepAliveTimeout 大于 Nginx keepalive_timeout。',
+      procContent:
+        '排查 NGINX_502_BAD_GATEWAY 需核对后端 Node keepAliveTimeout 大于 Nginx keepalive_timeout。',
       query: '网关偶发返回 NGINX_502_BAD_GATEWAY 错误怎么排查修复？',
       inc: ['NGINX_502_BAD_GATEWAY', 'keepAliveTimeout'],
     },
     {
       sig: 'S3_ACCESS_DENIED_403',
       failContent: '文件上传接口报错 S3_ACCESS_DENIED_403：对象存储拒绝写入请求。',
-      procContent: '解决 S3_ACCESS_DENIED_403 需核对服务账号 IAM Role 是否具备 s3:PutObject 与 KMS 加密权限。',
+      procContent:
+        '解决 S3_ACCESS_DENIED_403 需核对服务账号 IAM Role 是否具备 s3:PutObject 与 KMS 加密权限。',
       query: '上传文件到对象存储报 S3_ACCESS_DENIED_403 权限拒绝怎么解决？',
       inc: ['S3_ACCESS_DENIED_403', 's3:PutObject'],
     },
@@ -1259,14 +1275,16 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
     {
       sig: 'RUST_E0502_BORROW',
       failContent: 'Rust 编译报错 RUST_E0502_BORROW：同一作用域内同时存在可变与不可变借用。',
-      procContent: '解决 RUST_E0502_BORROW 需使用独立代码块缩小不可变借用生命周期或先克隆所需字段。',
+      procContent:
+        '解决 RUST_E0502_BORROW 需使用独立代码块缩小不可变借用生命周期或先克隆所需字段。',
       query: 'Rust 编译遇到 RUST_E0502_BORROW 借用冲突错误怎么修复？',
       inc: ['RUST_E0502_BORROW', '生命周期'],
     },
     {
       sig: 'PYTEST_IMPORT_MISMATCH',
       failContent: 'Python 测试启动失败 PYTEST_IMPORT_MISMATCH：同名测试文件缓存路径冲突。',
-      procContent: '修复 PYTEST_IMPORT_MISMATCH 需清理残留 __pycache__ 目录并添加 --import-mode=importlib 参数。',
+      procContent:
+        '修复 PYTEST_IMPORT_MISMATCH 需清理残留 __pycache__ 目录并添加 --import-mode=importlib 参数。',
       query: '运行 pytest 出现 PYTEST_IMPORT_MISMATCH 导入不匹配怎么解决？',
       inc: ['PYTEST_IMPORT_MISMATCH', 'importlib'],
     },
@@ -1781,7 +1799,8 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
       id: 'en-mixed-006',
       critical: false,
       slot: 'mix.redis_master',
-      content: '生产环境 Redis Sentinel 集群 masterName 为 prod-redis-main，连接超时配置为 3000ms。',
+      content:
+        '生产环境 Redis Sentinel 集群 masterName 为 prod-redis-main，连接超时配置为 3000ms。',
       query: '生产环境 Redis Sentinel 集群的 masterName 和连接超时时间是多少？',
       include: ['prod-redis-main', '3000ms'],
     },
@@ -2176,7 +2195,12 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
       query: '加密网关密钥方案目前确定采用什么方案？',
       expect: {
         include: [],
-        exclude: ['UnapprovedSecret-01', 'ArchivedDraft-02', 'RejectedDraft-03', 'InternalMetaFlag-04'],
+        exclude: [
+          'UnapprovedSecret-01',
+          'ArchivedDraft-02',
+          'RejectedDraft-03',
+          'InternalMetaFlag-04',
+        ],
         maxTokens: 1600,
       },
     },
@@ -2190,7 +2214,8 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
       setup: [
         {
           type: 'semantic',
-          content: '支付服务 PaymentGateway 核心超时配置位于 config/payment.yaml，默认值为 5000ms。',
+          content:
+            '支付服务 PaymentGateway 核心超时配置位于 config/payment.yaml，默认值为 5000ms。',
           entities: ['paymentgateway', 'config/payment.yaml'],
           source_kind: 'user',
           status: 'active',
@@ -2198,7 +2223,8 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
         },
         {
           type: 'procedural',
-          content: '当 PaymentGateway 触发熔断降级时，账单系统自动将请求转入 fallback-queue-02 队列重试。',
+          content:
+            '当 PaymentGateway 触发熔断降级时，账单系统自动将请求转入 fallback-queue-02 队列重试。',
           entities: ['paymentgateway', 'fallback-queue-02'],
           source_kind: 'user',
           status: 'active',
@@ -2473,28 +2499,32 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
       setup: [
         {
           type: 'semantic',
-          content: 'Redis 集群持久化配置开启 AOF appendonly，落盘策略采用 everysec 每秒同步写入磁盘。',
+          content:
+            'Redis 集群持久化配置开启 AOF appendonly，落盘策略采用 everysec 每秒同步写入磁盘。',
           source_kind: 'user',
           status: 'active',
           utility: 0.65,
         },
         {
           type: 'semantic',
-          content: 'Redis 集群持久化开启 AOF appendonly 机制，落盘策略配置为 everysec 每秒同步刷盘。',
+          content:
+            'Redis 集群持久化开启 AOF appendonly 机制，落盘策略配置为 everysec 每秒同步刷盘。',
           source_kind: 'user',
           status: 'active',
           utility: 0.64,
         },
         {
           type: 'semantic',
-          content: 'Redis 集群持久化配置启用 AOF appendonly 模式，落盘同步策略使用 everysec 每秒落盘。',
+          content:
+            'Redis 集群持久化配置启用 AOF appendonly 模式，落盘同步策略使用 everysec 每秒落盘。',
           source_kind: 'user',
           status: 'active',
           utility: 0.63,
         },
         {
           type: 'semantic',
-          content: 'Redis 集群分片哈希槽位总数为 16384 个，扩容迁移期间采用单槽渐进式无停机重分布。',
+          content:
+            'Redis 集群分片哈希槽位总数为 16384 个，扩容迁移期间采用单槽渐进式无停机重分布。',
           source_kind: 'user',
           status: 'active',
           utility: 0.6,
@@ -2678,8 +2708,7 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
       setup: [
         {
           type: 'preference',
-          content:
-            '编写 SQL 数据库迁移脚本偏好显式声明 IF NOT EXISTS 幂等子句并附带可逆回滚注释。',
+          content: '编写 SQL 数据库迁移脚本偏好显式声明 IF NOT EXISTS 幂等子句并附带可逆回滚注释。',
           pinned: 0,
           source_kind: 'user',
           status: 'active',
@@ -2710,10 +2739,7 @@ export function generateDataset(seed = 0x12345678): EvalCase[] {
 /**
  * 生成大规模（默认 10,000 条记忆）压力与延迟基准测试语料，供 `eval-cli --scale` 使用
  */
-export function generateScaleDataset(
-  count = 10000,
-  seed = 0x5ca1e123
-): ScaleBenchmarkDataset {
+export function generateScaleDataset(count = 10000, seed = 0x5ca1e123): ScaleBenchmarkDataset {
   const rand = createSeededRandom(seed);
   const safeCount = Math.max(25, Math.floor(count));
   const fixedNow = '2026-10-01T10:00:00+08:00';

@@ -1,6 +1,6 @@
-import type { MemoryRecord, MemoryType, Db, VikingContextTier } from '../types.js';
 import { redactSecrets } from '../core/privacy.js';
 import { scopeFilterSQL } from '../core/scope.js';
+import type { Db, MemoryRecord, MemoryType, VikingContextTier } from '../types.js';
 
 export const TAG_MAP: Record<MemoryType, string> = {
   semantic: 'FACT',
@@ -50,10 +50,7 @@ export function singleLine(text: string): string {
  */
 export function escapeXmlData(s: string): string {
   if (!s) return '';
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 /**
@@ -169,7 +166,11 @@ export function generateShortCodes(
             const rawSelf = m.id.startsWith('m_') ? m.id.slice(2) : m.id;
             const rawOther = collidingId.startsWith('m_') ? collidingId.slice(2) : collidingId;
             let lcp = len;
-            while (lcp < rawSelf.length && lcp < rawOther.length && rawSelf[lcp] === rawOther[lcp]) {
+            while (
+              lcp < rawSelf.length &&
+              lcp < rawOther.length &&
+              rawSelf[lcp] === rawOther[lcp]
+            ) {
               lcp++;
             }
             if (lcp + 1 > nextLen) {
@@ -202,7 +203,12 @@ export function generateShortCodes(
 
 function isMemoryExpired(m: MemoryRecord, now?: number): boolean {
   if (now === undefined || !Number.isFinite(now)) return false;
-  if (m.valid_to !== null && m.valid_to !== undefined && Number.isFinite(m.valid_to) && m.valid_to < now) {
+  if (
+    m.valid_to !== null &&
+    m.valid_to !== undefined &&
+    Number.isFinite(m.valid_to) &&
+    m.valid_to < now
+  ) {
     return true;
   }
   if (
@@ -259,11 +265,7 @@ export function formatItemStats(m: MemoryRecord, opts?: RenderLineOptions): stri
 /**
  * 渲染单行
  */
-export function renderLine(
-  item: RenderItem,
-  shortCode: string,
-  opts?: RenderLineOptions
-): string {
+export function renderLine(item: RenderItem, shortCode: string, opts?: RenderLineOptions): string {
   const m = item.memory;
   const tag = TAG_MAP[m.type] || 'FACT';
   const safeCode = sanitizeShortCode(shortCode);

@@ -1,13 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Db } from '../types.js';
+import { isWorkspaceExcluded } from '../core/privacy.js';
 import {
   normalizeWorkspacePath,
   rememberWorkspacePath,
   resolveWorkspaceCwd,
   workspaceId,
 } from '../core/scope.js';
-import { isWorkspaceExcluded } from '../core/privacy.js';
+import type { Db } from '../types.js';
 
 const HEX_WORKSPACE_ID_RE = /^[0-9a-f]{16}$/i;
 
@@ -222,7 +222,8 @@ export function isResolvedScopeExcluded(
   if (!excludeWorkspaces || excludeWorkspaces.length === 0) return false;
   if (scope.cwd && isWorkspaceExcluded(scope.cwd, excludeWorkspaces)) return true;
   if (scope.workspaceId && isWorkspaceExcluded(scope.workspaceId, excludeWorkspaces)) return true;
-  if (scope.workspacePath && isWorkspaceExcluded(scope.workspacePath, excludeWorkspaces)) return true;
+  if (scope.workspacePath && isWorkspaceExcluded(scope.workspacePath, excludeWorkspaces))
+    return true;
   if (db && scope.workspaceId) {
     const mapped = resolveWorkspaceCwd(db, scope.workspaceId);
     if (mapped && isWorkspaceExcluded(mapped, excludeWorkspaces)) return true;
@@ -267,10 +268,7 @@ function isExistingDirectory(candidate: string | undefined): string | undefined 
  * 为 CLI 导出/导入/初始化解析工作区本地目录：
  * 优先取 ctx.cwd -> ctx.workspaceId(真实目录) -> meta['ws_path:*'] -> 最后回退 process.cwd()
  */
-export function resolveWorkspaceDir(
-  ctx?: { cwd?: string; workspaceId?: string },
-  db?: Db
-): string {
+export function resolveWorkspaceDir(ctx?: { cwd?: string; workspaceId?: string }, db?: Db): string {
   const directCwd = isExistingDirectory(ctx?.cwd);
   if (directCwd) return directCwd;
 

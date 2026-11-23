@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
-import type { RawEvent } from '../types.js';
-import type { EvidenceLedger, EvidenceLedgerEntry } from './types.js';
 import { redactSecrets } from '../core/privacy.js';
 import { estimateTokens } from '../core/tokens.js';
+import type { RawEvent } from '../types.js';
+import type { EvidenceLedger, EvidenceLedgerEntry } from './types.js';
 
 /**
  * 使用每次调用随机化的 XML nonce 标签隔离不可信数据（转写稿、历史记忆、工具输出、查询），
@@ -10,9 +10,7 @@ import { estimateTokens } from '../core/tokens.js';
  */
 export function wrapUntrustedData(content: string, nonce?: string): string {
   const safeNonce =
-    nonce && /^[a-f0-9]{6,32}$/i.test(nonce)
-      ? nonce
-      : crypto.randomBytes(6).toString('hex');
+    nonce && /^[a-f0-9]{6,32}$/i.test(nonce) ? nonce : crypto.randomBytes(6).toString('hex');
   const escaped = (content || '').replace(/<\s*\/\s*untrusted_data\b/gi, '< /untrusted_data');
   return `<untrusted_data nonce="${safeNonce}">\n${escaped}\n</untrusted_data>`;
 }

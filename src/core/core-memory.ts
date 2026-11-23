@@ -1,13 +1,7 @@
-import type {
-  Db,
-  CoreMemoryBlock,
-  CoreMemoryEntry,
-  Scope,
-  MemoryType,
-} from '../types.js';
-import { workspaceId as resolveWorkspaceId, scopeFilterSQL } from './scope.js';
-import { upsertCandidate, editContent, truncateCodePoints } from './writer.js';
+import type { CoreMemoryBlock, CoreMemoryEntry, Db, MemoryType, Scope } from '../types.js';
 import { redactSecrets } from './privacy.js';
+import { workspaceId as resolveWorkspaceId, scopeFilterSQL } from './scope.js';
+import { editContent, truncateCodePoints, upsertCandidate } from './writer.js';
 
 export const DEFAULT_CORE_BLOCKS: CoreMemoryBlock[] = ['human', 'persona', 'project'];
 
@@ -94,10 +88,7 @@ export function getCoreMemory(
 /**
  * 获取所有活跃的 Core Memory 块（按块名去重，优先选用各块的规范 scope）
  */
-export function getAllCoreMemories(
-  db: Db,
-  scopeCtx?: { workspaceId?: string }
-): CoreMemoryEntry[] {
+export function getAllCoreMemories(db: Db, scopeCtx?: { workspaceId?: string }): CoreMemoryEntry[] {
   const wsId = resolveWorkspaceId(scopeCtx?.workspaceId || process.cwd());
   const scopeFilter = scopeFilterSQL({ workspaceId: wsId });
 
@@ -172,7 +163,8 @@ export function setCoreMemory(
     const slotKey = `core:${normBlock}`;
     const actor = options?.actor ?? 'user';
     const trusted = actor === 'user' || actor === 'system';
-    const now = typeof options?.now === 'number' && Number.isFinite(options.now) ? options.now : Date.now();
+    const now =
+      typeof options?.now === 'number' && Number.isFinite(options.now) ? options.now : Date.now();
 
     const existing = getCoreMemory(db, normBlock, { workspaceId: wsId });
     if (existing && !trusted && existing.content === cleanContent) {

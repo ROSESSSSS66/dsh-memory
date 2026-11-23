@@ -39,6 +39,9 @@ jobs:
       - name: Run Typecheck
         run: npm run typecheck
 
+      - name: Run Biome Lint
+        run: npm run lint
+
       - name: Run All Tests
         if: matrix.os != 'ubuntu-latest'
         run: npm test

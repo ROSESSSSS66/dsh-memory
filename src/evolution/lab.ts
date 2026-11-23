@@ -1,16 +1,16 @@
-import type { Db, StrategyConfig, ChannelName } from '../types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
+import { redactSecrets } from '../core/privacy.js';
+import { createSeededRandom, generateDataset } from '../eval/gen-dataset.js';
+import { runEvalSuite } from '../eval/runner.js';
+import type { EvalCase, EvalReport, SuiteMetrics } from '../eval/types.js';
+import type { ChannelName, Db, StrategyConfig } from '../types.js';
 import {
-  SENTINEL_RESTORED_VERSION_KEY,
   getActiveStrategy,
   promoteStrategy,
   rollbackStrategy,
+  SENTINEL_RESTORED_VERSION_KEY,
   validateAndClampStrategy,
 } from './strategy.js';
-import { redactSecrets } from '../core/privacy.js';
-import { generateDataset, createSeededRandom } from '../eval/gen-dataset.js';
-import { runEvalSuite } from '../eval/runner.js';
-import type { EvalCase, SuiteMetrics, EvalReport } from '../eval/types.js';
 
 const MAX_DB_EVAL_CASES = 50;
 const DEFAULT_SENTINEL_MIN_TURNS = 30;

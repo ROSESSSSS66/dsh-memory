@@ -1,30 +1,22 @@
 import crypto from 'node:crypto';
 import {
-  hydrateMemoryRow,
-  parseOriginKinds,
   type Db,
+  type HindsightDisposition,
+  type HindsightNetwork,
+  hydrateMemoryRow,
   type MemoryRecord,
   type MemoryRow,
   type MemoryType,
   type OriginKind,
-  type HindsightNetwork,
-  type HindsightDisposition,
+  parseOriginKinds,
   type QueryPlan,
 } from '../types.js';
-import { workspaceId, scopeFilterSQL } from './scope.js';
+import { isWorkspaceExcluded, memoryPrivacyFilterSQL, redactSecrets } from './privacy.js';
+import { scopeFilterSQL, workspaceId } from './scope.js';
 import { extractEntities } from './text.js';
-import {
-  redactSecrets,
-  isWorkspaceExcluded,
-  memoryPrivacyFilterSQL,
-} from './privacy.js';
-import { upsertCandidate, addRelation, saveVersionSnapshot } from './writer.js';
-import {
-  hasUntrustedOrigin,
-  isUntrustedSourceKind,
-  sourceKindToOriginKind,
-} from './trust.js';
+import { hasUntrustedOrigin, isUntrustedSourceKind, sourceKindToOriginKind } from './trust.js';
 import { removeCachedRuntimeEmbedding } from './vector.js';
+import { addRelation, saveVersionSnapshot, upsertCandidate } from './writer.js';
 
 export const DEFAULT_DISPOSITION: HindsightDisposition = {
   skepticism: 0.35,
@@ -332,10 +324,7 @@ interface ModelFreshnessCheck {
   linkedTargetIds: Set<string>;
 }
 
-function inspectDerivedModelFreshness(
-  db: Db,
-  modelId: string
-): ModelFreshnessCheck {
+function inspectDerivedModelFreshness(db: Db, modelId: string): ModelFreshnessCheck {
   const edges = db.all<{
     to_id: string;
     metadata: string | null;
@@ -865,7 +854,10 @@ export function runHindsightReflect(
       const existingSlotModel = hydrateMemoryRow(rawExistingSlot);
 
       // 尊重 pinned=1 或 frozen 的既有心智模型，禁止覆盖或取代
-      if (existingSlotModel && (existingSlotModel.pinned === 1 || existingSlotModel.status === 'frozen')) {
+      if (
+        existingSlotModel &&
+        (existingSlotModel.pinned === 1 || existingSlotModel.status === 'frozen')
+      ) {
         continue;
       }
 
@@ -1066,7 +1058,10 @@ export function runHindsightReflect(
     // 4. 失效清理：若已有未置顶/未冻结的 hindsight.model.* 派生源已被归档/取代且剩余活跃源不足 minClusterSize，将其归档失效
     for (const r of rows) {
       if (r.pinned === 1 || r.status === 'frozen') continue;
-      if (!r.slot_key?.startsWith('hindsight.model.') && !r.slot_key?.startsWith('hindsight.obs.')) {
+      if (
+        !r.slot_key?.startsWith('hindsight.model.') &&
+        !r.slot_key?.startsWith('hindsight.obs.')
+      ) {
         continue;
       }
       if (r.slot_key && refreshedSlotKeys.has(r.slot_key)) continue;
@@ -1165,9 +1160,10 @@ export interface HindsightScopeContext {
   excludeWorkspaces?: string[];
 }
 
-function buildEvolutionScopeClause(
-  scopeCtx?: HindsightScopeContext
-): { sql: string; params: unknown[] } {
+function buildEvolutionScopeClause(scopeCtx?: HindsightScopeContext): {
+  sql: string;
+  params: unknown[];
+} {
   if (!scopeCtx) {
     return { sql: '1 = 1', params: [] };
   }

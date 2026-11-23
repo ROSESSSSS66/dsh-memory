@@ -1,6 +1,6 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import type { Db } from '../types.js';
 
 /**
@@ -20,9 +20,10 @@ export function normalizeWorkspacePath(cwd: string): string {
 
   let resolved = path.resolve(input);
   try {
-    resolved = typeof fs.realpathSync.native === 'function'
-      ? fs.realpathSync.native(resolved)
-      : fs.realpathSync(resolved);
+    resolved =
+      typeof fs.realpathSync.native === 'function'
+        ? fs.realpathSync.native(resolved)
+        : fs.realpathSync(resolved);
   } catch {
     // 目录尚不存在或无权访问时回退 path.resolve 结果
   }
@@ -57,11 +58,7 @@ export function workspaceId(cwd: string): string {
   const normalized = normalizeWorkspacePath(trimmed);
   if (!normalized) return '';
 
-  return crypto
-    .createHash('sha256')
-    .update(normalized)
-    .digest('hex')
-    .slice(0, 16);
+  return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
 
 /**
@@ -84,7 +81,10 @@ export function rememberWorkspacePath(db: Db, rawPath: string): string {
 /**
  * 将路径或 16-hex workspaceId 解析为真实本地路径（用于离线脱敏/受控同步；找不到返回 undefined）
  */
-export function resolveWorkspaceCwd(db: Db | undefined, workspaceIdOrPath?: string): string | undefined {
+export function resolveWorkspaceCwd(
+  db: Db | undefined,
+  workspaceIdOrPath?: string
+): string | undefined {
   const raw = (workspaceIdOrPath || '').trim();
   if (!raw) return undefined;
   if (!/^[0-9a-f]{16}$/i.test(raw)) {

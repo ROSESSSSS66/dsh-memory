@@ -1,4 +1,4 @@
-import { parseOriginKinds, type Db, type MemoryRecord, type OriginKind } from '../types.js';
+import { type Db, type MemoryRecord, type OriginKind, parseOriginKinds } from '../types.js';
 
 const UNTRUSTED_SOURCE_KINDS = new Set(['web', 'tool', 'tool_result', 'tool_call']);
 
@@ -6,7 +6,10 @@ const UNTRUSTED_SOURCE_KINDS = new Set(['web', 'tool', 'tool_result', 'tool_call
  * 判断来源或 origin_kinds 是否携带不可信外部污点 (web / tool)
  */
 export function hasUntrustedOrigin(
-  memoryOrOrigins: Pick<MemoryRecord, 'origin_kinds' | 'source_kind'> | readonly OriginKind[] | string
+  memoryOrOrigins:
+    | Pick<MemoryRecord, 'origin_kinds' | 'source_kind'>
+    | readonly OriginKind[]
+    | string
 ): boolean {
   if (Array.isArray(memoryOrOrigins) || typeof memoryOrOrigins === 'string') {
     const origins = parseOriginKinds(memoryOrOrigins);

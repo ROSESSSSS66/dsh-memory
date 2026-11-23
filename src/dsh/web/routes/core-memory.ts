@@ -1,8 +1,8 @@
-import type { Db, StrategyConfig } from '../../../types.js';
 import type { PluginConfig } from '../../../config.js';
-import { getAllCoreMemories, DEFAULT_CORE_BLOCKS } from '../../../core/core-memory.js';
+import { DEFAULT_CORE_BLOCKS, getAllCoreMemories } from '../../../core/core-memory.js';
 import { estimateTokens } from '../../../core/tokens.js';
 import { DEFAULT_STRATEGY, validateAndClampStrategy } from '../../../evolution/strategy.js';
+import type { Db, StrategyConfig } from '../../../types.js';
 import { renderStableLayer } from '../../prompt-section.js';
 import { resolveWebScope, sendJson, type WebScope } from '../http.js';
 import type { RouteEntry } from '../router.js';
@@ -24,10 +24,7 @@ export interface StableLayerSnapshot {
 /**
  * 严格只读获取当前活跃策略：绝不在 GET 路径触发 initDefaultStrategy 写库
  */
-export function getReadOnlyActiveStrategy(
-  db: Db,
-  cfg: PluginConfig
-): ActiveStrategySnapshot {
+export function getReadOnlyActiveStrategy(db: Db, cfg: PluginConfig): ActiveStrategySnapshot {
   try {
     const row = db.get<{ version: number; config: string }>(
       "SELECT version, config FROM strategies WHERE status = 'active' LIMIT 1"

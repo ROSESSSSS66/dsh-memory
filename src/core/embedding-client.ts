@@ -1,11 +1,11 @@
-import type { EmbeddingProviderMeta } from '../types.js';
 import type { PluginConfig } from '../config.js';
+import type { EmbeddingProviderMeta } from '../types.js';
 import {
   assertSafeOutboundEndpoint,
   isOfflineEndpointAllowed,
   isSafeApiKeyEnvName,
-  redactSecrets,
   type LookupFn,
+  redactSecrets,
 } from './privacy.js';
 import { computeLocalEmbedding, DEFAULT_LOCAL_VECTOR_DIM } from './vector.js';
 
@@ -184,9 +184,7 @@ async function readResponseTextWithCap(
         if (done) break;
         if (!value) continue;
         const chunk =
-          value instanceof Uint8Array
-            ? value
-            : new Uint8Array(value as ArrayBufferLike);
+          value instanceof Uint8Array ? value : new Uint8Array(value as ArrayBufferLike);
         totalBytes += chunk.byteLength;
         if (totalBytes > maxBytes) {
           try {
@@ -232,10 +230,7 @@ async function readResponseTextWithCap(
   return { ok: false, reason: 'unreadable_response' };
 }
 
-function validateAndNormalizeVector(
-  raw: unknown,
-  expectedDim: number
-): Float32Array | null {
+function validateAndNormalizeVector(raw: unknown, expectedDim: number): Float32Array | null {
   if (!Array.isArray(raw) && !ArrayBuffer.isView(raw)) {
     return null;
   }
@@ -449,11 +444,7 @@ export async function fetchRemoteEmbeddings(
       err && typeof err === 'object' && 'name' in err
         ? String((err as { name?: unknown }).name)
         : '';
-    if (
-      errName === 'AbortError' ||
-      errName === 'TimeoutError' ||
-      combinedSignal.aborted
-    ) {
+    if (errName === 'AbortError' || errName === 'TimeoutError' || combinedSignal.aborted) {
       return { ok: false, reason: options.signal?.aborted ? 'aborted' : 'timeout' };
     }
     return { ok: false, reason: 'network_error' };
@@ -469,11 +460,7 @@ export async function embedQueryWithFallback(
   options: EmbedQueryOptions = {}
 ): Promise<EmbedQueryResult> {
   const trimmed = (queryText || '').trim();
-  if (
-    trimmed &&
-    options.allowRemote !== false &&
-    isRemoteEmbeddingEnabled(cfg)
-  ) {
+  if (trimmed && options.allowRemote !== false && isRemoteEmbeddingEnabled(cfg)) {
     const remoteRes = await fetchRemoteEmbeddings([trimmed], cfg, {
       signal: options.signal,
       fetchFn: options.fetchFn,

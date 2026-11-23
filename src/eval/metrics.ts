@@ -1,18 +1,9 @@
 import { DEFAULTS, type PluginConfig } from '../config.js';
-import type {
-  EvalCase,
-  CaseResult,
-  SuiteMetrics,
-  EvalReport,
-  MvpGateStatus,
-} from './types.js';
+import type { CaseResult, EvalCase, EvalReport, MvpGateStatus, SuiteMetrics } from './types.js';
 
 function percentileNearestRank(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
-  const idx = Math.min(
-    sorted.length - 1,
-    Math.max(0, Math.ceil(p * sorted.length) - 1)
-  );
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
   return sorted[idx];
 }
 
@@ -183,8 +174,7 @@ export function calculateSuiteMetrics(
   const criticalPassRate =
     criticalCases.length > 0 ? criticalPassedCount / criticalCases.length : 1.0;
 
-  const avgInjectTokens =
-    nonEmptyCount > 0 ? Math.round(totalDynamicTokens / nonEmptyCount) : 0;
+  const avgInjectTokens = nonEmptyCount > 0 ? Math.round(totalDynamicTokens / nonEmptyCount) : 0;
 
   latencies.sort((a, b) => a - b);
   const p50LatencyMs = percentileNearestRank(latencies, 0.5);
@@ -258,8 +248,7 @@ export function buildEvalReport(
     allCriticalPassed:
       overall.criticalTotal === 0 || overall.criticalPassed === overall.criticalTotal,
     allBudgetPass:
-      overall.totalCases > 0 &&
-      evaluatedCases.every((c) => Boolean(caseResults[c.id]?.budgetPass)),
+      overall.totalCases > 0 && evaluatedCases.every((c) => Boolean(caseResults[c.id]?.budgetPass)),
     allImplicitStablePass: evaluatedCases
       .filter((c) => c.suite === 'implicit')
       .every((c) => Boolean(caseResults[c.id]?.stablePass)),

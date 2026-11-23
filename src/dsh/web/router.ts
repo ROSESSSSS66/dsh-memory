@@ -1,11 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { URL } from 'node:url';
 import { ZodError } from 'zod';
-import type { Db } from '../../types.js';
 import type { PluginConfig } from '../../config.js';
 import type { LookupFn } from '../../core/privacy.js';
 import type { JobScheduler } from '../../jobs/scheduler.js';
 import { WorkspaceExcludedError } from '../../service/index.js';
+import type { Db } from '../../types.js';
 import { HttpError, sendJson } from './http.js';
 import { securityHeaders } from './security.js';
 
@@ -200,22 +200,12 @@ export class WebRouter {
 
   private handleError(res: ServerResponse, err: unknown, reqOrigin?: string): void {
     if (err instanceof HttpError) {
-      sendJson(
-        res,
-        err.status,
-        { ok: false, code: err.code, error: err.message },
-        reqOrigin
-      );
+      sendJson(res, err.status, { ok: false, code: err.code, error: err.message }, reqOrigin);
       return;
     }
 
     if (err instanceof WorkspaceExcludedError) {
-      sendJson(
-        res,
-        403,
-        { ok: false, code: 'workspace_excluded', error: err.message },
-        reqOrigin
-      );
+      sendJson(res, 403, { ok: false, code: 'workspace_excluded', error: err.message }, reqOrigin);
       return;
     }
 
@@ -240,12 +230,7 @@ export class WebRouter {
 
     if (err instanceof Error) {
       if (err.message.startsWith('Ambiguous short id')) {
-        sendJson(
-          res,
-          400,
-          { ok: false, code: 'ambiguous_id', error: err.message },
-          reqOrigin
-        );
+        sendJson(res, 400, { ok: false, code: 'ambiguous_id', error: err.message }, reqOrigin);
         return;
       }
       if (err.message === 'memory_is_frozen') {

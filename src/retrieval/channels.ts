@@ -1,8 +1,8 @@
-import type { Db, QueryPlan, ChannelName } from '../types.js';
-import { scopeFilterSQL } from '../core/scope.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
+import { scopeFilterSQL } from '../core/scope.js';
 import { computeLocalEmbedding } from '../core/vector.js';
 import { searchWorkspaceVectors } from '../core/vector-index.js';
+import type { ChannelName, Db, QueryPlan } from '../types.js';
 
 export interface Candidate {
   id: string;
@@ -98,7 +98,9 @@ function pruneMatchedCompoundSubTokens(
     return { primaryTokens: matchTokens, droppedAny: false };
   }
 
-  const unquoted = matchTokens.map((t) => (t.startsWith('"') && t.endsWith('"') ? t.slice(1, -1) : t));
+  const unquoted = matchTokens.map((t) =>
+    t.startsWith('"') && t.endsWith('"') ? t.slice(1, -1) : t
+  );
   const rawSet = new Set(unquoted);
   const compoundCandidates: Array<{ quoted: string; subs: string[] }> = [];
   const separatorCompounds = new Set<string>();
@@ -190,9 +192,7 @@ function toFtsQuotedToken(raw: string): string | null {
  */
 export function selectLexicalMatchTokens(plan: QueryPlan, maxTokens: number = 32): string[] {
   const sourceTokens =
-    plan.contentTokens && plan.contentTokens.length > 0
-      ? plan.contentTokens
-      : plan.tokens || [];
+    plan.contentTokens && plan.contentTokens.length > 0 ? plan.contentTokens : plan.tokens || [];
 
   const priority: string[] = [];
   const prioritySet = new Set<string>();
@@ -227,7 +227,10 @@ export function selectLexicalMatchTokens(plan: QueryPlan, maxTokens: number = 32
   const maxPriority =
     remaining.length === 0
       ? maxTokens
-      : Math.min(priority.length, Math.max(maxTokens - remaining.length, Math.floor(maxTokens / 2)));
+      : Math.min(
+          priority.length,
+          Math.max(maxTokens - remaining.length, Math.floor(maxTokens / 2))
+        );
 
   const selected: string[] = [];
   if (priority.length <= maxPriority) {
@@ -618,7 +621,9 @@ export function recallTemporal(db: Db, plan: QueryPlan, ctx: ChannelContext): Ca
   const { from, to } = plan.timeRange;
   const ws = ctx.workspaceId || '';
   const sid = typeof ctx.sessionId === 'string' ? ctx.sessionId.trim() : '';
-  const statuses = plan.temporalBrowse ? (['active', 'frozen', 'superseded'] as const) : (['active', 'frozen'] as const);
+  const statuses = plan.temporalBrowse
+    ? (['active', 'frozen', 'superseded'] as const)
+    : (['active', 'frozen'] as const);
   const allowedStatusSet = new Set<string>(statuses);
 
   const branches: string[] = [];
@@ -753,9 +758,7 @@ export function recallTemporal(db: Db, plan: QueryPlan, ctx: ChannelContext): Ca
     const sorted = Array.from(merged.values());
     sorted.sort(
       (a, b) =>
-        b.created_at - a.created_at ||
-        b.updated_at - a.updated_at ||
-        a.id.localeCompare(b.id)
+        b.created_at - a.created_at || b.updated_at - a.updated_at || a.id.localeCompare(b.id)
     );
 
     return sorted.slice(0, 20).map((r, idx) => ({
@@ -901,8 +904,7 @@ export function recallVector(
   const minSim = ctx.cfg?.minVectorSimilarity ?? DEFAULTS.minVectorSimilarity;
 
   try {
-    const queryVec =
-      ctx.precomputedQueryVec ?? computeLocalEmbedding(buildVectorQueryText(plan));
+    const queryVec = ctx.precomputedQueryVec ?? computeLocalEmbedding(buildVectorQueryText(plan));
     if (!queryVec || queryVec.length === 0) {
       return [];
     }
@@ -941,7 +943,8 @@ export function runAllChannels(
   } = {}
 ): Record<ChannelName, Candidate[]> {
   const t0 = options.t0 ?? Date.now();
-  const onlineBudget = options.onlineBudgetMs ?? (ctx.cfg?.onlineBudgetMs || DEFAULTS.onlineBudgetMs);
+  const onlineBudget =
+    options.onlineBudgetMs ?? (ctx.cfg?.onlineBudgetMs || DEFAULTS.onlineBudgetMs);
 
   const results: Record<ChannelName, Candidate[]> = {
     lexical: [],

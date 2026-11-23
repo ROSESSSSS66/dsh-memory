@@ -1,18 +1,18 @@
-import { hydrateMemoryRow, type Db, type MemoryRecord, type MemoryRow } from '../types.js';
-import { jobFailure, type JobHandlerResult } from '../jobs/types.js';
 import { DEFAULTS, type PluginConfig } from '../config.js';
-import { sources } from '../core/store.js';
-import { upsertCandidate, saveVersionSnapshot } from '../core/writer.js';
-import { removeCachedRuntimeEmbedding } from '../core/vector.js';
-import { enqueueJob } from '../jobs/scheduler.js';
-import { PROMPT_REPAIR, packPromptWithinBudget } from './prompts.js';
-import { parseOutput } from './parse.js';
-import { callOfflineLLM } from './llm.js';
-import type { EvidenceLedger, EvidenceLedgerEntry } from './types.js';
-import { memoryWorkspaceIds, canSendMemoriesOffline } from '../core/privacy.js';
-import { hasUserEvidence, sourceKindToOriginKind } from '../core/trust.js';
+import { canSendMemoriesOffline, memoryWorkspaceIds } from '../core/privacy.js';
 import { resolveWorkspaceCwd } from '../core/scope.js';
+import { sources } from '../core/store.js';
+import { hasUserEvidence, sourceKindToOriginKind } from '../core/trust.js';
+import { removeCachedRuntimeEmbedding } from '../core/vector.js';
+import { saveVersionSnapshot, upsertCandidate } from '../core/writer.js';
+import { enqueueJob } from '../jobs/scheduler.js';
+import { type JobHandlerResult, jobFailure } from '../jobs/types.js';
+import { type Db, hydrateMemoryRow, type MemoryRecord, type MemoryRow } from '../types.js';
+import { callOfflineLLM } from './llm.js';
+import { parseOutput } from './parse.js';
+import { PROMPT_REPAIR, packPromptWithinBudget } from './prompts.js';
 import { sameMemoryOwner } from './review-snapshot.js';
+import type { EvidenceLedger, EvidenceLedgerEntry } from './types.js';
 
 export interface RepairProposalRecord {
   id: number;
@@ -130,7 +130,11 @@ export function executeRepair(
       return { action: 'skipped', nonRetryable: true, reason: 'Target memory not found' };
     }
     if (mem.status !== 'active') {
-      return { action: 'skipped', nonRetryable: true, reason: `Target memory status is ${mem.status}` };
+      return {
+        action: 'skipped',
+        nonRetryable: true,
+        reason: `Target memory status is ${mem.status}`,
+      };
     }
     if (!canSendMemoriesOffline(db, [mem], cfg.excludeWorkspaces)) {
       return { action: 'failed', nonRetryable: true, error: 'workspace_excluded' };
@@ -169,12 +173,7 @@ export function executeRepair(
         const s = selectedSources[i];
         const seq = i + 1;
         const originKind = sourceKindToOriginKind(s.kind);
-        const tag =
-          originKind === 'tool'
-            ? 'T'
-            : originKind === 'assistant'
-              ? 'A'
-              : 'U';
+        const tag = originKind === 'tool' ? 'T' : originKind === 'assistant' ? 'A' : 'U';
         const line = `[${tag}#${seq}] ${s.excerpt!}`;
         lines.push(line);
         if (ledgerOut) {
@@ -311,7 +310,9 @@ export function executeRepair(
           [
             candId,
             mem.id,
-            JSON.stringify({ sources: [{ memory_id: mem.id, content_rev: mem.content_rev, hash: mem.hash }] }),
+            JSON.stringify({
+              sources: [{ memory_id: mem.id, content_rev: mem.content_rev, hash: mem.hash }],
+            }),
             now,
           ]
         );
@@ -350,7 +351,9 @@ export function executeRepair(
                     res.id,
                     mem.id,
                     JSON.stringify({
-                      sources: [{ memory_id: mem.id, content_rev: mem.content_rev, hash: mem.hash }],
+                      sources: [
+                        { memory_id: mem.id, content_rev: mem.content_rev, hash: mem.hash },
+                      ],
                     }),
                     now,
                   ]
@@ -458,7 +461,11 @@ export function approveRepairProposal(
         const candidate = hydrateMemoryRow(
           db.get<MemoryRow>('SELECT * FROM memories WHERE id = ?', [id])
         );
-        if (!candidate || candidate.source_kind === 'llm_extract' || !hasUserEvidence(db, candidate)) {
+        if (
+          !candidate ||
+          candidate.source_kind === 'llm_extract' ||
+          !hasUserEvidence(db, candidate)
+        ) {
           return { ok: false, reason: 'user_evidence_required' };
         }
       }
@@ -544,7 +551,9 @@ export function approveRepairProposal(
       const seenSlots = new Set<string>();
       const slotConflicts: MemoryRecord[] = [];
       for (const cid of candidateIds) {
-        const cMem = hydrateMemoryRow(db.get<MemoryRow>('SELECT * FROM memories WHERE id = ?', [cid]));
+        const cMem = hydrateMemoryRow(
+          db.get<MemoryRow>('SELECT * FROM memories WHERE id = ?', [cid])
+        );
         if (!cMem || cMem.status !== 'candidate') {
           return { ok: false, reason: `Candidate ${cid} not found or not in candidate status` };
         }
@@ -656,7 +665,9 @@ export function rejectRepairProposal(
       memory_id: string;
       candidate_ids: string;
       status: string;
-    }>('SELECT id, memory_id, candidate_ids, status FROM repair_proposals WHERE id = ?', [proposalId]);
+    }>('SELECT id, memory_id, candidate_ids, status FROM repair_proposals WHERE id = ?', [
+      proposalId,
+    ]);
 
     if (!proposal) {
       return { ok: false, reason: `Proposal #${proposalId} not found` };

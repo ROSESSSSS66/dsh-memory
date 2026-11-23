@@ -1,7 +1,31 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import type { PluginConfig } from '../config.js';
 import {
-  parseOriginKinds,
+  classifyHindsightNetwork,
+  type HindsightEvolutionTrace,
+  traceHindsightEvolution,
+} from '../core/hindsight.js';
+import {
+  atomicWriteFileSync,
+  resolveTrashDir,
+  safeFilenameId,
+  trashMemory,
+} from '../core/markdown.js';
+import { isWorkspaceExcluded, redactSecrets } from '../core/privacy.js';
+import { resolveWorkspaceCwd, scopeFilterSQL, workspaceId } from '../core/scope.js';
+import { get, history as getHistory, sources as getSources } from '../core/store.js';
+import { resolveVikingUri, resolveVikingUrisBatch } from '../core/viking.js';
+import {
+  type EditMemoryPatch,
+  type EditMemoryResult,
+  editMemory,
+  forget,
+  freeze,
+  pin,
+  upsertCandidate,
+} from '../core/writer.js';
+import {
   type Db,
   type HindsightNetwork,
   type MemoryRecord,
@@ -9,34 +33,10 @@ import {
   type MemoryStatus,
   type MemoryType,
   type OriginKind,
+  parseOriginKinds,
   type RelationType,
   type Scope,
 } from '../types.js';
-import type { PluginConfig } from '../config.js';
-import { workspaceId, scopeFilterSQL, resolveWorkspaceCwd } from '../core/scope.js';
-import { isWorkspaceExcluded, redactSecrets } from '../core/privacy.js';
-import { get, sources as getSources, history as getHistory } from '../core/store.js';
-import {
-  editMemory,
-  forget,
-  freeze,
-  pin,
-  upsertCandidate,
-  type EditMemoryPatch,
-  type EditMemoryResult,
-} from '../core/writer.js';
-import {
-  atomicWriteFileSync,
-  resolveTrashDir,
-  safeFilenameId,
-  trashMemory,
-} from '../core/markdown.js';
-import {
-  classifyHindsightNetwork,
-  traceHindsightEvolution,
-  type HindsightEvolutionTrace,
-} from '../core/hindsight.js';
-import { resolveVikingUri, resolveVikingUrisBatch } from '../core/viking.js';
 import {
   assertWorkspaceAllowed,
   expandExcludedWorkspaceIds,
@@ -85,10 +85,7 @@ const MEMORY_TYPE_ALIASES: Record<string, MemoryType> = {
 /**
  * 统一的记忆类型规范化函数（取代 web.ts / tools.ts / commands.ts 中各自维护的副本）
  */
-export function normalizeMemoryType(
-  input: unknown,
-  fallback: MemoryType = 'semantic'
-): MemoryType {
+export function normalizeMemoryType(input: unknown, fallback: MemoryType = 'semantic'): MemoryType {
   if (typeof input !== 'string') return fallback;
   const normalized = input.trim().toLowerCase();
   if (!normalized) return fallback;
@@ -172,14 +169,7 @@ export function editMemoryRecord(
     effectivePatch.sessionId = opts.scopeCtx.sessionId;
   }
 
-  return editMemory(
-    db,
-    target.id,
-    effectivePatch,
-    opts.actor,
-    opts.now ?? Date.now(),
-    opts.cfg
-  );
+  return editMemory(db, target.id, effectivePatch, opts.actor, opts.now ?? Date.now(), opts.cfg);
 }
 
 export interface ForgetWithTrashOptions {
@@ -197,7 +187,10 @@ export interface ForgetWithTrashResult {
   error?: string;
 }
 
-function rollbackTrashFile(trashedPath: string | undefined, previousContent: string | undefined): void {
+function rollbackTrashFile(
+  trashedPath: string | undefined,
+  previousContent: string | undefined
+): void {
   if (!trashedPath) return;
   try {
     if (previousContent !== undefined) {
@@ -578,9 +571,13 @@ export function importJsonMemories(
   const indexedItems = rawItems.map((item, originalIndex) => ({ item, originalIndex }));
   indexedItems.sort((a, b) => {
     const ta =
-      a.item && typeof a.item === 'object' ? Number((a.item as Record<string, unknown>).updated_at) || 0 : 0;
+      a.item && typeof a.item === 'object'
+        ? Number((a.item as Record<string, unknown>).updated_at) || 0
+        : 0;
     const tb =
-      b.item && typeof b.item === 'object' ? Number((b.item as Record<string, unknown>).updated_at) || 0 : 0;
+      b.item && typeof b.item === 'object'
+        ? Number((b.item as Record<string, unknown>).updated_at) || 0
+        : 0;
     return ta - tb || a.originalIndex - b.originalIndex;
   });
 
@@ -707,7 +704,12 @@ export function importJsonMemories(
           errors.push(`${itemLabel}: cross_workspace_forbidden`);
           continue;
         }
-        if (itemScope === 'session' && targetSessionId && rawItemSess && rawItemSess !== targetSessionId) {
+        if (
+          itemScope === 'session' &&
+          targetSessionId &&
+          rawItemSess &&
+          rawItemSess !== targetSessionId
+        ) {
           skipped++;
           errors.push(`${itemLabel}: cross_session_forbidden`);
           continue;
@@ -1056,10 +1058,7 @@ export type ApiMemoryRecord = Omit<MemoryRecord, 'embedding'> & {
 /**
  * 批量为 API 响应剥离 embedding BLOB，并确定性附加 vikingUri 与 hindsightNetwork（无 N+1 查询）
  */
-export function stripMemoryForApi(
-  db: Db | undefined,
-  records: MemoryRecord[]
-): ApiMemoryRecord[] {
+export function stripMemoryForApi(db: Db | undefined, records: MemoryRecord[]): ApiMemoryRecord[] {
   if (!records || records.length === 0) return [];
 
   const uriMap = db ? resolveVikingUrisBatch(db, records) : undefined;

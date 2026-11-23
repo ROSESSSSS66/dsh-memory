@@ -1,28 +1,19 @@
-import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import type { JobRunner } from '../jobs/runner.js';
-import type { JobScheduler } from '../jobs/scheduler.js';
-import { jobFailure, type JobHandlerResult, type JobRecord } from '../jobs/types.js';
-import {
-  distillSession,
-  findEligibleDistillSession,
-} from '../evolution/extractor.js';
-import { runReflectJob } from '../evolution/reflector.js';
-import {
-  findConsolidationClusters,
-  consolidateCluster,
-} from '../evolution/consolidator.js';
-import { executeRepair } from '../evolution/repair.js';
+import { isRemoteEmbeddingEnabled } from '../core/embedding-client.js';
+import { runHindsightReflect } from '../core/hindsight.js';
+import { consolidateCluster, findConsolidationClusters } from '../evolution/consolidator.js';
+import { distillSession, findEligibleDistillSession } from '../evolution/extractor.js';
 import { runStrategyEvolution } from '../evolution/lab.js';
 import { curateMemoriesWithLLM } from '../evolution/maintenance.js';
+import { runReflectJob } from '../evolution/reflector.js';
+import { executeRepair } from '../evolution/repair.js';
 import { runBackfill } from '../ingest/backfill.js';
-import { runHindsightReflect } from '../core/hindsight.js';
-import { isRemoteEmbeddingEnabled } from '../core/embedding-client.js';
+import type { JobRunner } from '../jobs/runner.js';
+import type { JobScheduler } from '../jobs/scheduler.js';
+import { type JobHandlerResult, type JobRecord, jobFailure } from '../jobs/types.js';
 import { listActiveWorkspaces, runUnifiedMaintenance } from '../service/index.js';
-import {
-  isResolvedScopeExcluded,
-  resolveRuntimeScope,
-} from './scope-resolver.js';
+import type { Db } from '../types.js';
+import { isResolvedScopeExcluded, resolveRuntimeScope } from './scope-resolver.js';
 
 export const PLUGIN_JOB_KINDS = [
   'distill',
@@ -412,9 +403,8 @@ export function registerPluginJobHandlers(
     runStrategyEvolution(db, {}, liveCfg);
     try {
       const sampleCnt =
-        db.get<{ cnt: number }>(
-          "SELECT COUNT(*) as cnt FROM eval_cases WHERE suite = 'harvested'"
-        )?.cnt || 0;
+        db.get<{ cnt: number }>("SELECT COUNT(*) as cnt FROM eval_cases WHERE suite = 'harvested'")
+          ?.cnt || 0;
       db.run(
         `INSERT INTO meta (key, value) VALUES ('lab.last_evolved_harvest_count', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,

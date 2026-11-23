@@ -1,7 +1,7 @@
-import type { Db } from '../types.js';
 import type { PluginConfig } from '../config.js';
-import { defaultJobRunner, type JobRunner } from './runner.js';
 import { recoverReservedToUnknown } from '../evolution/ledger.js';
+import type { Db } from '../types.js';
+import { defaultJobRunner, type JobRunner } from './runner.js';
 
 export interface EnqueueJobParams {
   kind: string;
@@ -115,7 +115,11 @@ export class JobScheduler {
     this.cfg = cfg;
     this.runner = options.runner ?? defaultJobRunner;
 
-    if (typeof options.idleMs === 'number' && Number.isFinite(options.idleMs) && options.idleMs >= 0) {
+    if (
+      typeof options.idleMs === 'number' &&
+      Number.isFinite(options.idleMs) &&
+      options.idleMs >= 0
+    ) {
       this.idleMs = Math.min(options.idleMs, MAX_TIMER_MS);
     } else if (
       typeof cfg.idleMinutes === 'number' &&
