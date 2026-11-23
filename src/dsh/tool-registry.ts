@@ -67,33 +67,37 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
 
   try {
     // Tool 1: memory_search
+    // Note: ctx.tools.register() forwards `parameters` verbatim as raw JSON Schema (unlike defineTool()),
+    // and @deepseek-ai/dsh-tools enforces a strict JSON Schema subset (no minimum/maximum/minLength/maxLength).
     addDisp(
       ctx.tools.register({
         name: 'memory_search',
         description:
           'Search long-term memory for facts, preferences, skills, or past lessons (only when not already present in memory_context).',
         parameters: {
-          query: { type: 'string', required: true, description: 'Search keywords or question (1-500 chars)' },
-          network: {
-            type: 'string',
-            enum: ['world', 'experience', 'observation', 'opinion'],
-            description: 'Optional Hindsight cognitive network filter',
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search keywords or question (1-500 chars)' },
+            network: {
+              type: 'string',
+              enum: ['world', 'experience', 'observation', 'opinion'],
+              description: 'Optional Hindsight cognitive network filter',
+            },
+            uriPrefix: {
+              type: 'string',
+              description: 'Optional OpenViking URI prefix filter (e.g. viking://workspace/memories/skills)',
+            },
+            tier: {
+              type: 'string',
+              enum: ['L0', 'L1', 'L2'],
+              description: 'Output granularity: L0 (abstract, default), L1 (overview), or L2 (content)',
+            },
+            limit: {
+              type: 'integer',
+              description: 'Maximum results to return (1-12, default 5)',
+            },
           },
-          uriPrefix: {
-            type: 'string',
-            description: 'Optional OpenViking URI prefix filter (e.g. viking://workspace/memories/skills)',
-          },
-          tier: {
-            type: 'string',
-            enum: ['L0', 'L1', 'L2'],
-            description: 'Output granularity: L0 (abstract, default), L1 (overview), or L2 (content)',
-          },
-          limit: {
-            type: 'integer',
-            minimum: 1,
-            maximum: 12,
-            description: 'Maximum results to return (1-12, default 5)',
-          },
+          required: ['query'],
         },
         output: renderTextOutput,
         execute: safeToolExecute((args, exec) => {
@@ -118,16 +122,19 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
         description:
           'Expand a memory item by full/short ID or viking:// URI at L0 (abstract), L1 (overview), or L2 (full content + sources).',
         parameters: {
-          id: {
-            type: 'string',
-            required: true,
-            description: 'Full memory ID, short code (e.g. m_ab12), or viking:// URI',
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              description: 'Full memory ID, short code (e.g. m_ab12), or viking:// URI',
+            },
+            tier: {
+              type: 'string',
+              enum: ['L0', 'L1', 'L2'],
+              description: 'Detail tier: L0, L1, or L2 (default L2)',
+            },
           },
-          tier: {
-            type: 'string',
-            enum: ['L0', 'L1', 'L2'],
-            description: 'Detail tier: L0, L1, or L2 (default L2)',
-          },
+          required: ['id'],
         },
         output: renderTextOutput,
         execute: safeToolExecute((args, exec) => {
@@ -152,10 +159,14 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
         description:
           'Report whether a referenced memory was helpful or unhelpful in the current session (once per memory revision).',
         parameters: {
-          id: { type: 'string', required: true, description: 'Memory full or short ID' },
-          contentRev: { type: 'integer', minimum: 1, required: true, description: 'Referenced content revision number' },
-          helpful: { type: 'boolean', required: true, description: 'True if helpful, false if unhelpful/wrong' },
-          note: { type: 'string', maxLength: 300, description: 'Optional brief feedback note (max 300 chars)' },
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Memory full or short ID' },
+            contentRev: { type: 'integer', description: 'Referenced content revision number (>= 1)' },
+            helpful: { type: 'boolean', description: 'True if helpful, false if unhelpful/wrong' },
+            note: { type: 'string', description: 'Optional brief feedback note (max 300 chars)' },
+          },
+          required: ['id', 'contentRev', 'helpful'],
         },
         output: renderTextOutput,
         execute: safeToolExecute((args, exec) => {
@@ -183,23 +194,24 @@ export function registerMemoryTools(ctx: any, deps: ToolRegistryDeps): () => voi
         description:
           'Save a candidate memory note for user approval (8-400 chars; rate-limited to 3 per turn).',
         parameters: {
-          content: {
-            type: 'string',
-            required: true,
-            minLength: 8,
-            maxLength: 400,
-            description: 'Concise memory content (8-400 chars)',
+          type: 'object',
+          properties: {
+            content: {
+              type: 'string',
+              description: 'Concise memory content (8-400 chars)',
+            },
+            type: {
+              type: 'string',
+              enum: ['semantic', 'preference', 'procedural', 'failure', 'episodic', 'belief', 'goal'],
+              description: 'Memory category (default semantic)',
+            },
+            scope: {
+              type: 'string',
+              enum: ['workspace', 'session', 'user'],
+              description: 'Visibility scope (default workspace)',
+            },
           },
-          type: {
-            type: 'string',
-            enum: ['semantic', 'preference', 'procedural', 'failure', 'episodic', 'belief', 'goal'],
-            description: 'Memory category (default semantic)',
-          },
-          scope: {
-            type: 'string',
-            enum: ['workspace', 'session', 'user'],
-            description: 'Visibility scope (default workspace)',
-          },
+          required: ['content'],
         },
         output: renderTextOutput,
         execute: safeToolExecute((args, exec) => {

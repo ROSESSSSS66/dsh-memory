@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "icon": "assets/icon.svg",
   "description": "Zero-dependency local-first long-term memory plugin for DeepSeek Desktop (DSH): full in-memory vector matrix + SQLite FTS5 hybrid recall (10k p95 < 10ms), Hindsight & OpenViking insights, 4 lean model tools, optional OpenAI-compatible embeddings, and autonomous background self-evolution.",
   "keywords": [

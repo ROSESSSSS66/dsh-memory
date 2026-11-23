@@ -1,7 +1,7 @@
 # 🧠 DSH Self-Evolving Memory System (`dsh-memory`)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.11.0_Full_Vector_Matrix_%26_Hardened_Studio-indigo?style=flat-square" alt="v0.11.0" />
+  <img src="https://img.shields.io/badge/Version-v0.11.1_Tool_Schema_Hotfix-indigo?style=flat-square" alt="v0.11.1" />
   <img src="https://img.shields.io/badge/Node.js-24%2B-brightgreen?logo=node.js&style=flat-square" alt="Node.js 24+" />
   <img src="https://img.shields.io/badge/TypeScript-5.x_Strict-blue?logo=typescript&style=flat-square" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Storage-node%3Asqlite_%2B_FTS5-orange?logo=sqlite&style=flat-square" alt="SQLite FTS5" />
@@ -82,6 +82,13 @@
 | **Hindsight** (`vectorize-io/hindsight`, 2026) | **四层认知网络 (`World`/`Experience`/`Observation`/`Opinion`)、实体二部图桥接遍历与 `Reflect` 心智模型归纳** | `hindsight.ts` + `channels.ts` + `fuse.ts`：划分四层认知记忆网络并与查询意图对齐；在 `expandGraphNeighbors` 中引入 `seed -> @entity -> neighbor` 低扇出实体二部图桥接遍历；`runHindsightReflect` 基于多会话证据密度与认知倾向 (`Disposition`) 动态校准置信度并自动合成心智模型 (`hindsight.model.*`) |
 | **OpenViking** (`volcengine/OpenViking`, 2026) | **`viking://` 虚拟上下文文件系统与 L0 / L1 / L2 三层渐进式上下文装箱加载** | `viking.ts` + `governor.ts` + `render.ts`：将记忆确定性映射至 `viking://{agent,user,workspace}/...` 语义目录树；在 `governor.ts` 中实现 **L2 (`content`) → L1 (`overview`) → L0 (`summary`)** 三级渐进式 Token 预算降级装箱；支持目录递归检索 (`tree` / `ls`) 与 `.abstract.md` / `.overview.md` 三层目录树无损导入导出 |
 
+### 🩹 v0.11.1 热修：模型工具参数回归标准 JSON Schema
+
+- **根因**：`ctx.tools.register()` 将 `parameters` **原样**作为 JSON Schema 透传给模型，而 `v0.11.0` 源码中 4 个模型工具仍沿用 DSH DSL 写法（扁平属性表 + `required: true`、`minimum` / `maximum` / `minLength` / `maxLength`）。`@deepseek-ai/dsh-tools` 只接受严格的 JSON Schema 子集，源码与发布产物因此发生漂移，从源码重建可能触发工具注册校验失败或参数 Schema 失真。
+- **修复**：`src/dsh/tool-registry.ts` 的 4 个工具全部改为标准对象根 Schema（`type: "object"` + `properties` + `required` 数组）；数值与长度边界继续下沉在既有 Zod 校验层执行，模型侧不再出现不受支持的 `minimum` / `maximum` / `minLength` / `maxLength` 关键字。
+- **回归守卫**：`test/dsh/tools.test.ts` 新增 Schema 契约断言——工具根必须是 `object`，`required` 必须是数组且键存在于 `properties`，属性禁止 DSL 的 `required: true`，属性键仅允许 dsh-tools 支持的白名单字段。
+- **兼容性**：行为与 `v0.11.0` 已发布产物一致，本版本仅修复源码/产物漂移，无需数据库迁移或配置变更。
+
 ### 🆕 v0.11.0 全量架构重构、安全加固与性能跃迁
 - **全量工作区内存向量矩阵 + 远程 Embedding 客户端**：
   - 新增 `src/core/vector-index.ts`：按工作区/会话分区懒加载连续 `Float32Array` 内存矩阵，采用 8x 展开点积与 `PRAGMA data_version + total_changes()` 零表读新鲜度校验，**彻底消除历史 Top-400 SQL 截断盲区**（10k 向量扫描仅 `0.51 ms`，50k 仅 `2.34 ms`）；
@@ -112,7 +119,7 @@
 
 `dsh-memory` 并非单一的向量检索插件，而是将业界前沿 Agent 记忆范式深度融合于纯本地双环引擎之中：
 
-| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.11.0)** |
+| 对比维度 | 传统向量 RAG 插件 | 纯文档记忆 (Cline Memory Bank) | 云端托管记忆 (Mem0 / Zep) | **🧠 `dsh-memory` (v0.11.1)** |
 |---|---|---|---|---|
 | **安装后冷启动** | ❌ 空白库，需手动逐条喂入 | ❌ 需手动编写多份 Markdown | ❌ 空白库，需业务侧自行灌库 | **✅ 零运行时依赖，免 `allowBuilds`，首次启动自动扫描工程并初始化记忆** |
 | **在线检索延迟** | `100 ~ 600ms` (依赖远程 Embedding) | `< 5ms` (全量读取本地文件) | `150 ~ 800ms` (网络往返 API) | **Eval 夹具 `1.9 ms` p95 · 10k 全量 `7.0 ms` p95 · 50k `27.95 ms` p95（纯本地）** |
@@ -196,7 +203,7 @@ flowchart TD
 
 ```text
 dsh-memory/
-├─ package.json                # 插件包元数据、零运行时依赖清单、导出入口与脚本 (v0.11.0)
+├─ package.json                # 插件包元数据、零运行时依赖清单、导出入口与脚本 (v0.11.1)
 ├─ tsconfig.json               # 严格 ESM TypeScript 编译配置
 ├─ tsup.config.ts              # 服务端单文件 ESM 打包与评测 CLI 构建配置
 ├─ vitest.config.ts            # Vitest 测试与 V8 覆盖率配置
@@ -277,7 +284,7 @@ dsh-memory/
 ```bash
 dsh plugin --profile web add "https://github.com/ROSESSSSS66/dsh-memory/releases/latest/download/dsh-memory.tgz"
 # 或指定版本包 / npm 直接安装：
-# npm i https://github.com/ROSESSSSS66/dsh-memory/releases/download/v0.11.0/dsh-memory-0.11.0.tgz
+# npm i https://github.com/ROSESSSSS66/dsh-memory/releases/download/v0.11.1/dsh-memory-0.11.1.tgz
 ```
 
 **方式 B：克隆源码并构建**
@@ -431,7 +438,7 @@ npm run pack:check
 
 ### 评测门禁达成实测对照表
 
-| 验收核心指标 | 官方规约门槛 | `v0.11.0` 实测表现 | 门禁结论 |
+| 验收核心指标 | 官方规约门槛 | `v0.11.1` 实测表现 | 门禁结论 |
 |---|---:|---:|:---:|
 | **自动化测试套件（Unit / Security / UI / Integration）** | 100% 通过 | **75 文件 / 786 用例** · 严格 TS & Biome Lint **0 errors** | ✅ **PASS** |
 | **Recall @ Inject (有效注入召回率)** | $\ge 70\%$ | **99.3% (151 / 152)** · Precision **97.8%** | ✅ **PASS** |
